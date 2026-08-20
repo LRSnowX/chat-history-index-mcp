@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Send local Codex sessions to a canonical writer MCP without staging transcripts."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+import urllib.error
+import urllib.request
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATA_HOME = Path.home() / "Library" / "Application Support" / "chat-history-index-mcp"
+
+
+def cli_path(data_home: Path) -> Path:
+    installed = data_home / "bin" / "chat-history-cli"
+    return installed if installed.is_file() else ROOT / "scripts" / "chat-history-cli"
+
+
+def parse_initial_since(value: str) -> float:
+    try:
+        return float(value)
+    except ValueError:
+        normalized = value if "T" in value else f"{value}T00:00:00+00:00"
+        return datetime.fromisoformat(normalized.replace("Z", "+00:00")).timestamp()
+
+
+def call_writer(url: str, token: str, conversations: list[dict], request_id: int) -> None:
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": "import_conversations",
+                "arguments": {
+                    "conversations": conversations,
+                    "source_label": "remote-codex-collector",
+                },
+            },
+        }
+    ).encode()
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise SystemExit(f"writer MCP returned HTTP {error.code}") from error
+    if "error" in payload:
+        raise SystemExit(f"writer MCP error: {payload['error'].get('message', 'unknown error')}")
+    result = payload.get("result", {})
+    if result.get("isError"):
+        raise SystemExit("writer MCP rejected a Codex import batch")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", required=True, help="Canonical writer MCP URL ending in /mcp")
+    parser.add_argument("--token-env", default="CHAT_HISTORY_WRITER_TOKEN")
+    parser.add_argument("--keychain-service", default="chat-history-index-mcp-writer-remote")
+    parser.add_argument("--keychain-account", default=os.environ.get("USER", ""))
+    parser.add_argument("--data-home", type=Path, default=Path(os.environ.get("CHAT_HISTORY_DATA_HOME", DEFAULT_DATA_HOME)))
+    parser.add_argument("--initial-since", default="2026-04-14")
+    parser.add_argument("--overlap-hours", type=float, default=48)
+    parser.add_argument("--batch-size", type=int, default=50)
+    parser.add_argument("--root", action="append", default=[])
+    args = parser.parse_args()
+    if not 1 <= args.batch_size <= 100:
+        raise SystemExit("--batch-size must be between 1 and 100")
+    token = os.environ.get(args.token_env, "")
+    if not token and Path("/usr/bin/security").is_file() and args.keychain_account:
+        lookup = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-a",
+                args.keychain_account,
+                "-s",
+                args.keychain_service,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if lookup.returncode == 0:
+            token = lookup.stdout.strip()
+    if not token:
+        raise SystemExit(
+            f"missing writer token in {args.token_env} or Keychain service {args.keychain_service}"
+        )
+
+    cache = args.data_home / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    identity = hashlib.sha256(args.url.encode()).hexdigest()[:16]
+    cursor_path = cache / f"codex-remote-sync-{identity}.json"
+    previous = None
+    if cursor_path.is_file():
+        previous = json.loads(cursor_path.read_text()).get("last_success_epoch")
+    cutoff = (
+        float(previous) - args.overlap_hours * 3600
+        if previous is not None
+        else parse_initial_since(args.initial_since)
+    )
+    started_at = time.time()
+    command = [str(cli_path(args.data_home)), "--data-home", str(args.data_home), "export-codex", "--since", str(cutoff)]
+    for root in args.root:
+        command.extend(["--root", root])
+    exported = json.loads(subprocess.run(command, check=True, capture_output=True, text=True).stdout)
+    errors = exported.get("errors", [])
+    if errors:
+        raise SystemExit(f"local Codex export had {len(errors)} parse errors; cursor not advanced")
+    conversations = exported.get("conversations", [])
+    for index in range(0, len(conversations), args.batch_size):
+        call_writer(args.url, token, conversations[index : index + args.batch_size], index // args.batch_size + 1)
+
+    temporary = cursor_path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "last_success_epoch": started_at,
+                "last_success_utc": datetime.fromtimestamp(started_at, timezone.utc).isoformat(),
+                "writer_url_hash": identity,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    os.replace(temporary, cursor_path)
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "conversations_sent": len(conversations),
+                "rollouts_discovered": exported.get("rollouts_discovered", 0),
+                "skipped": exported.get("skipped", 0),
+                "cursor": str(cursor_path),
+            },
+            indent=2,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

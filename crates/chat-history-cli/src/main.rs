@@ -46,6 +46,13 @@ enum Command {
         #[arg(long, default_value_t = false)]
         skip_existing: bool,
     },
+    /// Emit normalized local Codex conversations without writing an index.
+    ExportCodex {
+        #[arg(long = "root")]
+        roots: Vec<PathBuf>,
+        #[arg(long)]
+        since: Option<String>,
+    },
     SyncCodex {
         #[arg(long = "root")]
         roots: Vec<PathBuf>,
@@ -207,6 +214,27 @@ async fn main() -> anyhow::Result<()> {
             print_json(&import_codex_paths(
                 &service, paths, cutoff, batch_size, false,
             )?)?;
+        }
+        Command::ExportCodex { roots, since } => {
+            let cutoff = since.as_deref().map(parse_since).transpose()?;
+            let paths = chat_history_core::codex::discover_rollouts(&codex_roots(roots))?;
+            let discovered = paths.len();
+            let mut conversations = Vec::new();
+            let mut skipped = 0usize;
+            let mut errors = Vec::new();
+            for path in paths {
+                match chat_history_core::codex::parse_rollout(&path, cutoff) {
+                    Ok(Some(conversation)) => conversations.push(conversation),
+                    Ok(None) => skipped += 1,
+                    Err(error) => errors.push(format!("{}: {error}", path.display())),
+                }
+            }
+            print_json(&CodexExportSummary {
+                rollouts_discovered: discovered,
+                conversations,
+                skipped,
+                errors,
+            })?;
         }
         Command::SyncCodex {
             roots,
@@ -406,6 +434,14 @@ struct CodexImportSummary {
     rollouts_discovered: usize,
     conversations_indexed: usize,
     messages_indexed: usize,
+    skipped: usize,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CodexExportSummary {
+    rollouts_discovered: usize,
+    conversations: Vec<NormalizedConversation>,
     skipped: usize,
     errors: Vec<String>,
 }

@@ -12,6 +12,7 @@ __pycache__/
 *.tar.gz
 *.zip
 *.jsonl
+!crates/chat-history-core/tests/fixtures/*.jsonl
 .env
 .env.*
 !.env.example

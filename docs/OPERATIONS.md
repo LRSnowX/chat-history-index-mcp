@@ -42,6 +42,26 @@ openclaw mcp doctor ai-history --probe
 
 The read-only server exposes search, get-conversation, related-conversations, and index-stats tools. It omits import and rebuild tools.
 
+## Trusted remote Codex collectors
+
+Enable a separate writer endpoint on the canonical host. It has its own LaunchAgent, Keychain token, and default port:
+
+```bash
+./scripts/chat-history-service --writer install \
+  --bind TAILSCALE_IP:8766 \
+  --allowed-host TAILSCALE_IP,TAILSCALE_DNS_NAME
+```
+
+The writer label is `local.chat-history-index-mcp-writer`. Inspect it with `./scripts/chat-history-service --writer status` and retrieve its token with `./scripts/chat-history-service --writer token` only while configuring a trusted collector. This endpoint exposes only `import_conversations`; it cannot search, export, rebuild, or inspect the index.
+
+On each secondary Mac, run:
+
+```bash
+./scripts/sync-codex-remote --url http://TAILSCALE_DNS_NAME:8766/mcp
+```
+
+The collector reads `CHAT_HISTORY_WRITER_TOKEN` when provided, otherwise it reads macOS Keychain service `chat-history-index-mcp-writer-remote` for the current account. It parses local Codex rollouts in memory, sends normalized batches, and advances its per-destination cursor only after every batch succeeds. Do not give this token to OpenClaw or ordinary MCP clients.
+
 ## Backups
 
 ```bash

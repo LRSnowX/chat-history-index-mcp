@@ -4,9 +4,9 @@ Use exactly one canonical writer host. SQLite remains on that host's local disk 
 
 ```text
 ChatGPT.app bridge ┐
-Codex collectors ──┼──> canonical writer ──> local SQLite
-Provider imports ──┘                           │
-                                               └──> authenticated read-only MCP over Tailscale
+Codex collectors ──┼──> authenticated writer MCP ──> canonical local SQLite
+Provider imports ──┘                                      │
+                                                          └──> authenticated read-only MCP over Tailscale
                                                       ├── Codex clients
                                                       └── OpenClaw
 ```
@@ -21,6 +21,8 @@ SQLite WAL is not a network replication protocol. Synced folders and two active 
 - Tailnet HTTP MCP: read-only by default, for other machines and OpenClaw.
 - Optional writer HTTP MCP: a separate port and token, enabled only for a trusted remote collector.
 
+The writer service defaults to port 8766 and `local.chat-history-index-mcp-writer`; the reader defaults to port 8765 and `local.chat-history-index-mcp`. They never share a bearer token.
+
 HTTP transport requires both private-network reachability and a bearer token. Store tokens in an OS secret manager. Do not expose the bundled server directly to the public internet.
 
 ## ChatGPT collection
@@ -29,4 +31,4 @@ ChatGPT.app-assisted collection uses supported `list_threads` and paged `read_th
 
 ## Portability
 
-The Git repository contains code and plugin metadata. The managed data home contains binaries, index data, cursors, exports, logs, and backups. `scripts/chat-history-migrate` creates a consistent transfer bundle while excluding the host-local Codex cursor.
+The Git repository contains code and plugin metadata. The managed data home contains binaries, index data, cursors, exports, logs, and backups. `scripts/chat-history-migrate` creates a consistent transfer bundle while excluding the host-local Codex cursor. After a host migration, each secondary Mac uses `scripts/sync-codex-remote` to feed its future local tasks to the canonical writer.

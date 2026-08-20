@@ -13,3 +13,9 @@ Maintain the self-hosted AI Conversation Index in the installed repository. Read
 ```
 
 Initial ChatGPT sidebar backfill is a separate bounded workflow. It must enumerate IDs through the signed-in UI, page every transcript to completion, preserve retry state, and stop on rate limits. Do not disguise that backfill as ordinary incremental collection.
+
+## Secondary Macs
+
+Schedule `scripts/sync-codex-remote --url http://CANONICAL_HOST:8766/mcp` on every secondary Mac that creates Codex tasks. Store the token in macOS Keychain service `chat-history-index-mcp-writer-remote`, or supply `CHAT_HISTORY_WRITER_TOKEN` through a protected environment. The remote collector has its own durable cursor and fails without advancing it when parsing or upload is incomplete.
+
+ChatGPT.app collection remains on the canonical host's Codex automation. OpenClaw and interactive MCP clients remain on the separate read-only endpoint.

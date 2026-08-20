@@ -25,32 +25,55 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 struct ChatHistoryMcp {
     service: IndexService,
-    read_only: bool,
+    access: AccessMode,
     tool_router: ToolRouter<Self>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessMode {
+    Full,
+    ReadOnly,
+    Collector,
+}
+
 impl ChatHistoryMcp {
-    fn new(service: IndexService, read_only: bool) -> Self {
+    fn new(service: IndexService, access: AccessMode) -> Self {
         let mut tool_router = Self::tool_router();
-        if read_only {
-            for name in [
-                "index_export",
-                "import_conversations",
-                "rebuild_embeddings",
-                "rebuild_summaries",
-            ] {
-                tool_router.remove_route(name);
+        match access {
+            AccessMode::Full => {}
+            AccessMode::ReadOnly => {
+                for name in [
+                    "index_export",
+                    "import_conversations",
+                    "rebuild_embeddings",
+                    "rebuild_summaries",
+                ] {
+                    tool_router.remove_route(name);
+                }
+            }
+            AccessMode::Collector => {
+                for name in [
+                    "get_conversation",
+                    "index_export",
+                    "index_stats",
+                    "rebuild_embeddings",
+                    "rebuild_summaries",
+                    "related_conversations",
+                    "search_conversations",
+                ] {
+                    tool_router.remove_route(name);
+                }
             }
         }
         Self {
             service,
-            read_only,
+            access,
             tool_router,
         }
     }
 
     fn require_write(&self) -> Result<(), String> {
-        if self.read_only {
+        if self.access == AccessMode::ReadOnly {
             Err("this MCP endpoint is read-only".to_string())
         } else {
             Ok(())
@@ -315,6 +338,8 @@ struct Args {
     allowed_hosts: Vec<String>,
     #[arg(long, env = "CHAT_HISTORY_ALLOW_WRITES", default_value_t = false)]
     allow_writes: bool,
+    #[arg(long, env = "CHAT_HISTORY_COLLECTOR_ONLY", default_value_t = false)]
+    collector_only: bool,
 }
 
 #[derive(Clone)]
@@ -353,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
     let service = IndexService::with_env(DataHome::from_option(data_home));
     match args.transport {
         Transport::Stdio => {
-            ChatHistoryMcp::new(service, false)
+            ChatHistoryMcp::new(service, AccessMode::Full)
                 .serve(rmcp::transport::stdio())
                 .await?
                 .waiting()
@@ -391,10 +416,16 @@ async fn serve_http(service: IndexService, args: Args) -> anyhow::Result<()> {
         .with_json_response(true)
         .with_allowed_hosts(allowed_hosts)
         .with_cancellation_token(cancellation.child_token());
-    let read_only = !args.allow_writes;
+    let access = if args.collector_only {
+        AccessMode::Collector
+    } else if args.allow_writes {
+        AccessMode::Full
+    } else {
+        AccessMode::ReadOnly
+    };
     let mcp_service: StreamableHttpService<ChatHistoryMcp, LocalSessionManager> =
         StreamableHttpService::new(
-            move || Ok(ChatHistoryMcp::new(service.clone(), read_only)),
+            move || Ok(ChatHistoryMcp::new(service.clone(), access)),
             Default::default(),
             config,
         );

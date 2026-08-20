@@ -19,6 +19,8 @@ Your useful context is split across providers, accounts, exports, and machines. 
 - Normalized JSON/JSONL interchange for additional providers
 - Codex plugin and Git marketplace packaging
 - Authenticated read-only Streamable HTTP MCP over Tailscale
+- Separate authenticated writer endpoint for trusted remote collectors
+- Cursor-safe remote Codex collection from secondary Macs
 - macOS LaunchAgent service management and Keychain-backed bearer tokens
 - Consistent online backups, guarded restore, diagnostics, and host migration bundles
 - No OpenAI API key required for search or local embeddings
@@ -111,10 +113,25 @@ The token is generated into macOS Keychain. Retrieve it only when configuring a 
 
 See `docs/OPERATIONS.md` for Codex and OpenClaw client configuration. Never put the live SQLite/WAL files in iCloud Drive, Google Drive, Dropbox, or another synchronization folder.
 
+To ingest future Codex tasks from a secondary Mac, enable the canonical host's separate writer service and schedule the remote collector on that Mac:
+
+```bash
+# Canonical host; use a different token and port from the read-only service.
+./scripts/chat-history-service --writer install \
+  --bind 100.x.y.z:8766 \
+  --allowed-host 100.x.y.z,host.tailnet-name.ts.net
+
+# Secondary Mac; supply the writer token through a protected environment.
+CHAT_HISTORY_WRITER_TOKEN=... ./scripts/sync-codex-remote \
+  --url http://host.tailnet-name.ts.net:8766/mcp
+```
+
+Only trusted collectors get the writer token, and its endpoint exposes only normalized imports. OpenClaw and interactive clients use the read-only endpoint on port 8765.
+
 ## Architecture
 
 ```text
-Provider collectors ──> one canonical writer ──> local SQLite
+Provider collectors ──> authenticated writer MCP ──> one canonical SQLite
                                                   │
                                                   └── authenticated read-only MCP over Tailscale
                                                         ├── Codex clients

@@ -1,0 +1,4 @@
+{"timestamp":"2026-08-20T12:00:00Z","type":"session_meta","payload":{"id":"synthetic-remote-session","timestamp":"2026-08-20T12:00:00Z"}}
+{"timestamp":"2026-08-20T12:00:01Z","type":"turn_context","payload":{"model":"gpt-test"}}
+{"timestamp":"2026-08-20T12:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Test remote Codex collection."}}
+{"timestamp":"2026-08-20T12:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":"The synthetic collector test passed."}}

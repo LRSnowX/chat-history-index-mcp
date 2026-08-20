@@ -26,6 +26,8 @@ Prefer the bundled MCP tools for search, conversation retrieval, related-convers
 ./scripts/chat-history-cli import-normalized --path conversations.jsonl
 ```
 
+On a secondary Mac, send future local Codex tasks to the canonical host with `scripts/sync-codex-remote --url http://CANONICAL_HOST:8766/mcp`. Store the token in the documented macOS Keychain service or a protected `CHAT_HISTORY_WRITER_TOKEN`. Follow `docs/OPERATIONS.md`; never give the writer token to OpenClaw or ordinary clients.
+
 For app-assisted ChatGPT collection, follow `docs/chatgpt-app-collector.md`. Fetch every `read_thread` cursor until `hasMore` is false, reject truncated or inaccessible conversations, and import through `scripts/import-normalized-stdin BYTE_COUNT`. Stop immediately on rate limiting and preserve pending IDs.
 
 ## Backup and migration

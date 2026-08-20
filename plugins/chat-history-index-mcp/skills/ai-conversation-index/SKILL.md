@@ -30,4 +30,6 @@ Useful commands:
 "$HOME/Library/Application Support/chat-history-index-mcp/bin/chat-history-cli" search "query" --mode hybrid --limit 10
 ```
 
+On a secondary Mac, use the installed `bin/sync-codex-remote` with the canonical writer URL and a protected `CHAT_HISTORY_WRITER_TOKEN`. Keep OpenClaw and ordinary clients on the separate read-only endpoint.
+
 Use `scripts/chat-history-migrate` from the cloned repository for host-to-host migration bundles. Follow `docs/MIGRATION.md` and `docs/AUTOMATION.md` in the repository for cutover and scheduled collection.

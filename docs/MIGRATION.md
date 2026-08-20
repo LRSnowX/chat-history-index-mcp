@@ -57,7 +57,10 @@ Only after comparison succeeds:
 2. Install the destination read-only HTTP service.
 3. Start destination collection automation.
 4. Update Codex and OpenClaw clients to the destination MCP URL and token.
-5. Run one incremental sync and `doctor`.
+5. Start the destination's separate writer endpoint and configure `sync-codex-remote` on every secondary Mac.
+6. Run one incremental sync and `doctor`.
+
+Use port 8765 and the read-only token for OpenClaw and interactive clients. Use port 8766 and the separate writer token only for trusted collectors. Never reuse or print either token in migration logs.
 
 Keep the source database and migration bundle until the destination has completed at least one clean scheduled run.
 

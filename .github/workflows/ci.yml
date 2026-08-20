@@ -24,6 +24,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: python3 scripts/validate-package
+      - run: python3 -m py_compile scripts/sync-codex-remote
+      - run: scripts/test-remote-codex-sync
       - run: >-
           bash -n
           scripts/backfill-all
@@ -36,4 +38,6 @@ jobs:
           scripts/monitor-backfill
           scripts/start-monitor
           scripts/stop-monitor
+          scripts/sync-codex-remote
+          scripts/test-remote-codex-sync
           plugins/chat-history-index-mcp/scripts/chat-history-mcp

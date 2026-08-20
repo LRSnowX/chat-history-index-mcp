@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/chat-history-remote-test.XXXXXX")"
+SERVER_PID=""
+
+cleanup() {
+  if [ -n "$SERVER_PID" ]; then
+    kill "$SERVER_PID" >/dev/null 2>&1 || true
+    wait "$SERVER_PID" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TEST_HOME"
+}
+trap cleanup EXIT
+
+cd "$REPO_ROOT"
+cargo build --quiet --bins
+CHAT_HISTORY_DATA_HOME="$TEST_HOME/server" \
+CHAT_HISTORY_HTTP_TOKEN="synthetic-test-token" \
+  "$REPO_ROOT/target/debug/chat-history-mcp" \
+    --transport http \
+    --bind 127.0.0.1:18878 \
+    --allowed-host 127.0.0.1 \
+    --collector-only \
+    >"$TEST_HOME/server.log" 2>&1 &
+SERVER_PID="$!"
+
+for _ in $(seq 1 50); do
+  if curl --fail --silent --show-error \
+    -o "$TEST_HOME/tools.json" \
+    -X POST http://127.0.0.1:18878/mcp \
+    -H 'Authorization: Bearer synthetic-test-token' \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    --data-binary '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+
+python3 - "$TEST_HOME/tools.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+assert [tool["name"] for tool in payload["result"]["tools"]] == ["import_conversations"]
+PY
+
+CHAT_HISTORY_WRITER_TOKEN="synthetic-test-token" \
+  "$REPO_ROOT/scripts/sync-codex-remote" \
+    --url http://127.0.0.1:18878/mcp \
+    --data-home "$TEST_HOME/client" \
+    --root "$REPO_ROOT/crates/chat-history-core/tests/fixtures/codex-rollout.jsonl" \
+    --initial-since 2026-01-01 >/dev/null
+
+CHAT_HISTORY_WRITER_TOKEN="synthetic-test-token" \
+  "$REPO_ROOT/scripts/sync-codex-remote" \
+    --url http://127.0.0.1:18878/mcp \
+    --data-home "$TEST_HOME/client" \
+    --root "$REPO_ROOT/crates/chat-history-core/tests/fixtures/codex-rollout.jsonl" \
+    --initial-since 2026-01-01 >/dev/null
+
+"$REPO_ROOT/target/debug/chat-history-cli" \
+  --data-home "$TEST_HOME/server" doctor >"$TEST_HOME/doctor.json"
+python3 - "$TEST_HOME/doctor.json" <<'PY'
+import json, sys
+health = json.load(open(sys.argv[1]))
+assert health["integrity_check"] == "ok"
+assert health["conversations"] == 1
+assert health["messages"] == 2
+assert health["sources"]["codex"]["conversations"] == 1
+PY
+
+echo "Remote Codex collector integration passed."
