@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+CLI="$SCRIPT_DIR/chat-history-cli"
+DB_PATH="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}/db/index.sqlite3"
+STATUS_DIR="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}/logs"
+STATUS_FILE="$STATUS_DIR/backfill-status.json"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+log() {
+  printf '[%s] %s\n' "$(date)" "$*"
+}
+
+count_sql() {
+  sqlite3 "$DB_PATH" "$1"
+}
+
+write_status() {
+  local phase="$1"
+  local state="$2"
+  mkdir -p "$STATUS_DIR"
+  cat > "$STATUS_FILE" <<EOF
+{
+  "phase": "$phase",
+  "state": "$state",
+  "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "summaries_complete": $(count_sql "select count(*) from conversations where summary_json is not null;"),
+  "embeddings_complete": $(count_sql "select count(*) from conversations where embedding_blob is not null;"),
+  "conversations_total": $(count_sql "select count(*) from conversations;")
+}
+EOF
+}
+
+notify_user() {
+  local title="$1"
+  local message="$2"
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"$message\" with title \"$title\"" >/dev/null 2>&1 || true
+  fi
+}
+
+mkdir -p "$STATUS_DIR"
+write_status "summary" "running"
+log "starting summarize-missing"
+"$CLI" summarize-missing
+log "summaries complete: $(count_sql "select count(*) from conversations where summary_json is not null;")"
+
+write_status "embedding" "running"
+log "starting embed-missing"
+"$CLI" embed-missing
+log "embeddings complete: $(count_sql "select count(*) from conversations where embedding_blob is not null;")"
+
+write_status "complete" "complete"
+notify_user "Chat History Index" "Backfill complete."
+log "backfill complete"

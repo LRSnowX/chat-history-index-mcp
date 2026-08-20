@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1090
+  . "$HOME/.cargo/env"
+fi
+
+export CHAT_HISTORY_DATA_HOME="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}"
+
+exec cargo run --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p chat-history-mcp -- "$@"

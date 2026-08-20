@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LABEL="${CHAT_HISTORY_MONITOR_LABEL:-local.chat_history_index.monitor}"
+LEGACY_BACKFILL_LABEL="${CHAT_HISTORY_BACKFILL_LABEL:-local.chat_history_index.backfill}"
+
+launchctl remove "$LEGACY_BACKFILL_LABEL" >/dev/null 2>&1 || true
+launchctl remove "$LABEL" >/dev/null 2>&1 || true

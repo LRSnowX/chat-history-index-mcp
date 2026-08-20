@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DATA_HOME="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}"
+BINARY="$DATA_HOME/bin/chat-history-mcp"
+if [ -x "$BINARY" ]; then
+  exec "$BINARY" "$@"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+if [ -x "$REPO_ROOT/target/release/chat-history-mcp" ]; then
+  exec "$REPO_ROOT/target/release/chat-history-mcp" "$@"
+fi
+
+echo "AI Conversation Index runtime is not installed. Run scripts/install-self-hosted from the marketplace repository." >&2
+exit 1

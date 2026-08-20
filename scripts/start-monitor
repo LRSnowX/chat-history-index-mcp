@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+DATA_HOME="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LOG_DIR="$DATA_HOME/logs"
+LABEL="${CHAT_HISTORY_MONITOR_LABEL:-local.chat_history_index.monitor}"
+LEGACY_BACKFILL_LABEL="${CHAT_HISTORY_BACKFILL_LABEL:-local.chat_history_index.backfill}"
+mkdir -p "$LOG_DIR"
+
+launchctl remove "$LEGACY_BACKFILL_LABEL" >/dev/null 2>&1 || true
+launchctl remove "$LABEL" >/dev/null 2>&1 || true
+
+LOG_FILE="$LOG_DIR/monitor-backfill-$(date +%Y%m%d-%H%M%S).log"
+launchctl submit -l "$LABEL" -o "$LOG_FILE" -e "$LOG_FILE" -- "$SCRIPT_DIR/monitor-backfill"
+
+printf '%s\n%s\n' "$LABEL" "$LOG_FILE"

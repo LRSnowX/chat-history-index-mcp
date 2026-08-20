@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "ai-conversation-index": {
+      "title": "AI Conversation Index",
+      "description": "Search and maintain a private multi-provider AI conversation index.",
+      "cwd": ".",
+      "command": "./scripts/chat-history-mcp",
+      "args": [],
+      "env_vars": [
+        "CHAT_HISTORY_DATA_HOME",
+        "CODEX_BIN",
+        "HOME",
+        "PATH"
+      ],
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 3600
+    }
+  }
+}

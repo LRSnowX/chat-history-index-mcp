@@ -1,0 +1,25 @@
+[
+  {
+    "source": "fixture-provider",
+    "source_instance": "test",
+    "source_conversation_id": "fixture-conversation-1",
+    "title": "Migration fixture",
+    "create_time": 1700000000,
+    "update_time": 1700000100,
+    "model": "fixture-model",
+    "messages": [
+      {
+        "message_id": "fixture-message-1",
+        "role": "user",
+        "create_time": 1700000000,
+        "text": "Can this index survive a host migration?"
+      },
+      {
+        "message_id": "fixture-message-2",
+        "role": "assistant",
+        "create_time": 1700000100,
+        "text": "Yes."
+      }
+    ]
+  }
+]

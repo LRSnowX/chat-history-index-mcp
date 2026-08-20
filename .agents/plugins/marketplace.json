@@ -1,0 +1,20 @@
+{
+  "name": "universal-ai-history",
+  "interface": {
+    "displayName": "Universal AI History"
+  },
+  "plugins": [
+    {
+      "name": "chat-history-index-mcp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/chat-history-index-mcp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

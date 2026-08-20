@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Create and restore portable, integrity-checked host migration bundles."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tarfile
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATA_HOME = Path.home() / "Library" / "Application Support" / "chat-history-index-mcp"
+EXCLUDED_CACHE_FILES = {"codex-sync-cursor.json"}
+
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def cli(data_home: Path, *args: str) -> None:
+    installed = data_home / "bin" / "chat-history-cli"
+    command = installed if installed.is_file() else ROOT / "scripts" / "chat-history-cli"
+    subprocess.run([str(command), "--data-home", str(data_home), *args], check=True)
+
+
+def export_bundle(data_home: Path, output: Path, include_source_archive: bool) -> None:
+    output = output.resolve()
+    if output.exists():
+        raise SystemExit(f"refusing to overwrite existing bundle: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="chat-history-migration-") as temporary:
+        staging = Path(temporary) / "chat-history-index-migration"
+        staging.mkdir()
+        database = staging / "index.sqlite3"
+        cli(data_home, "backup", "--output", str(database))
+
+        cache_target = staging / "cache"
+        cache_source = data_home / "cache"
+        if cache_source.is_dir():
+            for source in cache_source.rglob("*"):
+                if not source.is_file() or source.name in EXCLUDED_CACHE_FILES:
+                    continue
+                relative = source.relative_to(cache_source)
+                target = cache_target / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+
+        source_zip = data_home / "sources" / "openai-export.zip"
+        if include_source_archive and source_zip.is_file():
+            target = staging / "sources" / source_zip.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_zip, target)
+
+        files = {
+            str(path.relative_to(staging)): {"sha256": digest(path), "bytes": path.stat().st_size}
+            for path in sorted(staging.rglob("*"))
+            if path.is_file()
+        }
+        manifest = {
+            "format_version": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "excluded_host_local_state": sorted(EXCLUDED_CACHE_FILES),
+            "files": files,
+        }
+        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        with tarfile.open(output, "w:gz") as archive:
+            archive.add(staging, arcname=staging.name)
+    output.chmod(0o600)
+    print(json.dumps({"status": "ok", "bundle": str(output), "sha256": digest(output)}, indent=2))
+
+
+def safe_extract(archive: tarfile.TarFile, destination: Path) -> None:
+    root = destination.resolve()
+    for member in archive.getmembers():
+        if member.issym() or member.islnk() or member.isdev():
+            raise SystemExit(f"unsupported archive member type: {member.name}")
+        target = (destination / member.name).resolve()
+        if root not in target.parents and target != root:
+            raise SystemExit(f"unsafe archive member: {member.name}")
+    archive.extractall(destination)
+
+
+def import_bundle(data_home: Path, bundle: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="chat-history-restore-") as temporary:
+        root = Path(temporary)
+        with tarfile.open(bundle, "r:gz") as archive:
+            safe_extract(archive, root)
+        staging = root / "chat-history-index-migration"
+        manifest = json.loads((staging / "manifest.json").read_text())
+        if manifest.get("format_version") != 1:
+            raise SystemExit("unsupported migration bundle version")
+        for relative, metadata in manifest["files"].items():
+            path = staging / relative
+            if not path.is_file() or digest(path) != metadata["sha256"]:
+                raise SystemExit(f"migration checksum failed: {relative}")
+
+        cli(data_home, "restore", "--input", str(staging / "index.sqlite3"), "--confirm-writer-stopped")
+        cache_source = staging / "cache"
+        cache_target = data_home / "cache"
+        if cache_source.is_dir():
+            backup_root = cache_target / "pre-migration" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            for source in cache_source.rglob("*"):
+                if not source.is_file():
+                    continue
+                relative = source.relative_to(cache_source)
+                target = cache_target / relative
+                if target.exists():
+                    previous = backup_root / relative
+                    previous.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target, previous)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+
+        source_zip = staging / "sources" / "openai-export.zip"
+        if source_zip.is_file():
+            target = data_home / "sources" / source_zip.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.copy2(source_zip, target)
+        cli(data_home, "doctor")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data-home",
+        type=Path,
+        default=Path(os.environ.get("CHAT_HISTORY_DATA_HOME", DEFAULT_DATA_HOME)),
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    export = subparsers.add_parser("export")
+    export.add_argument("--output", required=True, type=Path)
+    export.add_argument("--include-source-archive", action="store_true")
+    restore = subparsers.add_parser("import")
+    restore.add_argument("--bundle", required=True, type=Path)
+    args = parser.parse_args()
+    if args.command == "export":
+        export_bundle(args.data_home, args.output, args.include_source_archive)
+    else:
+        import_bundle(args.data_home, args.bundle)
+
+
+if __name__ == "__main__":
+    main()

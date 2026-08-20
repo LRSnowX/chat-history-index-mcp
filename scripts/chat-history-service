@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LABEL="local.chat-history-index-mcp"
+DATA_HOME="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+KEYCHAIN_SERVICE="chat-history-index-mcp-http"
+KEYCHAIN_ACCOUNT="$(id -un)"
+
+usage() {
+  echo "usage: $0 install [--bind IP:PORT] [--allowed-host HOST[,HOST...]] | start | stop | restart | status | token | uninstall" >&2
+}
+
+COMMAND="${1:-}"
+[ -n "$COMMAND" ] || { usage; exit 2; }
+shift
+
+case "$COMMAND" in
+  install)
+    BIND="127.0.0.1:8765"
+    ALLOWED_HOSTS="localhost,127.0.0.1"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --bind) BIND="$2"; shift 2 ;;
+        --allowed-host) ALLOWED_HOSTS="$2"; shift 2 ;;
+        *) usage; exit 2 ;;
+      esac
+    done
+    BIND_HOST="${BIND%:*}"
+    BIND_PORT="${BIND##*:}"
+    [ -n "$BIND_HOST" ] && [[ "$BIND_PORT" =~ ^[0-9]+$ ]] || { echo "invalid --bind value: $BIND" >&2; exit 2; }
+    [ -n "${ALLOWED_HOSTS//,/}" ] || { echo "--allowed-host must include at least one host" >&2; exit 2; }
+    [ -x "$DATA_HOME/bin/chat-history-mcp" ] || { echo "run scripts/install-self-hosted first" >&2; exit 1; }
+    /bin/mkdir -p "$HOME/Library/LaunchAgents" "$DATA_HOME/logs"
+    if ! /usr/bin/security find-generic-password -a "$KEYCHAIN_ACCOUNT" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
+      TOKEN="$(/usr/bin/openssl rand -hex 32)"
+      /usr/bin/security add-generic-password -U -a "$KEYCHAIN_ACCOUNT" -s "$KEYCHAIN_SERVICE" -w "$TOKEN" >/dev/null
+    fi
+    /usr/bin/python3 - "$PLIST" "$LABEL" "$DATA_HOME" "$BIND" "$ALLOWED_HOSTS" "$KEYCHAIN_SERVICE" <<'PY'
+import plistlib, sys
+path, label, data_home, bind, hosts, keychain = sys.argv[1:]
+payload = {
+    "Label": label,
+    "ProgramArguments": [f"{data_home}/bin/chat-history-http-service"],
+    "EnvironmentVariables": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "CHAT_HISTORY_DATA_HOME": data_home,
+        "CHAT_HISTORY_HTTP_BIND": bind,
+        "CHAT_HISTORY_ALLOWED_HOSTS": hosts,
+        "CHAT_HISTORY_KEYCHAIN_SERVICE": keychain,
+    },
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ProcessType": "Background",
+    "StandardOutPath": f"{data_home}/logs/http-service.log",
+    "StandardErrorPath": f"{data_home}/logs/http-service.error.log",
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle, sort_keys=True)
+PY
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+    echo "Installed and started $LABEL"
+    ;;
+  start)
+    if ! launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+      launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    fi
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+    ;;
+  stop) launchctl bootout "gui/$(id -u)/$LABEL" ;;
+  restart)
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+    ;;
+  status) launchctl print "gui/$(id -u)/$LABEL" ;;
+  token)
+    echo "Warning: this prints the read-only MCP bearer token." >&2
+    /usr/bin/security find-generic-password -a "$KEYCHAIN_ACCOUNT" -s "$KEYCHAIN_SERVICE" -w
+    ;;
+  uninstall)
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    /bin/rm -f "$PLIST"
+    echo "Removed $LABEL; index data and Keychain token were preserved."
+    ;;
+  *) usage; exit 2 ;;
+esac

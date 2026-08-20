@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: $0 BYTE_COUNT" >&2
+  exit 2
+fi
+
+if [ -t 0 ]; then
+  stty -echo -icanon min 1 time 0
+fi
+
+exec "$SCRIPT_DIR/chat-history-cli" import-normalized --path - --stdin-bytes "$1"

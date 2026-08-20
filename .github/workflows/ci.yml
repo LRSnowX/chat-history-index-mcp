@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: python3 scripts/validate-package
+      - run: >-
+          bash -n
+          scripts/backfill-all
+          scripts/chat-history-cli
+          scripts/chat-history-http-service
+          scripts/chat-history-mcp
+          scripts/chat-history-service
+          scripts/import-normalized-stdin
+          scripts/install-self-hosted
+          scripts/monitor-backfill
+          scripts/start-monitor
+          scripts/stop-monitor
+          plugins/chat-history-index-mcp/scripts/chat-history-mcp

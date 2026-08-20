@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+CLI="$SCRIPT_DIR/chat-history-cli"
+DATA_HOME="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}"
+DB_PATH="$DATA_HOME/db/index.sqlite3"
+LOG_DIR="$DATA_HOME/logs"
+STATUS_FILE="$LOG_DIR/backfill-status.json"
+SELF_LABEL="${CHAT_HISTORY_MONITOR_LABEL:-local.chat_history_index.monitor}"
+LEGACY_BACKFILL_LABEL="${CHAT_HISTORY_BACKFILL_LABEL:-local.chat_history_index.backfill}"
+SUMMARY_BATCH_LIMIT="${SUMMARY_BATCH_LIMIT:-5}"
+EMBED_BATCH_LIMIT="${EMBED_BATCH_LIMIT:-64}"
+MONITOR_SLEEP_SECONDS="${MONITOR_SLEEP_SECONDS:-20}"
+STALE_JOB_MINUTES="${STALE_JOB_MINUTES:-20}"
+
+mkdir -p "$LOG_DIR"
+
+log() {
+  printf '[%s] %s\n' "$(date)" "$*"
+}
+
+sql_scalar() {
+  sqlite3 "$DB_PATH" "$1"
+}
+
+write_status() {
+  local phase="$1"
+  local state="$2"
+  local last_action="$3"
+  cat > "$STATUS_FILE" <<EOF
+{
+  "phase": "$phase",
+  "state": "$state",
+  "last_action": "$(printf '%s' "$last_action" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])')",
+  "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "summaries_complete": $(sql_scalar "select count(*) from conversations where summary_json is not null;"),
+  "embeddings_complete": $(sql_scalar "select count(*) from conversations where embedding_blob is not null;"),
+  "conversations_total": $(sql_scalar "select count(*) from conversations;"),
+  "summary_running": $(sql_scalar "select count(*) from jobs where kind = 'summary' and status = 'running';"),
+  "summary_failed": $(sql_scalar "select count(*) from jobs where kind = 'summary' and status = 'failed';"),
+  "embedding_running": $(sql_scalar "select count(*) from jobs where kind = 'embedding' and status = 'running';"),
+  "embedding_failed": $(sql_scalar "select count(*) from jobs where kind = 'embedding' and status = 'failed';")
+}
+EOF
+}
+
+notify_user() {
+  local title="$1"
+  local message="$2"
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"$message\" with title \"$title\"" >/dev/null 2>&1 || true
+  fi
+}
+
+reset_stale_jobs() {
+  sqlite3 "$DB_PATH" <<SQL
+BEGIN;
+UPDATE jobs
+SET status = 'failed',
+    last_error = 'monitor reset stale running summary job after ${STALE_JOB_MINUTES} minutes',
+    updated_at = CURRENT_TIMESTAMP
+WHERE kind = 'summary'
+  AND status = 'running'
+  AND updated_at < datetime('now', '-${STALE_JOB_MINUTES} minutes');
+SELECT changes();
+UPDATE jobs
+SET status = 'failed',
+    last_error = 'monitor reset stale running embedding job after ${STALE_JOB_MINUTES} minutes',
+    updated_at = CURRENT_TIMESTAMP
+WHERE kind = 'embedding'
+  AND status = 'running'
+  AND updated_at < datetime('now', '-${STALE_JOB_MINUTES} minutes');
+SELECT changes();
+COMMIT;
+SQL
+}
+
+reset_all_running_jobs() {
+  sqlite3 "$DB_PATH" <<SQL
+BEGIN;
+UPDATE jobs
+SET status = 'failed',
+    last_error = 'monitor startup reset previously running summary job',
+    updated_at = CURRENT_TIMESTAMP
+WHERE kind = 'summary'
+  AND status = 'running';
+SELECT changes();
+UPDATE jobs
+SET status = 'failed',
+    last_error = 'monitor startup reset previously running embedding job',
+    updated_at = CURRENT_TIMESTAMP
+WHERE kind = 'embedding'
+  AND status = 'running';
+SELECT changes();
+COMMIT;
+SQL
+}
+
+remove_legacy_backfill() {
+  launchctl remove "$LEGACY_BACKFILL_LABEL" >/dev/null 2>&1 || true
+}
+
+remove_self() {
+  launchctl remove "$SELF_LABEL" >/dev/null 2>&1 || true
+}
+
+run_batch() {
+  local phase="$1"
+  local limit="$2"
+  local subcommand
+  case "$phase" in
+    summary) subcommand="summarize-missing" ;;
+    embedding) subcommand="embed-missing" ;;
+    *) echo "unknown phase: $phase" >&2; return 1 ;;
+  esac
+  local output
+  if output="$("$CLI" "$subcommand" --limit "$limit" 2>&1)"; then
+    log "${phase} batch output: ${output}"
+    return 0
+  fi
+  log "${phase} batch failed: ${output}"
+  return 1
+}
+
+main() {
+  remove_legacy_backfill
+  local startup_reset
+  startup_reset="$(reset_all_running_jobs | awk '{sum += $1} END {print sum + 0}')"
+  if [ "$startup_reset" -gt 0 ]; then
+    log "reset ${startup_reset} running jobs on startup"
+  fi
+  notify_user "Chat History Index" "Backfill monitor started."
+  local stalled_cycles=0
+
+  while true; do
+    local total summaries embeddings before after repaired summary_failed embedding_failed
+    local phase_label summary_attempted embedding_attempted
+    total="$(sql_scalar "select count(*) from conversations;")"
+    summaries="$(sql_scalar "select count(*) from conversations where summary_json is not null;")"
+    embeddings="$(sql_scalar "select count(*) from conversations where embedding_blob is not null;")"
+
+    if [ "$summaries" -ge "$total" ] && [ "$embeddings" -ge "$total" ]; then
+      write_status "complete" "complete" "all conversations summarized and embedded"
+      log "backfill complete"
+      notify_user "Chat History Index" "Backfill complete."
+      remove_legacy_backfill
+      remove_self
+      exit 0
+    fi
+
+    repaired="$(reset_stale_jobs | awk '{sum += $1} END {print sum + 0}')"
+    if [ "$repaired" -gt 0 ]; then
+      log "reset ${repaired} stale running jobs"
+    fi
+
+    before="${summaries}:${embeddings}"
+    phase_label="idle"
+    summary_attempted=0
+    embedding_attempted=0
+
+    if [ "$summaries" -lt "$total" ]; then
+      phase_label="summary"
+      summary_attempted=1
+      write_status "$phase_label" "running" "processing summary batch"
+      run_batch "summary" "$SUMMARY_BATCH_LIMIT" || true
+      summaries="$(sql_scalar "select count(*) from conversations where summary_json is not null;")"
+    fi
+
+    if [ "$embeddings" -lt "$summaries" ]; then
+      if [ "$summary_attempted" -eq 1 ]; then
+        phase_label="summary+embedding"
+      else
+        phase_label="embedding"
+      fi
+      embedding_attempted=1
+      write_status "$phase_label" "running" "processing embedding batch"
+      run_batch "embedding" "$EMBED_BATCH_LIMIT" || true
+    fi
+
+    if [ "$summary_attempted" -eq 0 ] && [ "$embedding_attempted" -eq 0 ]; then
+      phase_label="idle"
+    fi
+
+    summaries="$(sql_scalar "select count(*) from conversations where summary_json is not null;")"
+    embeddings="$(sql_scalar "select count(*) from conversations where embedding_blob is not null;")"
+    summary_failed="$(sql_scalar "select count(*) from jobs where kind = 'summary' and status = 'failed';")"
+    embedding_failed="$(sql_scalar "select count(*) from jobs where kind = 'embedding' and status = 'failed';")"
+    after="${summaries}:${embeddings}"
+
+    if [ "$after" = "$before" ]; then
+      stalled_cycles=$((stalled_cycles + 1))
+      log "no net progress this cycle; stalled_cycles=${stalled_cycles} summary_failed=${summary_failed} embedding_failed=${embedding_failed}"
+    else
+      stalled_cycles=0
+      log "progress: summaries=${summaries}/${total} embeddings=${embeddings}/${total}"
+    fi
+
+    write_status "$phase_label" "running" "last cycle summaries=${summaries}/${total} embeddings=${embeddings}/${total} stalled_cycles=${stalled_cycles}"
+
+    sleep "$MONITOR_SLEEP_SECONDS"
+  done
+}
+
+main "$@"

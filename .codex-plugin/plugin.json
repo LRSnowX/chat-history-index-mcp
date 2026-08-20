@@ -1,0 +1,38 @@
+{
+  "name": "chat-history-index-mcp",
+  "version": "0.3.0",
+  "description": "Search and maintain a private multi-provider AI conversation index.",
+  "author": {
+    "name": "David Beveridge",
+    "url": "https://github.com/davidjbeveridge"
+  },
+  "homepage": "https://github.com/davidjbeveridge/chat-history-index-mcp#readme",
+  "repository": "https://github.com/davidjbeveridge/chat-history-index-mcp",
+  "license": "MIT",
+  "keywords": [
+    "conversation-history",
+    "chatgpt",
+    "codex",
+    "gemini",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "AI Conversation Index",
+    "shortDescription": "Search private AI conversations across providers.",
+    "longDescription": "Indexes ChatGPT exports, Codex sessions, and normalized records from Gemini and other AI tools without replacing an existing index.",
+    "developerName": "David Beveridge",
+    "category": "Productivity",
+    "websiteURL": "https://github.com/davidjbeveridge/chat-history-index-mcp",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Search my AI conversation history.",
+      "Show recent conversations by provider.",
+      "Import new local Codex sessions."
+    ]
+  }
+}

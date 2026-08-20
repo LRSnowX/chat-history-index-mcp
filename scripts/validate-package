@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Offline validation for the repository marketplace and plugin package."""
+
+import json
+from pathlib import Path
+import re
+
+
+root = Path(__file__).resolve().parent.parent
+marketplace_path = root / ".agents" / "plugins" / "marketplace.json"
+marketplace = json.loads(marketplace_path.read_text())
+assert marketplace["name"] == "universal-ai-history"
+assert len(marketplace["plugins"]) == 1
+entry = marketplace["plugins"][0]
+assert entry["name"] == "chat-history-index-mcp"
+assert entry["policy"]["installation"] == "AVAILABLE"
+assert entry["policy"]["authentication"] == "ON_INSTALL"
+
+plugin = (root / entry["source"]["path"]).resolve()
+assert root in plugin.parents
+manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
+root_manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text())
+assert manifest["name"] == entry["name"]
+assert root_manifest["name"] == manifest["name"]
+assert root_manifest["version"] == manifest["version"]
+assert re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", manifest["version"])
+for field in ["description", "author", "interface", "mcpServers", "skills"]:
+    assert manifest.get(field), f"missing manifest field: {field}"
+assert (plugin / manifest["mcpServers"]).is_file()
+assert (plugin / manifest["skills"]).is_dir()
+assert not any("[TODO:" in path.read_text(errors="ignore") for path in plugin.rglob("*") if path.is_file())
+print(f"Package validation passed: {plugin}")

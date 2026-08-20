@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+DATA_HOME="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}"
+KEYCHAIN_SERVICE="${CHAT_HISTORY_KEYCHAIN_SERVICE:-chat-history-index-mcp-http}"
+KEYCHAIN_ACCOUNT="${CHAT_HISTORY_KEYCHAIN_ACCOUNT:-$(id -un)}"
+TOKEN="${CHAT_HISTORY_HTTP_TOKEN:-}"
+
+if [ -z "$TOKEN" ]; then
+  TOKEN="$(/usr/bin/security find-generic-password -a "$KEYCHAIN_ACCOUNT" -s "$KEYCHAIN_SERVICE" -w)"
+fi
+export CHAT_HISTORY_HTTP_TOKEN="$TOKEN"
+export CHAT_HISTORY_DATA_HOME="$DATA_HOME"
+
+TAILSCALE_BIN="${TAILSCALE_BIN:-}"
+if [ -z "$TAILSCALE_BIN" ] && command -v tailscale >/dev/null 2>&1; then
+  TAILSCALE_BIN="$(command -v tailscale)"
+elif [ -z "$TAILSCALE_BIN" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+  TAILSCALE_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+fi
+
+BIND="${CHAT_HISTORY_HTTP_BIND:-}"
+if [ -z "$BIND" ] && [ -n "$TAILSCALE_BIN" ]; then
+  BIND="$("$TAILSCALE_BIN" ip -4 2>/dev/null | head -1):8765"
+fi
+BIND="${BIND:-127.0.0.1:8765}"
+
+ALLOWED_HOSTS="${CHAT_HISTORY_ALLOWED_HOSTS:-}"
+if [ -z "$ALLOWED_HOSTS" ] && [ -n "$TAILSCALE_BIN" ]; then
+  TAILSCALE_DNS="$("$TAILSCALE_BIN" status --json 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("Self", {}).get("DNSName", "").rstrip("."))' 2>/dev/null || true)"
+  ALLOWED_HOSTS="${BIND%:*}"
+  if [ -n "$TAILSCALE_DNS" ]; then
+    ALLOWED_HOSTS="$ALLOWED_HOSTS,$TAILSCALE_DNS"
+  fi
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+BINARY="${CHAT_HISTORY_MCP_BIN:-$DATA_HOME/bin/chat-history-mcp}"
+if [ ! -x "$BINARY" ]; then
+  BINARY="$REPO_ROOT/target/release/chat-history-mcp"
+fi
+if [ ! -x "$BINARY" ]; then
+  echo "chat-history-mcp is not installed; run scripts/install-self-hosted" >&2
+  exit 1
+fi
+
+ARGS=(--transport http --bind "$BIND")
+if [ -n "$ALLOWED_HOSTS" ]; then
+  IFS=',' read -r -a HOSTS <<< "$ALLOWED_HOSTS"
+  for HOST in "${HOSTS[@]}"; do
+    [ -n "$HOST" ] && ARGS+=(--allowed-host "$HOST")
+  done
+fi
+if [ "${CHAT_HISTORY_ALLOW_WRITES:-false}" = "true" ]; then
+  ARGS+=(--allow-writes)
+fi
+
+exec "$BINARY" "${ARGS[@]}"
