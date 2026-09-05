@@ -63,6 +63,28 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         batch_size: usize,
     },
+    /// Import Gemini CLI session recordings with a durable overlap cursor.
+    SyncGemini {
+        #[arg(long = "root")]
+        roots: Vec<PathBuf>,
+        #[arg(long, default_value = "2026-04-14")]
+        initial_since: String,
+        #[arg(long, default_value_t = 48)]
+        overlap_hours: u64,
+        #[arg(long, default_value_t = 100)]
+        batch_size: usize,
+    },
+    /// Import plaintext Antigravity transcript exports with a durable overlap cursor.
+    SyncAntigravity {
+        #[arg(long = "root")]
+        roots: Vec<PathBuf>,
+        #[arg(long, default_value = "2026-04-14")]
+        initial_since: String,
+        #[arg(long, default_value_t = 48)]
+        overlap_hours: u64,
+        #[arg(long, default_value_t = 100)]
+        batch_size: usize,
+    },
     ImportNormalized {
         #[arg(long)]
         path: PathBuf,
@@ -245,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
             let paths = data_home.paths();
             paths.ensure()?;
             let cursor_path = paths.cache_dir.join("codex-sync-cursor.json");
-            let previous = read_codex_cursor(&cursor_path)?;
+            let previous = read_cursor(&cursor_path)?;
             let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
             let cutoff = previous
                 .map(|epoch| epoch - overlap_hours as f64 * 3600.0)
@@ -264,6 +286,46 @@ async fn main() -> anyhow::Result<()> {
                     "last_success_epoch": started_at,
                     "last_success_utc": chrono::DateTime::from_timestamp(started_at as i64, 0).map(|value| value.to_rfc3339()),
                 }))?,
+            )?;
+            print_json(&report)?;
+        }
+        Command::SyncGemini {
+            roots,
+            initial_since,
+            overlap_hours,
+            batch_size,
+        } => {
+            let report = sync_provider(
+                &data_home,
+                &service,
+                "gemini-sync-cursor.json",
+                "gemini-cli-sessions",
+                gemini_roots(roots),
+                initial_since,
+                overlap_hours,
+                batch_size,
+                chat_history_core::gemini::discover_sessions,
+                chat_history_core::gemini::parse_session,
+            )?;
+            print_json(&report)?;
+        }
+        Command::SyncAntigravity {
+            roots,
+            initial_since,
+            overlap_hours,
+            batch_size,
+        } => {
+            let report = sync_provider(
+                &data_home,
+                &service,
+                "antigravity-sync-cursor.json",
+                "antigravity-transcripts",
+                antigravity_roots(roots),
+                initial_since,
+                overlap_hours,
+                batch_size,
+                chat_history_core::antigravity::discover_transcripts,
+                chat_history_core::antigravity::parse_transcript,
             )?;
             print_json(&report)?;
         }
@@ -446,6 +508,15 @@ struct CodexExportSummary {
     errors: Vec<String>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct ProviderSyncSummary {
+    files_discovered: usize,
+    conversations_indexed: usize,
+    messages_indexed: usize,
+    skipped: usize,
+    errors: Vec<String>,
+}
+
 fn codex_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
     if !roots.is_empty() {
         return roots;
@@ -457,6 +528,133 @@ fn codex_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
         base.join(".codex/sessions"),
         base.join(".codex/archived_sessions"),
     ]
+}
+
+fn gemini_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    if !roots.is_empty() {
+        return roots;
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    vec![base.join(".gemini/tmp")]
+}
+
+fn antigravity_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    if !roots.is_empty() {
+        return roots;
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    vec![
+        base.join(".antigravity-cli/projects"),
+        base.join(".gemini/antigravity-cli/brain"),
+        base.join(".gemini/antigravity-ide/brain"),
+        base.join(".gemini/antigravity/brain"),
+    ]
+}
+
+type DiscoverProvider = fn(&[PathBuf]) -> anyhow::Result<Vec<PathBuf>>;
+type ParseProvider = fn(&Path, Option<f64>) -> anyhow::Result<Option<NormalizedConversation>>;
+
+#[allow(clippy::too_many_arguments)]
+fn sync_provider(
+    data_home: &DataHome,
+    service: &IndexService,
+    cursor_name: &str,
+    source_label: &str,
+    roots: Vec<PathBuf>,
+    initial_since: String,
+    overlap_hours: u64,
+    batch_size: usize,
+    discover: DiscoverProvider,
+    parse: ParseProvider,
+) -> anyhow::Result<ProviderSyncSummary> {
+    let paths = data_home.paths();
+    paths.ensure()?;
+    let cursor_path = paths.cache_dir.join(cursor_name);
+    let previous = read_cursor(&cursor_path)?;
+    let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+    let cutoff = previous
+        .map(|epoch| epoch - overlap_hours as f64 * 3600.0)
+        .unwrap_or(parse_since(&initial_since)?);
+    let files = discover(&roots)?;
+    let report = import_provider_paths(
+        service,
+        files,
+        Some(cutoff),
+        batch_size,
+        source_label,
+        parse,
+    )?;
+    if !report.errors.is_empty() {
+        anyhow::bail!(
+            "provider sync had {} parse errors; cursor was not advanced",
+            report.errors.len()
+        );
+    }
+    fs::write(
+        &cursor_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "last_success_epoch": started_at,
+            "last_success_utc": chrono::DateTime::from_timestamp(started_at as i64, 0).map(|value| value.to_rfc3339()),
+        }))?,
+    )?;
+    Ok(report)
+}
+
+fn import_provider_paths(
+    service: &IndexService,
+    paths: Vec<PathBuf>,
+    cutoff: Option<f64>,
+    batch_size: usize,
+    source_label: &str,
+    parse: ParseProvider,
+) -> anyhow::Result<ProviderSyncSummary> {
+    let discovered = paths.len();
+    let mut pending = Vec::new();
+    let mut imported = 0usize;
+    let mut messages = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = Vec::new();
+    let batch_size = batch_size.max(1);
+    for path in paths {
+        if cutoff.is_some_and(|value| file_mtime_epoch(&path).is_some_and(|mtime| mtime < value)) {
+            skipped += 1;
+            continue;
+        }
+        match parse(&path, cutoff) {
+            Ok(Some(conversation)) => pending.push(conversation),
+            Ok(None) => skipped += 1,
+            Err(error) => errors.push(format!("{}: {error}", path.display())),
+        }
+        if pending.len() >= batch_size {
+            let report = service.import_normalized_batch(
+                std::mem::take(&mut pending),
+                Some(Path::new(source_label)),
+                false,
+            )?;
+            imported += report.conversations_indexed;
+            messages += report.messages_indexed;
+        }
+    }
+    if !pending.is_empty() {
+        let report =
+            service.import_normalized_batch(pending, Some(Path::new(source_label)), false)?;
+        imported += report.conversations_indexed;
+        messages += report.messages_indexed;
+    }
+    if imported > 0 {
+        service.reindex_fts()?;
+    }
+    Ok(ProviderSyncSummary {
+        files_discovered: discovered,
+        conversations_indexed: imported,
+        messages_indexed: messages,
+        skipped,
+        errors,
+    })
 }
 
 fn import_codex_paths(
@@ -524,7 +722,7 @@ fn file_mtime_epoch(path: &Path) -> Option<f64> {
         .map(|value| value.as_secs_f64())
 }
 
-fn read_codex_cursor(path: &Path) -> anyhow::Result<Option<f64>> {
+fn read_cursor(path: &Path) -> anyhow::Result<Option<f64>> {
     if !path.exists() {
         return Ok(None);
     }

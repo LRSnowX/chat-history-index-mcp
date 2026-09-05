@@ -62,6 +62,13 @@ On each secondary Mac, run:
 
 The collector reads `CHAT_HISTORY_WRITER_TOKEN` when provided, otherwise it reads macOS Keychain service `chat-history-index-mcp-writer-remote` for the current account. It parses local Codex rollouts in memory, sends normalized batches, and advances its per-destination cursor only after every batch succeeds. Do not give this token to OpenClaw or ordinary MCP clients.
 
+For a durable secondary-Mac schedule, use the shared-skill installer rather than maintaining a per-Mac plist by hand:
+
+```bash
+bash ~/.codex/skills/chat-history-index-mcp/scripts/install-remote-codex-sync \
+  --writer-url http://zoidberg.tail68ee2f.ts.net:8766/mcp
+```
+
 ## Backups
 
 ```bash

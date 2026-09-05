@@ -23,12 +23,16 @@ Prefer the bundled MCP tools for search, conversation retrieval, related-convers
 ```bash
 ./scripts/chat-history-cli import --archive ~/Downloads/openai-export.zip --mode copy --run-api-jobs false
 ./scripts/chat-history-cli sync-codex
+./scripts/chat-history-cli sync-gemini
+./scripts/chat-history-cli sync-antigravity
 ./scripts/chat-history-cli import-normalized --path conversations.jsonl
 ```
 
 On a secondary Mac, send future local Codex tasks to the canonical host with `scripts/sync-codex-remote --url http://CANONICAL_HOST:8766/mcp`. Store the token in the documented macOS Keychain service or a protected `CHAT_HISTORY_WRITER_TOKEN`. Follow `docs/OPERATIONS.md`; never give the writer token to OpenClaw or ordinary clients.
 
 For app-assisted ChatGPT collection, follow `docs/chatgpt-app-collector.md`. Fetch every `read_thread` cursor until `hasMore` is false, reject truncated or inaccessible conversations, and import through `scripts/import-normalized-stdin BYTE_COUNT`. Stop immediately on rate limiting and preserve pending IDs.
+
+`sync-gemini` reads documented Gemini CLI session files only. `sync-antigravity` reads documented plaintext Antigravity transcript JSONL files only; do not decode undocumented provider databases or protobuf stores. See `docs/provider-support.md` for the exact source paths and Gemini Apps Takeout boundary.
 
 ## Backup and migration
 

@@ -33,7 +33,9 @@ Your useful context is split across providers, accounts, exports, and machines. 
 | Local Codex rollout JSONL | Native | Durable cursor with overlap | Supported |
 | Normalized JSON/JSONL | Native | Collector-owned cursor | Supported |
 | ChatGPT.app bridge | Sidebar bootstrap | Recent discovery plus paged reads | Codex/ChatGPT app assisted |
-| Gemini, Claude, Grok exports | Normalized format | Collector-owned | Native parsers pending fixtures |
+| Gemini CLI sessions | Native local collector | Durable cursor with overlap | Supported |
+| Antigravity CLI / 2.0 transcripts | Native plaintext collector | Durable cursor with overlap | Supported |
+| Gemini Apps Takeout, Claude, Grok exports | Normalized format | Collector-owned | Provider-specific parsers pending fixtures |
 
 See `docs/provider-support.md` for the exact support boundary. The project does not claim an untested provider parser.
 

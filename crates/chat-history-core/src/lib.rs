@@ -1,8 +1,10 @@
+pub mod antigravity;
 pub mod archive;
 pub mod codex;
 pub mod data_home;
 pub mod db;
 pub mod error;
+pub mod gemini;
 pub mod ingest;
 pub mod models;
 pub mod openai;
