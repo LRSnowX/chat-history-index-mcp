@@ -14,7 +14,6 @@ import time
 import urllib.error
 import urllib.request
 
-
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_HOME = Path.home() / "Library" / "Application Support" / "chat-history-index-mcp"
 
@@ -83,7 +82,18 @@ def main() -> None:
     args = parser.parse_args()
     if not 1 <= args.batch_size <= 100:
         raise SystemExit("--batch-size must be between 1 and 100")
-    token = os.environ.get(args.token_env, "")
+    token = ""
+    bitwarden_config = os.environ.get("CHAT_HISTORY_BITWARDEN_CONFIG")
+    if bitwarden_config:
+        try:
+            from bitwarden_secrets_adapter import BitwardenSecretError, load_token
+            token = load_token("writer", bitwarden_config)
+        except ImportError:
+            raise SystemExit("Bitwarden adapter is unavailable; install the companion adapter file") from None
+        except BitwardenSecretError as exc:
+            raise SystemExit(str(exc)) from None
+    if not token:
+        token = os.environ.get(args.token_env, "")
     if not token and Path("/usr/bin/security").is_file() and args.keychain_account:
         lookup = subprocess.run(
             [

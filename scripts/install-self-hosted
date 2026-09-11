@@ -36,6 +36,8 @@ cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" --workspace
 /usr/bin/install -m 755 "$REPO_ROOT/target/release/chat-history-cli" "$DATA_HOME/bin/chat-history-cli"
 /usr/bin/install -m 755 "$REPO_ROOT/target/release/chat-history-mcp" "$DATA_HOME/bin/chat-history-mcp"
 /usr/bin/install -m 755 "$REPO_ROOT/scripts/chat-history-http-service" "$DATA_HOME/bin/chat-history-http-service"
+/usr/bin/install -m 755 "$REPO_ROOT/scripts/bitwarden_secrets_adapter.py" "$DATA_HOME/bin/bitwarden_secrets_adapter.py"
+/usr/bin/install -m 755 "$REPO_ROOT/scripts/run-chat-history-http-with-bitwarden.py" "$DATA_HOME/bin/run-chat-history-http-with-bitwarden.py"
 /usr/bin/install -m 755 "$REPO_ROOT/scripts/chat-history-migrate" "$DATA_HOME/bin/chat-history-migrate"
 /usr/bin/install -m 755 "$REPO_ROOT/scripts/sync-codex-remote" "$DATA_HOME/bin/sync-codex-remote"
 
