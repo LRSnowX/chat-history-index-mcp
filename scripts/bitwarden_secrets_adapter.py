@@ -14,6 +14,7 @@ import subprocess
 import stat
 import pwd
 import tempfile
+from uuid import UUID
 from typing import Callable, Mapping, Sequence
 
 
@@ -93,6 +94,13 @@ def _validate_metadata(metadata: Mapping[str, object], profile: str) -> dict[str
         if not isinstance(value, str) or not value or len(value) > 256:
             raise _fail(f"invalid metadata field: {field}")
         values[field] = value
+    for field in ("project_id", "secret_id"):
+        try:
+            canonical = str(UUID(values[field]))
+        except ValueError:
+            raise _fail(f"invalid metadata field: {field}") from None
+        if canonical != values[field]:
+            raise _fail(f"invalid metadata field: {field}")
     if values["organization_id"] != EXPECTED_ORGANIZATION_ID:
         raise _fail("metadata organization is not the approved Personal organization")
     server_url = metadata.get("server_url")

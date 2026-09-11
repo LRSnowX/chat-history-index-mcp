@@ -30,6 +30,12 @@ class FakeRun:
         return subprocess.CompletedProcess(argv, 0, json.dumps(self.secret), "")
 
 
+IDS = {
+    "reader": ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
+    "writer": ("33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"),
+}
+
+
 class AdapterTests(unittest.TestCase):
     def config(self, profile="reader"):
         directory = tempfile.TemporaryDirectory()
@@ -39,8 +45,8 @@ class AdapterTests(unittest.TestCase):
             "profile": profile,
             "server_url": "https://api.bitwarden.com",
             "organization_id": MODULE.EXPECTED_ORGANIZATION_ID,
-            "project_id": profile + "-project",
-            "secret_id": profile + "-secret",
+            "project_id": IDS[profile][0],
+            "secret_id": IDS[profile][1],
             "expected_key": "CHAT_HISTORY_" + ("HTTP_TOKEN" if profile == "reader" else "WRITER_TOKEN"),
         }))
         path.chmod(0o600)
@@ -49,8 +55,8 @@ class AdapterTests(unittest.TestCase):
     def secret(self, profile="reader", **changes):
         value = {
             "organizationId": MODULE.EXPECTED_ORGANIZATION_ID,
-            "projectId": profile + "-project",
-            "id": profile + "-secret",
+            "projectId": IDS[profile][0],
+            "id": IDS[profile][1],
             "key": "CHAT_HISTORY_" + ("HTTP_TOKEN" if profile == "reader" else "WRITER_TOKEN"),
             "value": "super-secret-token",
         }
@@ -66,7 +72,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(token, "super-secret-token")
         self.assertEqual(runner.calls[0][0][5], "growthops.chat-history.writer.machine-access")
         bws_argv, bws_kwargs = runner.calls[1]
-        self.assertEqual(bws_argv[4:], ["get", "writer-secret", "--output", "json"])
+        self.assertEqual(bws_argv[4:], ["get", IDS["writer"][1], "--output", "json"])
         self.assertNotIn("hostile", bws_kwargs["env"].values())
         self.assertEqual(bws_argv[0], "/opt/homebrew/bin/bws")
         self.assertEqual(bws_argv[1], "--config-file")
@@ -100,6 +106,19 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(MODULE.BitwardenSecretError):
             MODULE.load_token("reader", path, environ={"USER": "david"}, run=lambda *a, **k: calls.append(a))
         self.assertEqual(calls, [])
+
+    def test_option_shaped_or_noncanonical_ids_fail_before_credentials(self):
+        for field in ("project_id", "secret_id"):
+            for value in ("--help", "not-a-uuid", "22222222222242228222222222222222"):
+                with self.subTest(field=field, value=value):
+                    path = self.config()
+                    data = json.loads(path.read_text())
+                    data[field] = value
+                    path.write_text(json.dumps(data))
+                    calls = []
+                    with self.assertRaises(MODULE.BitwardenSecretError):
+                        MODULE.load_token("reader", path, run=lambda *a, **k: calls.append(a))
+                    self.assertEqual(calls, [])
 
     def test_metadata_must_be_private_regular_file(self):
         path = self.config()
