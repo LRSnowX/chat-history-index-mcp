@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::Context;
 use chat_history_core::{
-    DataHome, ImportMode, ImportOptions, IndexService, NormalizedConversation, SearchMode,
-    SearchOptions,
+    ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot, DataHome, ImportMode,
+    ImportOptions, IndexService, NormalizedConversation, SearchMode, SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
@@ -90,6 +90,43 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         stdin_bytes: Option<u64>,
+    },
+    /// Inspect durable ChatGPT.app collector state.
+    ChatgptState,
+    /// Plan one recent-50 ChatGPT.app discovery batch without importing transcripts.
+    ChatgptPlanRecent {
+        #[arg(long, default_value = "-")]
+        path: PathBuf,
+        #[arg(long)]
+        stdin_bytes: Option<u64>,
+    },
+    /// Validate and import one fully paged ChatGPT.app transcript, then advance durable state.
+    ChatgptImportThread {
+        #[arg(long, default_value = "-")]
+        path: PathBuf,
+        #[arg(long)]
+        stdin_bytes: Option<u64>,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        embed: bool,
+    },
+    /// Mark one ChatGPT thread as blocked/incomplete so later batches can continue safely.
+    ChatgptBlock {
+        thread_id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Seed the live ChatGPT collector cursor after a trusted complete bootstrap/backfill.
+    ChatgptSeedCursor {
+        update_time: f64,
+    },
+    /// Seed the live ChatGPT collector cursor from the newest indexed ChatGPT conversation.
+    ChatgptSeedFromIndex,
+    /// One-time ChatGPT history bootstrap from an OpenAI export ZIP, with DB backup and local embeddings.
+    ChatgptBootstrapExport {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        embed: bool,
     },
     Resume,
     Stats,
@@ -334,6 +371,137 @@ async fn main() -> anyhow::Result<()> {
             let report = service.import_normalized(conversations, Some(&path))?;
             print_json(&report)?;
         }
+        Command::ChatgptState => {
+            let state = ChatGptSyncState::load(&data_home)?;
+            print_json(&state)?;
+        }
+        Command::ChatgptPlanRecent { path, stdin_bytes } => {
+            let snapshot: ChatGptThreadListSnapshot = read_json_document(&path, stdin_bytes)?;
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            let plan = state.plan_recent(snapshot)?;
+            let state_path = state.save(&data_home)?;
+            print_json(&serde_json::json!({
+                "plan": plan,
+                "state_path": state_path,
+                "state": state,
+            }))?;
+        }
+        Command::ChatgptImportThread {
+            path,
+            stdin_bytes,
+            embed,
+        } => {
+            let transcript: ChatGptBridgeTranscript = read_json_document(&path, stdin_bytes)?;
+            let thread_id = transcript.thread_id.clone();
+            let update_time = transcript.update_time;
+            let normalized = transcript.into_normalized()?;
+            let report = service
+                .import_normalized(vec![normalized], Some(Path::new("chatgpt-app-bridge")))?;
+            let embeddings_completed = if embed {
+                service
+                    .rebuild_embeddings(false, Some(vec![thread_id.clone()]), None)
+                    .await?
+            } else {
+                0
+            };
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            state.mark_imported_at(&thread_id, update_time);
+            let state_path = state.save(&data_home)?;
+            print_json(&serde_json::json!({
+                "thread_id": thread_id,
+                "import": report,
+                "embeddings_completed": embeddings_completed,
+                "state_path": state_path,
+                "state": state,
+            }))?;
+        }
+        Command::ChatgptBlock { thread_id, reason } => {
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            let blocked = state.mark_blocked(&thread_id, reason);
+            let state_path = state.save(&data_home)?;
+            print_json(&serde_json::json!({
+                "blocked": blocked,
+                "state_path": state_path,
+                "state": state,
+            }))?;
+        }
+        Command::ChatgptSeedCursor { update_time } => {
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            state.seed_cursor(update_time)?;
+            let state_path = state.save(&data_home)?;
+            print_json(&serde_json::json!({
+                "state_path": state_path,
+                "state": state,
+            }))?;
+        }
+        Command::ChatgptSeedFromIndex => {
+            let database = data_home.paths().db_path;
+            drop(chat_history_core::db::open_database(&database)?);
+            let health = chat_history_core::db::inspect_database(&database)?;
+            let newest = health
+                .sources
+                .get("chatgpt")
+                .and_then(|source| source.newest_update_time)
+                .context("no indexed ChatGPT conversations are available to seed the cursor")?;
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            state.seed_cursor(newest)?;
+            let state_path = state.save(&data_home)?;
+            print_json(&serde_json::json!({
+                "seeded_from": "indexed-chatgpt-source",
+                "update_time": newest,
+                "state_path": state_path,
+                "state": state,
+            }))?;
+        }
+        Command::ChatgptBootstrapExport { archive, embed } => {
+            let paths = data_home.paths();
+            paths.ensure()?;
+            let backup_path = if paths.db_path.exists() {
+                let backup_dir = paths.db_dir.join("backups");
+                fs::create_dir_all(&backup_dir)?;
+                let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                let output = backup_dir.join(format!("pre-chatgpt-bootstrap-{stamp}.sqlite3"));
+                chat_history_core::db::backup_database(&paths.db_path, &output, false)?;
+                Some(output)
+            } else {
+                None
+            };
+
+            let import = service
+                .import_archive(ImportOptions {
+                    source_archive: archive,
+                    mode: ImportMode::Copy,
+                    run_api_jobs: false,
+                    force_summaries: false,
+                    force_embeddings: false,
+                })
+                .await?;
+            let embeddings_completed = if embed {
+                service.rebuild_embeddings(false, None, None).await?
+            } else {
+                0
+            };
+            let health = chat_history_core::db::inspect_database(&paths.db_path)?;
+            let chatgpt = health
+                .sources
+                .get("chatgpt")
+                .context("OpenAI export imported no ChatGPT conversations")?;
+            let newest = chatgpt
+                .newest_update_time
+                .context("indexed ChatGPT source has no update timestamp")?;
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            state.seed_cursor(newest)?;
+            let state_path = state.save(&data_home)?;
+            print_json(&serde_json::json!({
+                "status": "ok",
+                "backup_path": backup_path,
+                "import": import,
+                "embeddings_completed": embeddings_completed,
+                "chatgpt_source": chatgpt,
+                "state_path": state_path,
+                "state": state,
+            }))?;
+        }
         Command::Resume => {
             let report = service.resume().await?;
             print_json(&report)?;
@@ -460,24 +628,7 @@ fn read_normalized(
     path: &Path,
     stdin_bytes: Option<u64>,
 ) -> anyhow::Result<Vec<NormalizedConversation>> {
-    let text = if path == Path::new("-") {
-        let mut text = String::new();
-        match stdin_bytes {
-            Some(length) => {
-                let read = io::stdin().take(length).read_to_string(&mut text)? as u64;
-                anyhow::ensure!(
-                    read == length,
-                    "expected {length} stdin bytes, received {read}"
-                );
-            }
-            None => {
-                io::stdin().read_to_string(&mut text)?;
-            }
-        }
-        text
-    } else {
-        fs::read_to_string(path)?
-    };
+    let text = read_input_text(path, stdin_bytes)?;
     if let Ok(items) = serde_json::from_str::<Vec<NormalizedConversation>>(&text) {
         return Ok(items);
     }
@@ -489,6 +640,35 @@ fn read_normalized(
         .map(serde_json::from_str)
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn read_json_document<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    stdin_bytes: Option<u64>,
+) -> anyhow::Result<T> {
+    let text = read_input_text(path, stdin_bytes)?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("parsing JSON input from {}", path.display()))
+}
+
+fn read_input_text(path: &Path, stdin_bytes: Option<u64>) -> anyhow::Result<String> {
+    if path != Path::new("-") {
+        return fs::read_to_string(path).map_err(Into::into);
+    }
+    let mut text = String::new();
+    match stdin_bytes {
+        Some(length) => {
+            let read = io::stdin().take(length).read_to_string(&mut text)? as u64;
+            anyhow::ensure!(
+                read == length,
+                "expected {length} stdin bytes, received {read}"
+            );
+        }
+        None => {
+            io::stdin().read_to_string(&mut text)?;
+        }
+    }
+    Ok(text)
 }
 
 #[derive(Debug, serde::Serialize)]

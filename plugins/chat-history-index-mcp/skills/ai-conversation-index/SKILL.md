@@ -28,7 +28,41 @@ Useful commands:
 "$HOME/Library/Application Support/chat-history-index-mcp/bin/chat-history-cli" doctor
 "$HOME/Library/Application Support/chat-history-index-mcp/bin/chat-history-cli" sync-codex
 "$HOME/Library/Application Support/chat-history-index-mcp/bin/chat-history-cli" search "query" --mode hybrid --limit 10
+"$HOME/Library/Application Support/chat-history-index-mcp/bin/chat-history-cli" chatgpt-state
 ```
+
+## ChatGPT.app collection
+
+When the ChatGPT/Codex desktop tool surface exposes the first-party `list_threads` and
+`read_thread` bridge operations, use the index's dedicated ChatGPT collector tools rather than
+constructing normalized imports ad hoc:
+
+1. Call `list_threads(limit: 50)` and adapt the result to the documented discovery snapshot.
+2. Call `chatgpt_plan_recent` before reading transcripts. If it reports discovery overflow, do
+   not advance the cursor or pretend the recent-50 list is complete.
+3. For every selected ChatGPT thread, call `read_thread` repeatedly through every `nextCursor`
+   until `hasMore` is false.
+4. Adapt the full paged result to the documented transcript contract and call
+   `chatgpt_import_thread`. The index validates the cursor chain, rejects truncated/inaccessible
+   content, restores chronological order, imports idempotently, and builds the local embedding.
+5. If a thread cannot be read completely, call `chatgpt_block` with the real failure reason and
+   stop issuing requests when the bridge rate-limits.
+
+`chatgpt_state` is read-only. `chatgpt_plan_recent`, `chatgpt_import_thread`, `chatgpt_block`, and
+cursor-seeding tools are writer/collector operations and must never be proxied through a normal
+read-only memory endpoint.
+
+For a first historical bootstrap when the app bridge cannot enumerate the entire sidebar, use one
+complete OpenAI export once:
+
+```bash
+"$HOME/Library/Application Support/chat-history-index-mcp/bin/chat-history-cli" \
+  chatgpt-bootstrap-export --archive /path/to/openai-export.zip
+```
+
+That command backs up SQLite first, copies the export into managed storage, skips Codex summary
+generation, builds local multilingual embeddings, and seeds the durable live collector cursor.
+Repeated full-account exports are not the intended steady-state sync path.
 
 On a secondary Mac, use the installed `bin/sync-codex-remote` with the canonical writer URL and a protected `CHAT_HISTORY_WRITER_TOKEN`. Keep OpenClaw and ordinary clients on the separate read-only endpoint.
 

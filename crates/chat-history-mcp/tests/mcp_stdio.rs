@@ -66,6 +66,7 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     let transport = TokioChildProcess::builder(
         tokio::process::Command::new(env!("CARGO_BIN_EXE_chat-history-mcp")).configure(|cmd| {
             cmd.env("CHAT_HISTORY_DATA_HOME", &data_home)
+                .env("CHAT_HISTORY_EMBEDDING_PROVIDER", "hashed-v1")
                 .stderr(Stdio::inherit());
         }),
     )
@@ -85,6 +86,126 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         .call_tool(CallToolRequestParams::new("search_conversations").with_arguments(args))
         .await?;
     assert_eq!(results.is_error, Some(false));
+
+    let args: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+        serde_json::json!({"query": "Rust SQLite", "project": "Rust", "limit": 5}),
+    )?;
+    let memory_search = client
+        .call_tool(CallToolRequestParams::new("memory_search").with_arguments(args))
+        .await?;
+    assert_eq!(memory_search.is_error, Some(false));
+
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({"project": "Rust", "limit": 5}))?;
+    let memory_recent = client
+        .call_tool(CallToolRequestParams::new("memory_recent").with_arguments(args))
+        .await?;
+    assert_eq!(memory_recent.is_error, Some(false));
+
+    let args: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+        serde_json::json!({"conversation_id": "conv-rust-index", "message_limit": 5}),
+    )?;
+    let memory_thread = client
+        .call_tool(CallToolRequestParams::new("memory_get_thread").with_arguments(args))
+        .await?;
+    assert_eq!(memory_thread.is_error, Some(false));
+
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "project": "Rust",
+            "query": "SQLite",
+            "relevant_limit": 5,
+            "recent_limit": 3
+        }))?;
+    let project_context = client
+        .call_tool(CallToolRequestParams::new("memory_project_context").with_arguments(args))
+        .await?;
+    assert_eq!(project_context.is_error, Some(false));
+
+    let collector_state = client
+        .call_tool(CallToolRequestParams::new("chatgpt_state"))
+        .await?;
+    assert_eq!(collector_state.is_error, Some(false));
+
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "snapshot": {
+                "requested_limit": 50,
+                "threads": [
+                    {
+                        "thread_id": "bridge-thread",
+                        "kind": "chatgpt",
+                        "title": "Bridge collector test",
+                        "create_time": 1800000000.0,
+                        "update_time": 1800000100.0
+                    },
+                    {
+                        "thread_id": "ignore-codex",
+                        "kind": "codex",
+                        "title": "Ignore",
+                        "create_time": 1800000000.0,
+                        "update_time": 1800000050.0
+                    }
+                ]
+            }
+        }))?;
+    let plan = client
+        .call_tool(CallToolRequestParams::new("chatgpt_plan_recent").with_arguments(args))
+        .await?;
+    assert_eq!(plan.is_error, Some(false));
+
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "embed": false,
+            "transcript": {
+                "thread_id": "bridge-thread",
+                "title": "Bridge collector test",
+                "create_time": 1800000000.0,
+                "update_time": 1800000100.0,
+                "model": "fixture-model",
+                "source_url": null,
+                "pages": [
+                    {
+                        "request_cursor": null,
+                        "next_cursor": null,
+                        "has_more": false,
+                        "messages": [
+                            {
+                                "message_id": "bridge-a1",
+                                "role": "assistant",
+                                "create_time": 1800000100.0,
+                                "text": "Use the complete paged ChatGPT transcript.",
+                                "raw": {}
+                            },
+                            {
+                                "message_id": "bridge-u1",
+                                "role": "user",
+                                "create_time": 1800000000.0,
+                                "text": "Can the collector preserve this history?",
+                                "raw": {}
+                            }
+                        ]
+                    }
+                ]
+            }
+        }))?;
+    let imported = client
+        .call_tool(CallToolRequestParams::new("chatgpt_import_thread").with_arguments(args))
+        .await?;
+    assert_eq!(imported.is_error, Some(false));
+
+    let args: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+        serde_json::json!({"conversation_id": "bridge-thread", "include_raw": false}),
+    )?;
+    let imported_detail = client
+        .call_tool(CallToolRequestParams::new("get_conversation").with_arguments(args))
+        .await?;
+    assert_eq!(imported_detail.is_error, Some(false));
+
+    let seeded = client
+        .call_tool(CallToolRequestParams::new("chatgpt_seed_from_index"))
+        .await?;
+    assert_eq!(seeded.is_error, Some(false));
 
     client.cancel().await?;
     Ok(())

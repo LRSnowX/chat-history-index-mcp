@@ -13,7 +13,7 @@ Your useful context is split across providers, accounts, exports, and machines. 
 
 ## Highlights
 
-- Local-first SQLite index with FTS5 and deterministic local embeddings
+- Local-first SQLite index with FTS5 and multilingual local semantic embeddings
 - Idempotent, source-aware imports that preserve an existing index
 - Native ChatGPT export and local Codex rollout ingestion
 - Normalized JSON/JSONL interchange for additional providers
@@ -54,7 +54,8 @@ Start a new Codex task after installation so the plugin is reloaded.
 Import data:
 
 ```bash
-./scripts/chat-history-cli import --archive ~/Downloads/openai-export.zip --mode copy --run-api-jobs false
+# One-time historical ChatGPT bootstrap: backup + copy import + local embeddings + live cursor seed.
+./scripts/chat-history-cli chatgpt-bootstrap-export --archive ~/Downloads/openai-export.zip
 ./scripts/chat-history-cli sync-codex
 ./scripts/chat-history-cli doctor
 ```
@@ -64,6 +65,36 @@ Search:
 ```bash
 ./scripts/chat-history-cli search "Rust SQLite" --mode hybrid --limit 10
 ```
+
+`hybrid` search combines multilingual semantic retrieval with lexical evidence. For
+natural-language queries it removes low-information English question scaffolding,
+uses FTS5 for ASCII/code terms, and adds document-frequency-weighted CJK substring
+evidence for Chinese queries. Codex child/subtask evidence is collapsed back to its
+parent conversation anchor before rank fusion. Explicit `--mode fts` keeps the raw
+FTS5 query behavior for exact identifiers and operator-aware searches.
+
+Summary generation uses the current Codex CLI account default model unless
+`CHAT_HISTORY_SUMMARY_MODEL` is set to a non-empty model name. Semantic search
+defaults to the local multilingual `intfloat/multilingual-e5-small` model and
+caches its files under the managed data home's `cache/fastembed/` directory.
+Long conversations are sampled across the full transcript and mean-pooled into
+one conversation-level vector, so semantic retrieval is not limited to the
+opening environment or agent-instruction boilerplate.
+Set `CHAT_HISTORY_EMBEDDING_PROVIDER=hashed-v1` only when the explicit legacy
+lexical-vector fallback is desired; it is not a multilingual semantic model.
+
+The MCP server also exposes read-oriented project memory tools:
+`memory_search`, `memory_recent`, `memory_get_thread`, and
+`memory_project_context`. Project context uses a ChatGPT-first source policy by
+default because long-form ChatGPT conversations usually contain product,
+architecture, and handoff decisions; Codex and other indexed sources fill any
+remaining slots as implementation evidence. Callers can still provide an
+explicit source filter when they need a different policy.
+
+Live ChatGPT.app collection uses the dedicated `chatgpt_state`,
+`chatgpt_plan_recent`, `chatgpt_import_thread`, `chatgpt_block`, and cursor
+seeding tools. See `docs/chatgpt-app-collector.md` for the bridge contract and
+completeness rules.
 
 ## Managed data home
 
