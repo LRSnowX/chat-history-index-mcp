@@ -1,5 +1,6 @@
 use std::{fs, io::Write, path::Path};
 
+use chat_history_core::embedding::EmbeddingVector;
 use chat_history_core::{
     DataHome, ImportMode, ImportOptions, IndexService, SearchMode, SearchOptions, encode_embedding,
 };
@@ -85,11 +86,19 @@ fn seed_embeddings(service: &IndexService) -> anyhow::Result<()> {
         ],
     )?;
     conn.execute(
-        "UPDATE conversations SET embedding_blob = ?2, embedding_dimensions = 3 WHERE conversation_id = ?1",
+        "UPDATE conversations SET embedding_blob = ?2, embedding_dimensions = 3, embedding_model = 'fixture-model' WHERE conversation_id = ?1",
         rusqlite::params!["conv-rust-index", encode_embedding(&[0.9, 0.1, 0.0])],
     )?;
     conn.execute(
-        "UPDATE conversations SET embedding_blob = ?2, embedding_dimensions = 3 WHERE conversation_id = ?1",
+        "UPDATE conversations SET embedding_blob = ?2, embedding_dimensions = 3, embedding_model = 'fixture-model' WHERE conversation_id = ?1",
+        rusqlite::params!["conv-voice-note", encode_embedding(&[0.2, 0.8, 0.1])],
+    )?;
+    conn.execute(
+        "INSERT INTO conversation_embedding_chunks (conversation_id, chunk_index, embedding_blob, embedding_dimensions, embedding_model) VALUES (?1, 0, ?2, 3, 'fixture-model')",
+        rusqlite::params!["conv-rust-index", encode_embedding(&[0.9, 0.1, 0.0])],
+    )?;
+    conn.execute(
+        "INSERT INTO conversation_embedding_chunks (conversation_id, chunk_index, embedding_blob, embedding_dimensions, embedding_model) VALUES (?1, 0, ?2, 3, 'fixture-model')",
         rusqlite::params!["conv-voice-note", encode_embedding(&[0.2, 0.8, 0.1])],
     )?;
     Ok(())
@@ -155,7 +164,10 @@ async fn imports_nested_zip_and_supports_search() -> anyhow::Result<()> {
             limit: Some(5),
             ..SearchOptions::default()
         },
-        Some(vec![1.0, 0.0, 0.0]),
+        Some(EmbeddingVector {
+            values: vec![1.0, 0.0, 0.0],
+            model_id: "fixture-model".to_string(),
+        }),
     )?;
     assert_eq!(semantic[0].conversation_id, "conv-rust-index");
 

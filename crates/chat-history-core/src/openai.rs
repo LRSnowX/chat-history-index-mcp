@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs::File,
     io::Write,
     path::PathBuf,
@@ -8,9 +9,11 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use sha2::{Digest, Sha256};
 
-use crate::models::SummaryRecord;
+use crate::{
+    embedding::{EmbeddingVector, LocalEmbeddingClient},
+    models::SummaryRecord,
+};
 
 const DIRECT_SUMMARY_MAX_CHARS: usize = 16_000;
 const CHUNK_SUMMARY_MAX_CHARS: usize = 12_000;
@@ -21,35 +24,82 @@ const CODEX_FALLBACK_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone)]
 pub struct OpenAiClient {
     codex_bin: PathBuf,
+    summary_model: Option<String>,
+    embedding: LocalEmbeddingClient,
 }
 
 impl OpenAiClient {
-    pub fn from_env() -> anyhow::Result<Self> {
+    pub fn from_env(embedding_cache_dir: PathBuf) -> anyhow::Result<Self> {
         let codex_bin = std::env::var_os("CODEX_BIN")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/codex"));
         if !codex_bin.exists() {
             bail!("Codex CLI not found at {}", codex_bin.display());
         }
-        Ok(Self { codex_bin })
+        let summary_model = normalize_summary_model(std::env::var_os("CHAT_HISTORY_SUMMARY_MODEL"));
+        let embedding = LocalEmbeddingClient::from_env(embedding_cache_dir)?;
+        Ok(Self {
+            codex_bin,
+            summary_model,
+            embedding,
+        })
     }
 
     pub async fn summarize_conversation(&self, transcript: &str) -> anyhow::Result<SummaryRecord> {
         let codex_bin = self.codex_bin.clone();
+        let summary_model = self.summary_model.clone();
         let transcript = transcript.to_string();
-        tokio::task::spawn_blocking(move || summarize_with_codex(&codex_bin, &transcript)).await?
+        tokio::task::spawn_blocking(move || {
+            summarize_with_codex(&codex_bin, summary_model.as_deref(), &transcript)
+        })
+        .await?
     }
 
-    pub async fn embed_text(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        Ok(local_hashed_embedding(text))
+    pub fn summary_model_label(&self) -> String {
+        match self.summary_model.as_deref() {
+            Some(model) => format!("{model} via codex exec"),
+            None => "codex-default via codex exec".to_string(),
+        }
+    }
+
+    pub fn embedding_model_id(&self) -> &'static str {
+        self.embedding.model_id()
+    }
+
+    pub async fn embed_query(&self, text: &str) -> anyhow::Result<EmbeddingVector> {
+        self.embedding.embed_query(text).await
+    }
+
+    pub async fn embed_passage(&self, text: &str) -> anyhow::Result<EmbeddingVector> {
+        self.embedding.embed_passage(text).await
+    }
+
+    pub async fn embed_passage_chunks(&self, text: &str) -> anyhow::Result<Vec<EmbeddingVector>> {
+        self.embedding.embed_passage_chunks(text).await
     }
 }
 
-fn summarize_with_codex(codex_bin: &PathBuf, transcript: &str) -> anyhow::Result<SummaryRecord> {
+fn normalize_summary_model(value: Option<OsString>) -> Option<String> {
+    value
+        .map(|value| value.to_string_lossy().trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn summarize_with_codex(
+    codex_bin: &PathBuf,
+    summary_model: Option<&str>,
+    transcript: &str,
+) -> anyhow::Result<SummaryRecord> {
     if transcript.len() <= DIRECT_SUMMARY_MAX_CHARS {
         let transcript = summarize_input_window(transcript, DIRECT_SUMMARY_MAX_CHARS);
         let prompt = build_direct_summary_prompt(&transcript);
-        return summarize_with_fallback(codex_bin, &prompt, transcript.as_str(), "direct summary");
+        return summarize_with_fallback(
+            codex_bin,
+            summary_model,
+            &prompt,
+            transcript.as_str(),
+            "direct summary",
+        );
     }
 
     let chunks = split_transcript_chunks(transcript, CHUNK_SUMMARY_MAX_CHARS);
@@ -58,6 +108,7 @@ fn summarize_with_codex(codex_bin: &PathBuf, transcript: &str) -> anyhow::Result
         let prompt = build_chunk_summary_prompt(index + 1, chunks.len(), chunk);
         chunk_summaries.push(summarize_with_fallback(
             codex_bin,
+            summary_model,
             &prompt,
             chunk,
             &format!("chunk summary {}/{}", index + 1, chunks.len()),
@@ -66,7 +117,13 @@ fn summarize_with_codex(codex_bin: &PathBuf, transcript: &str) -> anyhow::Result
 
     let prompt = build_synthesis_prompt(&chunk_summaries)?;
     parse_summary_json(
-        &run_codex_json(codex_bin, &prompt, CODEX_SYNTHESIS_TIMEOUT, "medium")?,
+        &run_codex_json(
+            codex_bin,
+            summary_model,
+            &prompt,
+            CODEX_SYNTHESIS_TIMEOUT,
+            "medium",
+        )?,
         "synthesized summary",
     )
 }
@@ -107,22 +164,33 @@ fn build_synthesis_prompt(chunk_summaries: &[SummaryRecord]) -> anyhow::Result<S
 
 fn summarize_with_fallback(
     codex_bin: &PathBuf,
+    summary_model: Option<&str>,
     prompt: &str,
     transcript: &str,
     context: &str,
 ) -> anyhow::Result<SummaryRecord> {
-    match run_codex_json(codex_bin, prompt, CODEX_SUMMARY_TIMEOUT, "medium")
-        .and_then(|json_text| parse_summary_json(&json_text, context))
+    match run_codex_json(
+        codex_bin,
+        summary_model,
+        prompt,
+        CODEX_SUMMARY_TIMEOUT,
+        "medium",
+    )
+    .and_then(|json_text| parse_summary_json(&json_text, context))
     {
         Ok(summary) => Ok(summary),
         Err(primary_error) => {
             let condensed = condense_transcript_for_retry(transcript, 24, 220);
             let fallback_prompt = build_direct_summary_prompt(&condensed);
-            run_codex_json(codex_bin, &fallback_prompt, CODEX_FALLBACK_TIMEOUT, "low")
-                .and_then(|json_text| {
-                    parse_summary_json(&json_text, &format!("{context} fallback"))
-                })
-                .with_context(|| format!("{context} failed before fallback: {primary_error}"))
+            run_codex_json(
+                codex_bin,
+                summary_model,
+                &fallback_prompt,
+                CODEX_FALLBACK_TIMEOUT,
+                "low",
+            )
+            .and_then(|json_text| parse_summary_json(&json_text, &format!("{context} fallback")))
+            .with_context(|| format!("{context} failed before fallback: {primary_error}"))
         }
     }
 }
@@ -134,6 +202,7 @@ fn parse_summary_json(json_text: &str, context: &str) -> anyhow::Result<SummaryR
 
 fn run_codex_json(
     codex_bin: &PathBuf,
+    summary_model: Option<&str>,
     prompt: &str,
     timeout: Duration,
     reasoning_effort: &str,
@@ -145,20 +214,8 @@ fn run_codex_json(
     let stdout_path = stdout_file.path().to_path_buf();
     let stderr_path = stderr_file.path().to_path_buf();
 
-    let mut child = Command::new(codex_bin)
-        .current_dir(std::env::temp_dir())
-        .arg("exec")
-        .arg("--ephemeral")
-        .arg("--skip-git-repo-check")
-        .arg("--sandbox")
-        .arg("read-only")
-        .arg("--model")
-        .arg("gpt-5.4")
-        .arg("-c")
-        .arg(format!("model_reasoning_effort=\"{reasoning_effort}\""))
-        .arg("--output-last-message")
-        .arg(&output_path)
-        .arg("-")
+    let mut command = build_codex_command(codex_bin, summary_model, &output_path, reasoning_effort);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::from(
             File::create(&stdout_path).context("opening Codex stdout capture")?,
@@ -209,6 +266,32 @@ fn run_codex_json(
         .or_else(|| normalize_json_response(&String::from_utf8_lossy(&output.stdout)))
         .ok_or_else(|| anyhow::anyhow!("Codex summary output was not valid JSON"))?;
     Ok(json_text)
+}
+
+fn build_codex_command(
+    codex_bin: &PathBuf,
+    summary_model: Option<&str>,
+    output_path: &std::path::Path,
+    reasoning_effort: &str,
+) -> Command {
+    let mut command = Command::new(codex_bin);
+    command
+        .current_dir(std::env::temp_dir())
+        .arg("exec")
+        .arg("--ephemeral")
+        .arg("--skip-git-repo-check")
+        .arg("--sandbox")
+        .arg("read-only");
+    if let Some(model) = summary_model {
+        command.arg("--model").arg(model);
+    }
+    command
+        .arg("-c")
+        .arg(format!("model_reasoning_effort=\"{reasoning_effort}\""))
+        .arg("--output-last-message")
+        .arg(output_path)
+        .arg("-");
+    command
 }
 
 fn summarize_input_window(transcript: &str, max_chars: usize) -> String {
@@ -332,74 +415,53 @@ fn normalize_json_response(text: &str) -> Option<String> {
     Some(trimmed[start..=end].to_string())
 }
 
-fn local_hashed_embedding(text: &str) -> Vec<f32> {
-    const DIMENSIONS: usize = 256;
-    let mut vector = vec![0.0_f32; DIMENSIONS];
-    let tokens = tokenize(text);
-    for token in &tokens {
-        apply_hashed_feature(token, 1.0, &mut vector);
-    }
-    for window in tokens.windows(2) {
-        let bigram = format!("{}::{}", window[0], window[1]);
-        apply_hashed_feature(&bigram, 1.5, &mut vector);
-    }
-    normalize_vector(&mut vector);
-    vector
-}
-
-fn tokenize(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars().flat_map(|ch| ch.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() {
-            current.push(ch);
-        } else if !current.is_empty() {
-            if current.len() > 1 {
-                tokens.push(std::mem::take(&mut current));
-            } else {
-                current.clear();
-            }
-        }
-    }
-    if current.len() > 1 {
-        tokens.push(current);
-    }
-    tokens
-}
-
-fn apply_hashed_feature(token: &str, weight: f32, vector: &mut [f32]) {
-    let digest = Sha256::digest(token.as_bytes());
-    let index = u64::from_le_bytes([
-        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
-    ]) as usize
-        % vector.len();
-    let sign = if digest[8] & 1 == 0 { 1.0 } else { -1.0 };
-    vector[index] += sign * weight;
-}
-
-fn normalize_vector(vector: &mut [f32]) {
-    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for value in vector {
-            *value /= norm;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        condense_transcript_for_retry, local_hashed_embedding, split_transcript_chunks,
-        summarize_input_window,
+        build_codex_command, condense_transcript_for_retry, normalize_summary_model,
+        split_transcript_chunks, summarize_input_window,
     };
+    use std::{ffi::OsString, path::PathBuf};
 
     #[test]
-    fn hashed_embeddings_are_deterministic_and_normalized() {
-        let left = local_hashed_embedding("Rust SQLite MCP");
-        let right = local_hashed_embedding("Rust SQLite MCP");
-        assert_eq!(left, right);
-        let norm = left.iter().map(|value| value * value).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-4);
+    fn summary_model_normalizes_unset_empty_and_configured_values() {
+        assert_eq!(normalize_summary_model(None), None);
+        assert_eq!(normalize_summary_model(Some(OsString::from("   "))), None);
+        assert_eq!(
+            normalize_summary_model(Some(OsString::from("  gpt-future  "))),
+            Some("gpt-future".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_command_omits_model_when_not_configured() {
+        let command = build_codex_command(
+            &PathBuf::from("/usr/bin/codex"),
+            None,
+            std::path::Path::new("/tmp/result.json"),
+            "medium",
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg == "--model"));
+    }
+
+    #[test]
+    fn codex_command_passes_configured_model() {
+        let command = build_codex_command(
+            &PathBuf::from("/usr/bin/codex"),
+            Some("gpt-future"),
+            std::path::Path::new("/tmp/result.json"),
+            "medium",
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let index = args.iter().position(|arg| arg == "--model").unwrap();
+        assert_eq!(args.get(index + 1).map(String::as_str), Some("gpt-future"));
     }
 
     #[test]

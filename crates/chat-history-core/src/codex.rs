@@ -6,10 +6,20 @@ use std::{
 
 use anyhow::Context;
 use chrono::DateTime;
+use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::models::{NormalizedConversation, NormalizedMessage};
+
+pub fn review_parent_conversation_id(text: &str) -> Option<String> {
+    let pattern = Regex::new(
+        r#"\.codex/visualizations/[^\s<>\"]*/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#,
+    )
+    .ok()?;
+    let capture = pattern.captures(text)?;
+    Some(format!("codex:{}", capture.get(1)?.as_str()))
+}
 
 pub fn discover_rollouts(roots: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();

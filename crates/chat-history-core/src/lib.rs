@@ -1,8 +1,10 @@
 pub mod antigravity;
 pub mod archive;
+pub mod chatgpt;
 pub mod codex;
 pub mod data_home;
 pub mod db;
+pub mod embedding;
 pub mod error;
 pub mod gemini;
 pub mod ingest;
@@ -12,6 +14,11 @@ pub mod ranking;
 pub mod search;
 pub mod sql;
 
+pub use chatgpt::{
+    ChatGptBlockedThread, ChatGptBridgeMessage, ChatGptBridgePage, ChatGptBridgeThread,
+    ChatGptBridgeTranscript, ChatGptDiscoveryPlan, ChatGptPendingThread, ChatGptSyncState,
+    ChatGptThreadListSnapshot,
+};
 pub use data_home::{DataHome, ImportMode, ManagedPaths};
 pub use ingest::{ImportOptions, ImportReport, IndexService, decode_embedding, encode_embedding};
 pub use models::{

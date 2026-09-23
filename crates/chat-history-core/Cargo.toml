@@ -9,6 +9,7 @@ authors.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
+fastembed.workspace = true
 hex.workspace = true
 regex.workspace = true
 reqwest.workspace = true

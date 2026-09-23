@@ -20,6 +20,7 @@ use crate::{
     },
     data_home::{DataHome, ImportMode},
     db::{fetch_stats, open_database, upsert_job},
+    embedding::EmbeddingVector,
     models::{
         AttachmentRecord, ConversationDetail, ConversationRecord, IndexStats, JobKind, JobStatus,
         NormalizedConversation, SearchOptions, SearchResult, SummaryRecord,
@@ -75,12 +76,17 @@ impl IndexService {
     }
 
     pub fn with_env(data_home: DataHome) -> Self {
-        let openai = OpenAiClient::from_env().ok();
+        let embedding_cache_dir = data_home.paths().cache_dir.join("fastembed");
+        let openai = OpenAiClient::from_env(embedding_cache_dir).ok();
         Self { data_home, openai }
     }
 
     pub fn managed_db_path(&self) -> PathBuf {
         self.data_home.paths().db_path
+    }
+
+    pub fn data_home(&self) -> &DataHome {
+        &self.data_home
     }
 
     pub fn stats(&self) -> anyhow::Result<IndexStats> {
@@ -269,20 +275,22 @@ impl IndexService {
             let transcript = load_transcript(&conn, &conversation_id)?;
             match openai.summarize_conversation(&transcript).await {
                 Ok(summary) => {
+                    let summary_model = openai.summary_model_label();
                     conn.execute(
                         r#"
                         UPDATE conversations
                         SET summary_json = ?2,
-                            summary_model = 'gpt-5.4 via codex exec',
+                            summary_model = ?3,
                             summary_completed_at = CURRENT_TIMESTAMP,
-                            risk_flags_json = ?3,
-                            topic_tags_json = ?4,
-                            redaction_notes_json = ?5
+                            risk_flags_json = ?4,
+                            topic_tags_json = ?5,
+                            redaction_notes_json = ?6
                         WHERE conversation_id = ?1
                         "#,
                         params![
                             conversation_id,
                             serde_json::to_string(&summary)?,
+                            summary_model,
                             serde_json::to_string(&summary.risk_flags)?,
                             serde_json::to_string(&summary.candidate_topics)?,
                             serde_json::to_string(&summary.redaction_notes)?,
@@ -336,31 +344,56 @@ impl IndexService {
                 1,
             )?;
             let canonical = load_embedding_input(&conn, &conversation_id)?;
-            match openai.embed_text(&canonical).await {
-                Ok(embedding) => {
-                    conn.execute(
+            match openai.embed_passage_chunks(&canonical).await {
+                Ok(chunks) => {
+                    let embedding = pool_embedding_chunks(&chunks)?;
+                    let tx = conn.unchecked_transaction()?;
+                    tx.execute(
+                        "DELETE FROM conversation_embedding_chunks WHERE conversation_id = ?1",
+                        params![conversation_id],
+                    )?;
+                    for (chunk_index, chunk) in chunks.iter().enumerate() {
+                        tx.execute(
+                            r#"
+                            INSERT INTO conversation_embedding_chunks (
+                              conversation_id, chunk_index, embedding_blob,
+                              embedding_dimensions, embedding_model
+                            ) VALUES (?1, ?2, ?3, ?4, ?5)
+                            "#,
+                            params![
+                                conversation_id,
+                                chunk_index as i64,
+                                encode_embedding(&chunk.values),
+                                chunk.values.len() as i64,
+                                chunk.model_id,
+                            ],
+                        )?;
+                    }
+                    tx.execute(
                         r#"
                         UPDATE conversations
                         SET embedding_blob = ?2,
                             embedding_dimensions = ?3,
-                            embedding_model = 'hashed-token-v1',
+                            embedding_model = ?4,
                             embedding_completed_at = CURRENT_TIMESTAMP
                         WHERE conversation_id = ?1
                         "#,
                         params![
                             conversation_id,
-                            encode_embedding(&embedding),
-                            embedding.len() as i64
+                            encode_embedding(&embedding.values),
+                            embedding.values.len() as i64,
+                            embedding.model_id,
                         ],
                     )?;
                     upsert_job(
-                        &conn,
+                        &tx,
                         &conversation_id,
                         JobKind::Embedding,
                         JobStatus::Complete,
                         None,
                         0,
                     )?;
+                    tx.commit()?;
                     completed += 1;
                 }
                 Err(error) => {
@@ -414,7 +447,7 @@ impl IndexService {
                 let openai = self.openai.as_ref().ok_or_else(|| {
                     anyhow!("Local embedding client is required for semantic and hybrid search")
                 })?;
-                Some(openai.embed_text(query).await?)
+                Some(openai.embed_query(query).await?)
             }
             _ => None,
         };
@@ -565,6 +598,7 @@ struct PreparedConversation {
     source_conversation_id: String,
     source_url: Option<String>,
     source_path: Option<String>,
+    parent_conversation_id: Option<String>,
     messages: Vec<PreparedMessage>,
     attachments: Vec<AttachmentRecord>,
 }
@@ -692,6 +726,7 @@ impl PreparedConversation {
             source_conversation_id,
             source_url: None,
             source_path: None,
+            parent_conversation_id: None,
             messages,
             attachments,
         })
@@ -702,6 +737,16 @@ impl PreparedConversation {
         conversation: NormalizedConversation,
     ) -> anyhow::Result<Self> {
         let conversation_id = conversation.canonical_id();
+        let parent_conversation_id = if conversation.source == "codex"
+            && conversation.model.as_deref() == Some("codex-auto-review")
+        {
+            conversation
+                .messages
+                .first()
+                .and_then(|message| crate::codex::review_parent_conversation_id(&message.text))
+        } else {
+            None
+        };
         let raw_bytes = serde_json::to_vec(&conversation.raw)?;
         let raw_json_sha256_hex = hex::encode(Sha256::digest(&raw_bytes));
         let raw_conversation_zstd = encode_all(raw_bytes.as_slice(), 9)?;
@@ -750,6 +795,7 @@ impl PreparedConversation {
             source_conversation_id: conversation.source_conversation_id,
             source_url: conversation.source_url,
             source_path: conversation.source_path,
+            parent_conversation_id,
             messages,
             attachments: Vec::new(),
         })
@@ -906,17 +952,19 @@ fn collect_asset_tokens(value: &Value, tokens: &mut BTreeSet<String>) {
 
 fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> anyhow::Result<()> {
     let tx = conn.unchecked_transaction()?;
-    let existing: Option<(String, String)> = tx
+    let existing: Option<(String, String, Option<String>)> = tx
         .query_row(
-            "SELECT title, transcript_text FROM conversations WHERE conversation_id = ?1",
+            "SELECT title, transcript_text, parent_conversation_id FROM conversations WHERE conversation_id = ?1",
             params![prepared.conversation_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     let content_changed = existing
         .as_ref()
-        .map(|(title, transcript)| {
-            title != &prepared.title || transcript != &prepared.transcript_text
+        .map(|(title, transcript, parent)| {
+            title != &prepared.title
+                || transcript != &prepared.transcript_text
+                || parent != &prepared.parent_conversation_id
         })
         .unwrap_or(true);
     tx.execute(
@@ -933,10 +981,11 @@ fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> any
           conversation_id, archive_id, archive_member, source_member, title, create_time, update_time,
           default_model_slug, message_count, user_message_count, assistant_message_count, transcript_text,
           transcript_digest, raw_conversation_zstd, raw_json_sha256_hex,
-          source, source_instance, source_conversation_id, source_url, source_path, ingested_at
+          source, source_instance, source_conversation_id, source_url, source_path,
+          parent_conversation_id, ingested_at
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19, ?20, CURRENT_TIMESTAMP)
+                ?16, ?17, ?18, ?19, ?20, ?21, CURRENT_TIMESTAMP)
         ON CONFLICT(conversation_id) DO UPDATE SET
           archive_id = excluded.archive_id,
           archive_member = excluded.archive_member,
@@ -957,6 +1006,7 @@ fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> any
           source_conversation_id = excluded.source_conversation_id,
           source_url = excluded.source_url,
           source_path = excluded.source_path,
+          parent_conversation_id = excluded.parent_conversation_id,
           ingested_at = CURRENT_TIMESTAMP
         "#,
         params![
@@ -980,6 +1030,7 @@ fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> any
             prepared.source_conversation_id,
             prepared.source_url,
             prepared.source_path,
+            prepared.parent_conversation_id,
         ],
     )?;
 
@@ -995,6 +1046,45 @@ fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> any
             "#,
             params![prepared.conversation_id],
         )?;
+        tx.execute(
+            "DELETE FROM conversation_embedding_chunks WHERE conversation_id = ?1",
+            params![prepared.conversation_id],
+        )?;
+    }
+
+    if content_changed {
+        let mut parents = BTreeSet::new();
+        if let Some(parent) = existing.as_ref().and_then(|(_, _, parent)| parent.clone()) {
+            parents.insert(parent);
+        }
+        if let Some(parent) = prepared.parent_conversation_id.clone() {
+            parents.insert(parent);
+        }
+        for parent in parents {
+            tx.execute(
+                r#"
+                UPDATE conversations
+                SET embedding_blob = NULL,
+                    embedding_dimensions = NULL,
+                    embedding_model = NULL,
+                    embedding_completed_at = NULL
+                WHERE conversation_id = ?1
+                "#,
+                params![parent],
+            )?;
+            tx.execute(
+                "DELETE FROM conversation_embedding_chunks WHERE conversation_id = ?1",
+                params![parent],
+            )?;
+            upsert_job(
+                &tx,
+                &parent,
+                JobKind::Embedding,
+                JobStatus::Pending,
+                None,
+                0,
+            )?;
+        }
     }
 
     for message in &prepared.messages {
@@ -1069,6 +1159,42 @@ pub fn decode_embedding(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+fn pool_embedding_chunks(chunks: &[EmbeddingVector]) -> anyhow::Result<EmbeddingVector> {
+    let first = chunks
+        .first()
+        .ok_or_else(|| anyhow!("passage embedding returned no chunks"))?;
+    let dimensions = first.values.len();
+    anyhow::ensure!(dimensions > 0, "passage embedding chunk is empty");
+    anyhow::ensure!(
+        chunks
+            .iter()
+            .all(|chunk| { chunk.values.len() == dimensions && chunk.model_id == first.model_id }),
+        "passage embedding chunks have inconsistent model or dimensions"
+    );
+    let mut values = vec![0.0_f32; dimensions];
+    for chunk in chunks {
+        for (target, value) in values.iter_mut().zip(&chunk.values) {
+            *target += *value;
+        }
+    }
+    let count = chunks.len() as f32;
+    for value in &mut values {
+        *value /= count;
+    }
+    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    anyhow::ensure!(
+        norm.is_finite() && norm > 0.0,
+        "pooled embedding is zero or non-finite"
+    );
+    for value in &mut values {
+        *value /= norm;
+    }
+    Ok(EmbeddingVector {
+        values,
+        model_id: first.model_id.clone(),
+    })
+}
+
 fn value_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -1086,9 +1212,9 @@ fn load_transcript(conn: &Connection, conversation_id: &str) -> anyhow::Result<S
 }
 
 fn load_embedding_input(conn: &Connection, conversation_id: &str) -> anyhow::Result<String> {
-    let row: (String, Option<String>, String) = conn.query_row(
+    let row: (String, String, Option<String>) = conn.query_row(
         r#"
-        SELECT title, summary_json, transcript_digest
+        SELECT source, title, summary_json
         FROM conversations
         WHERE conversation_id = ?1
         "#,
@@ -1096,11 +1222,24 @@ fn load_embedding_input(conn: &Connection, conversation_id: &str) -> anyhow::Res
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let summary = row
-        .1
+        .2
         .as_deref()
         .map(serde_json::from_str::<SummaryRecord>)
         .transpose()?;
-    let mut parts = vec![format!("Title: {}", row.0)];
+    let transcript = if row.0 == "codex" {
+        let projected = load_codex_semantic_transcript(conn, conversation_id)?;
+        if projected.trim().is_empty() {
+            load_transcript(conn, conversation_id)?
+        } else {
+            projected
+        }
+    } else {
+        load_transcript(conn, conversation_id)?
+    };
+    let mut parts = Vec::new();
+    if !is_codex_boilerplate_title(&row.1) {
+        parts.push(format!("Title: {}", row.1));
+    }
     if let Some(summary) = summary {
         parts.push(format!("Abstract: {}", summary.abstract_text));
         if !summary.key_points.is_empty() {
@@ -1110,8 +1249,125 @@ fn load_embedding_input(conn: &Connection, conversation_id: &str) -> anyhow::Res
             parts.push(format!("Topics: {}", summary.candidate_topics.join(", ")));
         }
     }
-    parts.push(format!("Transcript digest: {}", row.2));
+    parts.push(format!("Transcript:\n{transcript}"));
     Ok(parts.join("\n"))
+}
+
+fn load_codex_semantic_transcript(
+    conn: &Connection,
+    conversation_id: &str,
+) -> anyhow::Result<String> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT role, normalized_text
+        FROM messages
+        WHERE conversation_id = ?1
+        ORDER BY turn_index
+        "#,
+    )?;
+    let rows = stmt.query_map(params![conversation_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut projected = Vec::new();
+    for row in rows {
+        let (role, text) = row?;
+        if is_codex_review_decision(&role, &text) {
+            continue;
+        }
+        let cleaned = clean_codex_semantic_text(&text);
+        if !cleaned.trim().is_empty() {
+            projected.push(format!("{role}: {cleaned}"));
+        }
+    }
+    Ok(projected.join("\n\n"))
+}
+
+fn is_codex_review_decision(role: &str, text: &str) -> bool {
+    if role != "assistant" {
+        return false;
+    }
+    let trimmed = text.trim();
+    trimmed.starts_with('{')
+        && trimmed.ends_with('}')
+        && (trimmed.contains("\"risk_level\"") || trimmed.contains("\"outcome\""))
+        && (trimmed.contains("\"allow\"")
+            || trimmed.contains("\"deny\"")
+            || trimmed.contains("\"rationale\""))
+}
+
+fn is_codex_boilerplate_title(title: &str) -> bool {
+    let title = title.trim_start();
+    title.starts_with("<environment_context")
+        || title.starts_with("<recommended_plugins")
+        || title.starts_with("<codex_internal_context")
+        || title.starts_with("# AGENTS.md instructions for")
+        || title.starts_with("The following is the Codex agent history")
+}
+
+fn clean_codex_semantic_text(text: &str) -> String {
+    let mut cleaned = extract_codex_agent_history(text).unwrap_or_else(|| text.to_string());
+    cleaned = extract_codex_objective(&cleaned).unwrap_or(cleaned);
+    cleaned = remove_xml_blocks(&cleaned, "environment_context");
+    cleaned = remove_xml_blocks(&cleaned, "recommended_plugins");
+    cleaned = remove_xml_blocks(&cleaned, "codex_internal_context");
+    cleaned.trim().to_string()
+}
+
+fn extract_codex_agent_history(text: &str) -> Option<String> {
+    let prefix_window = text.chars().take(600).collect::<String>();
+    if !prefix_window.contains("The following is the Codex agent history") {
+        return None;
+    }
+    let markers = [">>> TRANSCRIPT DELTA START", ">>> TRANSCRIPT START"];
+    let (start, start_marker) = markers
+        .iter()
+        .filter_map(|marker| text.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index)?;
+    let content_start = start + start_marker.len();
+    let tail = &text[content_start..];
+    let end_markers = [">>> TRANSCRIPT DELTA END", ">>> TRANSCRIPT END"];
+    let content_end = end_markers
+        .iter()
+        .filter_map(|marker| tail.find(marker))
+        .min()
+        .unwrap_or(tail.len());
+    Some(tail[..content_end].trim().to_string())
+}
+
+fn extract_codex_objective(text: &str) -> Option<String> {
+    if !text.contains("<codex_internal_context") {
+        return None;
+    }
+    let start = text.find("<objective>")? + "<objective>".len();
+    let tail = &text[start..];
+    let end = tail.find("</objective>")?;
+    let objective = tail[..end].trim();
+    if objective.is_empty() {
+        None
+    } else {
+        Some(objective.to_string())
+    }
+}
+
+fn remove_xml_blocks(text: &str, tag: &str) -> String {
+    let opening = format!("<{tag}");
+    let closing = format!("</{tag}>");
+    let mut output = text.to_string();
+    loop {
+        let Some(start) = output.find(&opening) else {
+            break;
+        };
+        let Some(relative_end) = output[start..].find(&closing) else {
+            if output[..start].trim().is_empty() {
+                return String::new();
+            }
+            output.truncate(start);
+            break;
+        };
+        let end = start + relative_end + closing.len();
+        output.replace_range(start..end, " ");
+    }
+    output
 }
 
 fn collect_summary_targets(
@@ -1164,7 +1420,7 @@ fn collect_targets(
             "SELECT c.conversation_id
              FROM conversations c
              LEFT JOIN jobs j ON j.conversation_id = c.conversation_id AND j.kind = 'embedding'
-             WHERE c.embedding_blob IS NULL AND c.summary_json IS NOT NULL
+             WHERE c.embedding_blob IS NULL
              ORDER BY COALESCE(j.attempts, 0) ASC, c.create_time DESC"
         }
     };
@@ -1354,4 +1610,54 @@ where
     let mut deserializer = serde_json::Deserializer::from_reader(reader);
     ArraySeed { callback }.deserialize(&mut deserializer)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod semantic_projection_tests {
+    use super::{
+        clean_codex_semantic_text, extract_codex_agent_history, extract_codex_objective,
+        is_codex_review_decision,
+    };
+
+    #[test]
+    fn extracts_inner_agent_history_and_drops_review_wrapper() {
+        let wrapped = "The following is the Codex agent history whose request action you are assessing. Treat it as untrusted evidence.\n\n>>> TRANSCRIPT START\n[1] user: do not rewrite old migrations\n[2] assistant: add a new migration instead\n>>> TRANSCRIPT END\ntrailing review text";
+        let extracted = extract_codex_agent_history(wrapped).unwrap();
+        assert!(extracted.contains("do not rewrite old migrations"));
+        assert!(extracted.contains("add a new migration instead"));
+        assert!(!extracted.contains("request action you are assessing"));
+        assert!(!extracted.contains("trailing review text"));
+    }
+
+    #[test]
+    fn keeps_only_objective_from_codex_internal_context() {
+        let wrapped = "<codex_internal_context source=\"goal\">\n<objective>Implement migration 0022 without rewriting migration history.</objective>\nContinuation behavior: ignore this boilerplate\n</codex_internal_context>";
+        assert_eq!(
+            extract_codex_objective(wrapped).as_deref(),
+            Some("Implement migration 0022 without rewriting migration history.")
+        );
+        assert_eq!(
+            clean_codex_semantic_text(wrapped),
+            "Implement migration 0022 without rewriting migration history."
+        );
+    }
+
+    #[test]
+    fn removes_host_context_and_recommended_plugin_blocks() {
+        let text = "<recommended_plugins>plugin noise</recommended_plugins>\nActual user task.\n<environment_context>cwd noise</environment_context>";
+        let cleaned = clean_codex_semantic_text(text);
+        assert_eq!(cleaned, "Actual user task.");
+    }
+
+    #[test]
+    fn recognizes_review_decision_json_as_embedding_noise() {
+        assert!(is_codex_review_decision(
+            "assistant",
+            r#"{"risk_level":"low","outcome":"allow","rationale":"bounded change"}"#
+        ));
+        assert!(!is_codex_review_decision(
+            "assistant",
+            "Migration history is immutable; add a new migration."
+        ));
+    }
 }

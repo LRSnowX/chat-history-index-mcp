@@ -11,11 +11,18 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, backup::Backup, params}
 use tempfile::NamedTempFile;
 
 use crate::{
+    codex::review_parent_conversation_id,
     models::{DatabaseHealth, IndexStats, JobKind, JobStatus, RestoreReport, SourceHealth},
     sql::SCHEMA,
 };
 
-const REQUIRED_TABLES: &[&str] = &["conversations", "messages", "attachments", "jobs"];
+const REQUIRED_TABLES: &[&str] = &[
+    "conversations",
+    "messages",
+    "conversation_embedding_chunks",
+    "attachments",
+    "jobs",
+];
 
 pub fn open_database(path: &Path) -> anyhow::Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -240,6 +247,10 @@ fn migrate_conversation_sources(conn: &Connection) -> anyhow::Result<()> {
             "ALTER TABLE conversations ADD COLUMN source_path TEXT",
         ),
         (
+            "parent_conversation_id",
+            "ALTER TABLE conversations ADD COLUMN parent_conversation_id TEXT",
+        ),
+        (
             "ingested_at",
             "ALTER TABLE conversations ADD COLUMN ingested_at TEXT",
         ),
@@ -259,8 +270,37 @@ fn migrate_conversation_sources(conn: &Connection) -> anyhow::Result<()> {
     )?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_conversations_source ON conversations(source, source_instance);\n\
-         CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_source_identity ON conversations(source, COALESCE(source_instance, ''), source_conversation_id);",
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_source_identity ON conversations(source, COALESCE(source_instance, ''), source_conversation_id);\n\
+         CREATE INDEX IF NOT EXISTS idx_conversations_parent ON conversations(parent_conversation_id);",
     )?;
+    backfill_codex_review_parents(conn)?;
+    Ok(())
+}
+
+fn backfill_codex_review_parents(conn: &Connection) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT c.conversation_id, m.normalized_text
+        FROM conversations c
+        JOIN messages m ON m.conversation_id = c.conversation_id AND m.turn_index = 0
+        WHERE c.default_model_slug = 'codex-auto-review'
+          AND c.parent_conversation_id IS NULL
+        "#,
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (conversation_id, text) in rows {
+        if let Some(parent) = review_parent_conversation_id(&text) {
+            conn.execute(
+                "UPDATE conversations SET parent_conversation_id = ?2 WHERE conversation_id = ?1",
+                params![conversation_id, parent],
+            )?;
+        }
+    }
     Ok(())
 }
 

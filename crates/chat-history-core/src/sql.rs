@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   ,source_conversation_id TEXT
   ,source_url TEXT
   ,source_path TEXT
+  ,parent_conversation_id TEXT
   ,ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -61,6 +62,15 @@ CREATE TABLE IF NOT EXISTS messages (
   normalized_text TEXT NOT NULL,
   raw_message_json TEXT NOT NULL,
   UNIQUE(conversation_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_embedding_chunks (
+  conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  embedding_blob BLOB NOT NULL,
+  embedding_dimensions INTEGER NOT NULL,
+  embedding_model TEXT NOT NULL,
+  PRIMARY KEY(conversation_id, chunk_index)
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -111,4 +121,5 @@ CREATE INDEX IF NOT EXISTS idx_conversations_create_time ON conversations(create
 CREATE INDEX IF NOT EXISTS idx_conversations_update_time ON conversations(update_time);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_turn ON messages(conversation_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_jobs_kind_status ON jobs(kind, status);
+CREATE INDEX IF NOT EXISTS idx_embedding_chunks_model ON conversation_embedding_chunks(embedding_model, embedding_dimensions);
 "#;
