@@ -27,6 +27,8 @@ pub struct ChatGptBridgeThread {
 pub struct ChatGptThreadListSnapshot {
     pub requested_limit: usize,
     pub threads: Vec<ChatGptBridgeThread>,
+    #[serde(default)]
+    pub pinned_threads: Vec<ChatGptBridgeThread>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -60,6 +62,8 @@ pub struct ChatGptBridgeTranscript {
     pub update_time: Option<f64>,
     pub model: Option<String>,
     pub source_url: Option<String>,
+    #[serde(default)]
+    pub attachment_metadata: Vec<Value>,
     #[serde(default)]
     pub pages: Vec<ChatGptBridgePage>,
 }
@@ -170,6 +174,7 @@ impl ChatGptSyncState {
         let newest_seen = snapshot
             .threads
             .iter()
+            .chain(snapshot.pinned_threads.iter())
             .filter_map(|thread| thread.update_time)
             .max_by(|left, right| left.total_cmp(right));
 
@@ -191,7 +196,11 @@ impl ChatGptSyncState {
 
         let mut selected = Vec::new();
         let mut skipped_blocked_ids = Vec::new();
-        for thread in snapshot.threads {
+        for thread in snapshot
+            .threads
+            .into_iter()
+            .chain(snapshot.pinned_threads.into_iter())
+        {
             if thread.kind != "chatgpt" {
                 continue;
             }
@@ -205,7 +214,11 @@ impl ChatGptSyncState {
                 skipped_blocked_ids.push(thread.thread_id);
                 continue;
             }
-            if self.completed_since_cursor.contains_key(&thread.thread_id) {
+            if self
+                .completed_since_cursor
+                .get(&thread.thread_id)
+                .is_some_and(|completed| *completed >= update_time)
+            {
                 continue;
             }
             let pending = ChatGptPendingThread {
@@ -253,7 +266,7 @@ impl ChatGptSyncState {
     }
 
     pub fn mark_imported_at(&mut self, thread_id: &str, imported_update_time: Option<f64>) {
-        let update_time = self
+        let pending_update_time = self
             .pending
             .remove(thread_id)
             .map(|value| value.update_time)
@@ -261,8 +274,11 @@ impl ChatGptSyncState {
                 self.blocked
                     .remove(thread_id)
                     .and_then(|value| value.update_time)
-            })
-            .or(imported_update_time);
+            });
+        let update_time = match (pending_update_time, imported_update_time) {
+            (Some(pending), Some(imported)) => Some(pending.max(imported)),
+            (pending, imported) => pending.or(imported),
+        };
         self.blocked.remove(thread_id);
         if let Some(update_time) = update_time {
             self.completed_since_cursor
@@ -389,7 +405,10 @@ impl ChatGptBridgeTranscript {
             source_url: self.source_url,
             source_path: None,
             messages,
-            raw: serde_json::json!({"collector": "chatgpt-app-bridge-v1"}),
+            raw: serde_json::json!({
+                "collector": "chatgpt-app-bridge-v1",
+                "attachment_metadata": self.attachment_metadata,
+            }),
         })
     }
 }
@@ -447,11 +466,40 @@ mod tests {
                 thread("codex-new", "codex", 120.0),
                 thread("chat-mid", "chatgpt", 110.0),
             ],
+            pinned_threads: Vec::new(),
         };
         let plan = state.plan_recent(snapshot).unwrap();
         assert!(plan.discovery_overflow);
         assert_eq!(plan.selected.len(), 2);
         assert_eq!(state.last_successful_update_time, Some(100.0));
+    }
+
+    #[test]
+    fn pinned_threads_are_selected_without_masking_recent_list_overflow() {
+        let mut state = ChatGptSyncState {
+            last_successful_update_time: Some(100.0),
+            ..ChatGptSyncState::default()
+        };
+        let plan = state
+            .plan_recent(ChatGptThreadListSnapshot {
+                requested_limit: 2,
+                threads: vec![
+                    thread("recent-a", "chatgpt", 130.0),
+                    thread("recent-b", "chatgpt", 120.0),
+                ],
+                pinned_threads: vec![
+                    thread("pinned-new", "chatgpt", 125.0),
+                    thread("pinned-old", "chatgpt", 90.0),
+                ],
+            })
+            .unwrap();
+        assert!(plan.discovery_overflow);
+        let ids = plan
+            .selected
+            .iter()
+            .map(|thread| thread.thread_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["recent-a", "pinned-new", "recent-b"]);
     }
 
     #[test]
@@ -476,6 +524,7 @@ mod tests {
                     thread("new", "chatgpt", 110.0),
                     thread("blocked", "chatgpt", 105.0),
                 ],
+                pinned_threads: Vec::new(),
             })
             .unwrap();
         assert_eq!(plan.selected.len(), 1);
@@ -493,6 +542,7 @@ mod tests {
             update_time: Some(4.0),
             model: None,
             source_url: None,
+            attachment_metadata: Vec::new(),
             pages: vec![
                 ChatGptBridgePage {
                     request_cursor: None,
@@ -528,6 +578,7 @@ mod tests {
             update_time: None,
             model: None,
             source_url: None,
+            attachment_metadata: Vec::new(),
             pages: vec![ChatGptBridgePage {
                 request_cursor: None,
                 next_cursor: None,
@@ -552,6 +603,7 @@ mod tests {
                     thread("b", "chatgpt", 110.0),
                     thread("old", "chatgpt", 90.0),
                 ],
+                pinned_threads: Vec::new(),
             })
             .unwrap();
         state.mark_imported("a");
@@ -576,6 +628,7 @@ mod tests {
                     thread("blocked", "chatgpt", 110.0),
                     thread("old", "chatgpt", 90.0),
                 ],
+                pinned_threads: Vec::new(),
             })
             .unwrap();
         state.mark_imported("done");
@@ -588,10 +641,50 @@ mod tests {
                     thread("blocked", "chatgpt", 110.0),
                     thread("old", "chatgpt", 90.0),
                 ],
+                pinned_threads: Vec::new(),
             })
             .unwrap();
         assert!(plan.selected.is_empty());
         assert_eq!(plan.skipped_blocked_ids, vec!["blocked"]);
         assert_eq!(state.last_successful_update_time, Some(100.0));
+    }
+
+    #[test]
+    fn imported_thread_is_requeued_if_it_changes_before_cursor_advances() {
+        let mut state = ChatGptSyncState {
+            last_successful_update_time: Some(100.0),
+            ..ChatGptSyncState::default()
+        };
+        state
+            .plan_recent(ChatGptThreadListSnapshot {
+                requested_limit: 50,
+                threads: vec![
+                    thread("changing", "chatgpt", 120.0),
+                    thread("blocked", "chatgpt", 110.0),
+                ],
+                pinned_threads: Vec::new(),
+            })
+            .unwrap();
+        state.mark_imported_at("changing", Some(121.0));
+        state.mark_blocked("blocked", "incomplete");
+
+        let unchanged = state
+            .plan_recent(ChatGptThreadListSnapshot {
+                requested_limit: 50,
+                threads: vec![thread("changing", "chatgpt", 121.0)],
+                pinned_threads: Vec::new(),
+            })
+            .unwrap();
+        assert!(unchanged.selected.is_empty());
+
+        let changed = state
+            .plan_recent(ChatGptThreadListSnapshot {
+                requested_limit: 50,
+                threads: vec![thread("changing", "chatgpt", 130.0)],
+                pinned_threads: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(changed.selected.len(), 1);
+        assert_eq!(changed.selected[0].update_time, 130.0);
     }
 }
