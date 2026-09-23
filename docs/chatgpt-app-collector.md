@@ -9,39 +9,50 @@ The public OpenAI Conversations API is not this data source. It stores conversat
 
 ## Automatic macOS live collector
 
-The installed macOS collector can consume those first-party App Tools without invoking a model:
+The installed macOS collector consumes those first-party App Tools without invoking a model:
 
 ```bash
 ./scripts/install-self-hosted --skip-plugin
 "$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service" install
 ```
 
-The default LaunchAgent label is `local.chat-history-index-chatgpt-sync` and the default cadence is
-120 seconds. Change it at install time with `--interval SECONDS` (minimum 30 seconds).
+The default cadence is 120 seconds. Change it at install time with
+`--interval SECONDS` (minimum 30 seconds). No ChatGPT collector LaunchAgent is
+created.
 
 The collector intentionally uses ChatGPT.app's bundled, OpenAI-signed runtime chain:
 
 ```text
-ChatGPT bundled Node (collector)
-  -> ChatGPT bundled signed codex sandbox
-    -> ChatGPT bundled Node
-      -> bundled codex-app-tools MCP server
-        -> list_threads / read_thread
+ChatGPT.app
+  -> official codex app-server
+    -> bundled signed Node (short-lived MCP bootstrap)
+      -> bundled signed Node (detached collector daemon)
+        -> first-party App Tools native pipe
+          -> list_threads / read_thread
 ```
 
 On production macOS builds the App Tools Unix socket performs native peer/parent/grandparent code
-signature authorization. Starting the provider with a normal system/Homebrew Node is rejected by
-that security boundary. The collector does not bypass or disable the check; it runs through the
-signed executables shipped with ChatGPT.app so the normal authorization succeeds.
+signature authorization. Starting a collector independently from Terminal or a LaunchAgent is
+rejected by that security boundary even when it uses the bundled Node, because the parent process
+chain is not the ChatGPT-hosted chain. The collector does not bypass or disable the check. Instead,
+it is configured as an ordinary MCP server of the official ChatGPT app-server. Its short-lived
+bootstrap waits until the detached daemon has opened the authorized pipe before completing MCP
+initialization. The daemon keeps that one accepted socket open across polling cycles, even after
+the bootstrap process is reclaimed by the app-server.
+
+The MCP server configuration uses `env_vars = ["CODEX_APP_TOOLS_PIPE_PATH"]` so the app-server
+explicitly passes its current first-party pipe to the bootstrap. If the whole ChatGPT app restarts
+and receives a new pipe, the bootstrap compares a non-secret pipe identity with the prior daemon
+and replaces a stale daemon before syncing.
 
 No collector step reads ChatGPT cookies, browser local storage, authentication headers, Keychain
 session material, or private HTTP API responses. It only consumes the first-party App Tools MCP
 surface already provided by the desktop app.
 
-Each run:
+Each polling cycle:
 
-1. chooses an existing local Codex thread as the App Tools interaction context;
-2. discovers the newest live `/tmp/codex-browser-use/*.sock` that accepts the signed provider;
+1. reuses the already-authorized App Tools socket opened during bootstrap;
+2. chooses an existing local Codex thread as the App Tools interaction context;
 3. calls `list_threads(limit: 50)`;
 4. sends normal and pinned entries through the durable `chatgpt-plan-recent` state machine;
 5. leaves an `active` ChatGPT thread pending so an in-progress conversation is not snapshotted;
@@ -60,13 +71,20 @@ Useful service commands:
 ```bash
 SERVICE="$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service"
 "$SERVICE" status
-"$SERVICE" run
 "$SERVICE" restart
+"$SERVICE" stop
 "$SERVICE" uninstall
 ```
 
-Logs are written under the managed data home as `logs/chatgpt-live-collector.log` and
-`logs/chatgpt-live-collector.error.log`. A no-change run is intentionally quiet.
+`install` updates only the dedicated `mcp_servers.chatgpt_live_collector` blocks in
+`~/.codex/config.toml`, preserving a timestamped configuration backup before a change. If
+ChatGPT.app is already running, the service restarts only its `codex app-server` child so the main
+desktop app and open conversations remain in place. `uninstall` removes that config block and
+stops the daemon but preserves indexed history and sync state.
+
+Status lives at `cache/chatgpt-live-collector-status.json`. Logs are written under the managed
+data home as `logs/chatgpt-live-collector.log` and `logs/chatgpt-live-collector.error.log`. A
+clean no-change cycle is intentionally quiet.
 
 ## Local collector state machine
 

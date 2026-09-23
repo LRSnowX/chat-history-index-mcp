@@ -196,11 +196,15 @@ impl ChatGptSyncState {
 
         let mut selected = Vec::new();
         let mut skipped_blocked_ids = Vec::new();
+        let mut seen_thread_ids = HashSet::new();
         for thread in snapshot
             .threads
             .into_iter()
             .chain(snapshot.pinned_threads.into_iter())
         {
+            if !seen_thread_ids.insert(thread.thread_id.clone()) {
+                continue;
+            }
             if thread.kind != "chatgpt" {
                 continue;
             }
@@ -500,6 +504,24 @@ mod tests {
             .map(|thread| thread.thread_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["recent-a", "pinned-new", "recent-b"]);
+    }
+
+    #[test]
+    fn thread_present_in_recent_and_pinned_is_planned_once() {
+        let mut state = ChatGptSyncState {
+            last_successful_update_time: Some(100.0),
+            ..ChatGptSyncState::default()
+        };
+        let duplicate = thread("same", "chatgpt", 120.0);
+        let plan = state
+            .plan_recent(ChatGptThreadListSnapshot {
+                requested_limit: 50,
+                threads: vec![duplicate.clone()],
+                pinned_threads: vec![duplicate],
+            })
+            .unwrap();
+        assert_eq!(plan.selected.len(), 1);
+        assert_eq!(plan.selected[0].thread_id, "same");
     }
 
     #[test]

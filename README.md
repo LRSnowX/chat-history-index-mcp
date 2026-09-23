@@ -103,9 +103,14 @@ On macOS, install the deterministic live ChatGPT collector after the binaries:
 "$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service" install
 ```
 
-It uses ChatGPT.app's bundled signed `codex-app-tools` MCP (`list_threads` and
-`read_thread`) on a 120-second default cadence. It does not invoke a model or
-read browser/session credentials.
+The service adds a small MCP bootstrap entry to `~/.codex/config.toml`. The
+official ChatGPT app-server starts that bootstrap with ChatGPT.app's bundled
+signed Node; while the trusted process chain is still intact, it creates one
+long-lived collector daemon and opens the first-party App Tools pipe. The
+daemon reuses that authorized socket to call `list_threads` and paged
+`read_thread` on a 120-second default cadence. It does not invoke a model or
+read browser/session credentials. A ChatGPT app restart naturally creates a
+fresh bootstrap/daemon for the new App Tools pipe.
 
 ## Managed data home
 

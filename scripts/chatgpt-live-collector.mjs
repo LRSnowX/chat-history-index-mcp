@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -23,6 +24,11 @@ const MAX_NATIVE_FRAME_BYTES = 8 * 1024 * 1024;
 const STATUS_PATH = path.join(DATA_HOME, "cache/chatgpt-live-collector-status.json");
 const LOG_PATH = path.join(DATA_HOME, "logs/chatgpt-live-collector.log");
 const ERROR_LOG_PATH = path.join(DATA_HOME, "logs/chatgpt-live-collector.error.log");
+const DAEMON_LOCK = path.join(DATA_HOME, "cache/chatgpt-live-collector-daemon.lock");
+
+function pipeIdentity(pipePath) {
+  return createHash("sha256").update(pipePath).digest("hex").slice(0, 16);
+}
 
 class NativeAppToolsClient {
   constructor(pipePath) {
@@ -134,11 +140,11 @@ class NativeAppToolsClient {
     if (tool == null) throw new Error(`ChatGPT App Tools does not expose ${name}`);
     const result = await this.request("tools/call", {
       arguments: args,
-      callId: `chat-history-${crypto.randomUUID()}`,
+      callId: `chat-history-${randomUUID()}`,
       namespace: tool.namespace,
       threadId: contextThreadId,
       tool: name,
-      turnId: `chat-history-${crypto.randomUUID()}`,
+      turnId: `chat-history-${randomUUID()}`,
     }, 60_000);
     return {
       isError: result.success !== true,
@@ -380,23 +386,40 @@ function writeStatus(payload) {
   fs.renameSync(staged, STATUS_PATH);
 }
 
-async function syncOnce() {
+function acquirePidLock(lock) {
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.mkdirSync(lock);
+      fs.writeFileSync(path.join(lock, "pid"), `${process.pid}\n`, { mode: 0o600 });
+      return () => fs.rmSync(lock, { recursive: true, force: true });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let existingPid = null;
+      try {
+        existingPid = Number(fs.readFileSync(path.join(lock, "pid"), "utf8").trim());
+      } catch {}
+      let alive = false;
+      if (Number.isInteger(existingPid) && existingPid > 0) {
+        try {
+          process.kill(existingPid, 0);
+          alive = true;
+        } catch (probeError) {
+          alive = probeError?.code !== "ESRCH";
+        }
+      }
+      if (alive) return null;
+      fs.rmSync(lock, { recursive: true, force: true });
+    }
+  }
+  return null;
+}
+
+async function syncWithClient(client, contextThreadId) {
   mustExist(CLI);
   const releaseLock = acquireLock();
   if (releaseLock == null) return { event: "chatgpt_live_sync_skipped", reason: "locked" };
-  let client = null;
   try {
-    const contextThreadId = selectContextThread();
-    if (contextThreadId == null) return { event: "chatgpt_live_sync_skipped", reason: "no-context-thread" };
-    const pipePath = process.env.CODEX_APP_TOOLS_PIPE_PATH?.trim();
-    if (!pipePath) return { event: "chatgpt_live_sync_skipped", reason: "no-app-tools-pipe" };
-    client = new NativeAppToolsClient(pipePath);
-    const listed = await client.listTools();
-    const names = new Set((listed.tools ?? []).map((tool) => tool.name));
-    if (!names.has("list_threads") || !names.has("read_thread")) {
-      throw new Error("ChatGPT App Tools does not expose list_threads/read_thread");
-    }
-
     const catalog = toolText(await client.callTool("list_threads", { limit: DISCOVERY_LIMIT }, contextThreadId));
     const statusById = new Map();
     for (const entry of [...(catalog.threads ?? []), ...(catalog.pinnedThreads ?? [])]) {
@@ -458,31 +481,79 @@ async function syncOnce() {
       titles: importedTitles,
     };
   } finally {
-    client?.close();
     releaseLock();
   }
 }
 
-async function collectorLoop() {
+async function syncOnce() {
+  const contextThreadId = selectContextThread();
+  if (contextThreadId == null) return { event: "chatgpt_live_sync_skipped", reason: "no-context-thread" };
+  const pipePath = process.env.CODEX_APP_TOOLS_PIPE_PATH?.trim();
+  if (!pipePath) return { event: "chatgpt_live_sync_skipped", reason: "no-app-tools-pipe" };
+  const client = new NativeAppToolsClient(pipePath);
+  try {
+    const listed = await client.listTools();
+    const names = new Set((listed.tools ?? []).map((tool) => tool.name));
+    if (!names.has("list_threads") || !names.has("read_thread")) {
+      throw new Error("ChatGPT App Tools does not expose list_threads/read_thread");
+    }
+    return await syncWithClient(client, contextThreadId);
+  } finally {
+    client.close();
+  }
+}
+
+async function daemonLoop() {
+  const releaseDaemonLock = acquirePidLock(DAEMON_LOCK);
+  if (releaseDaemonLock == null) return;
   const interval = Math.max(
     30_000,
     Number(process.env.CHAT_HISTORY_CHATGPT_POLL_INTERVAL_MS ?? DEFAULT_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS,
   );
-  writeStatus({
-    state: "starting",
-    pid: process.pid,
-    started_at: new Date().toISOString(),
-    pipe_present: Boolean(process.env.CODEX_APP_TOOLS_PIPE_PATH?.trim()),
-    interval_ms: interval,
-  });
-  while (true) {
-    try {
-      const result = await syncOnce();
+  const pipePath = process.env.CODEX_APP_TOOLS_PIPE_PATH?.trim();
+  if (!pipePath) {
+    writeStatus({ state: "degraded", pid: process.pid, pipe_present: false, error: "no-app-tools-pipe" });
+    releaseDaemonLock();
+    return;
+  }
+  const client = new NativeAppToolsClient(pipePath);
+  const currentPipeIdentity = pipeIdentity(pipePath);
+  let stopping = false;
+  let wakeSleep = null;
+  const stop = () => {
+    stopping = true;
+    client.close();
+    wakeSleep?.();
+  };
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
+  try {
+    const listed = await client.listTools();
+    const names = new Set((listed.tools ?? []).map((tool) => tool.name));
+    if (!names.has("list_threads") || !names.has("read_thread")) {
+      throw new Error("ChatGPT App Tools does not expose list_threads/read_thread");
+    }
+    writeStatus({
+      state: "running",
+      pid: process.pid,
+      started_at: new Date().toISOString(),
+      pipe_present: true,
+      pipe_connected: true,
+      pipe_identity: currentPipeIdentity,
+      interval_ms: interval,
+    });
+    while (!stopping) {
+      const contextThreadId = selectContextThread();
+      const result = contextThreadId == null
+        ? { event: "chatgpt_live_sync_skipped", reason: "no-context-thread" }
+        : await syncWithClient(client, contextThreadId);
       const status = {
         state: "running",
         pid: process.pid,
         checked_at: new Date().toISOString(),
-        pipe_present: Boolean(process.env.CODEX_APP_TOOLS_PIPE_PATH?.trim()),
+        pipe_present: true,
+        pipe_connected: !client.closed,
+        pipe_identity: currentPipeIdentity,
         interval_ms: interval,
         last_result: result,
       };
@@ -490,24 +561,106 @@ async function collectorLoop() {
       if (result.imported > 0 || result.blocked > 0 || result.event !== "chatgpt_live_sync") {
         appendLog(LOG_PATH, result);
       }
-    } catch (error) {
-      const detail = String(error?.stack ?? error);
-      writeStatus({
-        state: "degraded",
-        pid: process.pid,
-        checked_at: new Date().toISOString(),
-        pipe_present: Boolean(process.env.CODEX_APP_TOOLS_PIPE_PATH?.trim()),
-        error: detail,
+      if (client.closed) throw new Error("ChatGPT App Tools pipe disconnected");
+      await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          wakeSleep = null;
+          resolve();
+        };
+        const timer = setTimeout(finish, interval);
+        wakeSleep = finish;
+        if (stopping) finish();
       });
-      appendLog(ERROR_LOG_PATH, { event: "chatgpt_live_collector_error", error: detail });
     }
-    await new Promise((resolve) => setTimeout(resolve, interval));
+  } catch (error) {
+    const detail = String(error?.stack ?? error);
+    writeStatus({
+      state: "degraded",
+      pid: process.pid,
+      checked_at: new Date().toISOString(),
+      pipe_present: true,
+      pipe_connected: false,
+      pipe_identity: currentPipeIdentity,
+      error: detail,
+    });
+    appendLog(ERROR_LOG_PATH, { event: "chatgpt_live_collector_error", error: detail });
+  } finally {
+    client.close();
+    releaseDaemonLock();
   }
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+async function ensureDaemonReady() {
+  const pipePath = process.env.CODEX_APP_TOOLS_PIPE_PATH?.trim();
+  if (!pipePath) throw new Error("CODEX_APP_TOOLS_PIPE_PATH is not available to the collector bootstrap");
+  const expectedPipeIdentity = pipeIdentity(pipePath);
+  try {
+    const pid = Number(fs.readFileSync(path.join(DAEMON_LOCK, "pid"), "utf8").trim());
+    if (pidAlive(pid)) {
+      let status = null;
+      try {
+        status = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8"));
+      } catch {}
+      if (
+        status?.pid === pid
+        && status?.state === "running"
+        && status?.pipe_connected === true
+        && status?.pipe_identity === expectedPipeIdentity
+      ) {
+        return pid;
+      }
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {}
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline && pidAlive(pid)) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+  } catch {}
+  fs.rmSync(DAEMON_LOCK, { recursive: true, force: true });
+  const child = spawn(process.execPath, [process.argv[1], "--daemon"], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env },
+  });
+  child.unref();
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    let status = null;
+    try {
+      status = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8"));
+    } catch (error) {
+      if (error instanceof SyntaxError) throw error;
+    }
+    if (status?.pid === child.pid && status.pipe_connected === true && status.state === "running") {
+      return child.pid;
+    }
+    if (status?.pid === child.pid && status.state === "degraded") {
+      throw new Error(status.error ?? "collector daemon failed to connect");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`collector daemon ${child.pid} did not become ready`);
 }
 
 function runMcpSidecar() {
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-  input.on("line", (line) => {
+  input.on("line", async (line) => {
     let message;
     try {
       message = JSON.parse(line);
@@ -518,11 +671,24 @@ function runMcpSidecar() {
     if (message.id == null) return;
     const respond = (result) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n`);
     if (message.method === "initialize") {
-      respond({
-        protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
-        capabilities: { tools: {} },
-        serverInfo: { name: "chatgpt-live-collector", version: "1.0.0" },
-      });
+      try {
+        await ensureDaemonReady();
+        respond({
+          protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "chatgpt-live-collector", version: "1.0.0" },
+        });
+      } catch (error) {
+        appendLog(ERROR_LOG_PATH, {
+          event: "chatgpt_live_collector_bootstrap_error",
+          error: String(error?.stack ?? error),
+        });
+        process.stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32603, message: "ChatGPT live collector daemon failed to start" },
+        })}\n`);
+      }
       return;
     }
     if (message.method === "ping") {
@@ -530,7 +696,41 @@ function runMcpSidecar() {
       return;
     }
     if (message.method === "tools/list") {
-      respond({ tools: [] });
+      respond({
+        tools: [
+          {
+            name: "chatgpt_live_collector_status",
+            description: "Read the local ChatGPT live collector status. This tool does not trigger a sync.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            annotations: {
+              title: "ChatGPT Live Collector Status",
+              readOnlyHint: true,
+              destructiveHint: false,
+              openWorldHint: false,
+            },
+          },
+        ],
+      });
+      return;
+    }
+    if (message.method === "tools/call") {
+      if (message.params?.name !== "chatgpt_live_collector_status") {
+        process.stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32602, message: `Unknown tool: ${message.params?.name ?? "missing"}` },
+        })}\n`);
+        return;
+      }
+      let status = { state: "starting", pid: process.pid };
+      try {
+        status = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8"));
+      } catch {}
+      respond({
+        content: [{ type: "text", text: JSON.stringify(status) }],
+        structuredContent: status,
+        isError: false,
+      });
       return;
     }
     if (message.method === "resources/list") {
@@ -543,14 +743,15 @@ function runMcpSidecar() {
       error: { code: -32601, message: `Method not found: ${message.method}` },
     })}\n`);
   });
-  collectorLoop().catch((error) => {
-    appendLog(ERROR_LOG_PATH, { event: "chatgpt_live_collector_fatal", error: String(error?.stack ?? error) });
-    process.exitCode = 1;
-  });
 }
 
 if (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  if (process.argv.includes("--mcp-sidecar")) {
+  if (process.argv.includes("--daemon")) {
+    daemonLoop().catch((error) => {
+      appendLog(ERROR_LOG_PATH, { event: "chatgpt_live_collector_fatal", error: String(error?.stack ?? error) });
+      process.exitCode = 1;
+    });
+  } else if (process.argv.includes("--mcp-sidecar")) {
     runMcpSidecar();
   } else {
     syncOnce()
@@ -570,7 +771,9 @@ export {
   NativeAppToolsClient,
   bridgeMessages,
   bridgeThread,
+  ensureDaemonReady,
   messageText,
   readCompleteThread,
+  syncWithClient,
   syncOnce,
 };
