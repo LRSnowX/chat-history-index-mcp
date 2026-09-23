@@ -81,6 +81,10 @@ The default data home is:
 
 Override it with `--data-home` or `CHAT_HISTORY_DATA_HOME`. Index data never belongs in the Git repository.
 
+Summary generation uses the Codex CLI account/default model unless
+`CHAT_HISTORY_SUMMARY_MODEL` is set to a non-empty model name, in which case
+that explicit model is passed to `codex exec`.
+
 ## Back up and migrate
 
 Create a consistent SQLite backup while the index is online:

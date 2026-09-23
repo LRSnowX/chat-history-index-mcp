@@ -273,7 +273,7 @@ impl IndexService {
                         r#"
                         UPDATE conversations
                         SET summary_json = ?2,
-                            summary_model = 'gpt-5.4 via codex exec',
+                            summary_model = ?6,
                             summary_completed_at = CURRENT_TIMESTAMP,
                             risk_flags_json = ?3,
                             topic_tags_json = ?4,
@@ -286,6 +286,7 @@ impl IndexService {
                             serde_json::to_string(&summary.risk_flags)?,
                             serde_json::to_string(&summary.candidate_topics)?,
                             serde_json::to_string(&summary.redaction_notes)?,
+                            openai.summary_model_label(),
                         ],
                     )?;
                     upsert_job(
