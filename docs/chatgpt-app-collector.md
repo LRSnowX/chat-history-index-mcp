@@ -7,6 +7,67 @@ ChatGPT.app is the primary live ChatGPT collector. The Codex app bridge exposes 
 
 The public OpenAI Conversations API is not this data source. It stores conversations created through API requests; it does not enumerate the ChatGPT sidebar.
 
+## Automatic macOS live collector
+
+The installed macOS collector can consume those first-party App Tools without invoking a model:
+
+```bash
+./scripts/install-self-hosted --skip-plugin
+"$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service" install
+```
+
+The default LaunchAgent label is `local.chat-history-index-chatgpt-sync` and the default cadence is
+120 seconds. Change it at install time with `--interval SECONDS` (minimum 30 seconds).
+
+The collector intentionally uses ChatGPT.app's bundled, OpenAI-signed runtime chain:
+
+```text
+ChatGPT bundled Node (collector)
+  -> ChatGPT bundled signed codex sandbox
+    -> ChatGPT bundled Node
+      -> bundled codex-app-tools MCP server
+        -> list_threads / read_thread
+```
+
+On production macOS builds the App Tools Unix socket performs native peer/parent/grandparent code
+signature authorization. Starting the provider with a normal system/Homebrew Node is rejected by
+that security boundary. The collector does not bypass or disable the check; it runs through the
+signed executables shipped with ChatGPT.app so the normal authorization succeeds.
+
+No collector step reads ChatGPT cookies, browser local storage, authentication headers, Keychain
+session material, or private HTTP API responses. It only consumes the first-party App Tools MCP
+surface already provided by the desktop app.
+
+Each run:
+
+1. chooses an existing local Codex thread as the App Tools interaction context;
+2. discovers the newest live `/tmp/codex-browser-use/*.sock` that accepts the signed provider;
+3. calls `list_threads(limit: 50)`;
+4. sends normal and pinned entries through the durable `chatgpt-plan-recent` state machine;
+5. leaves an `active` ChatGPT thread pending so an in-progress conversation is not snapshotted;
+6. for each selected `idle` ChatGPT thread, follows every `read_thread` cursor until `hasMore=false`;
+7. imports the complete transcript and builds only its local multilingual embedding;
+8. advances the safe cursor only when no pending/blocked item remains.
+
+The App Tools per-message output ceiling is 20,000 characters. Since the current bridge does not
+publish a separate truncation flag for ordinary user/assistant items, the collector fails closed
+when a returned message reaches the boundary instead of silently indexing an ambiguous partial
+message. App Tools attachment metadata is preserved in the compressed raw conversation record;
+the live collector does not invent binary attachment rows without stable provider file payloads.
+
+Useful service commands:
+
+```bash
+SERVICE="$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service"
+"$SERVICE" status
+"$SERVICE" run
+"$SERVICE" restart
+"$SERVICE" uninstall
+```
+
+Logs are written under the managed data home as `logs/chatgpt-live-collector.log` and
+`logs/chatgpt-live-collector.error.log`. A no-change run is intentionally quiet.
+
 ## Local collector state machine
 
 The index owns the durable sync state and completeness checks. The ChatGPT.app bridge only reads
@@ -38,9 +99,14 @@ Adapt the result of `list_threads(limit: 50)` to:
       "create_time": 1787184000.0,
       "update_time": 1787187600.0
     }
-  ]
+  ],
+  "pinned_threads": []
 }
 ```
+
+`threads` is the normal limited recent list and is the only list used to detect recent-50
+discovery overflow. `pinned_threads` is additional: pinned items participate in synchronization
+but an old pinned conversation cannot hide an overflow in the limited recent list.
 
 Feed it over stdin so no plaintext staging file is required:
 
@@ -139,13 +205,17 @@ incremental path.
 5. Reverse the returned turns into chronological order and emit the normalized format with `source: "chatgpt"` and the app thread ID as `source_conversation_id`.
 6. Import through `scripts/import-normalized-stdin BYTE_COUNT` and advance the cursor only after a clean import.
 
-Run transcript reads serially or with very low concurrency. `read_thread` is rate-limited; on `Too many requests`, stop the batch, preserve the pending IDs, and retry on a later run. Do not continue issuing requests into the throttle.
+Run transcript reads serially or with very low concurrency. The automatic collector is strictly
+serial. `read_thread` is rate-limited; on `Too many requests`, stop the batch, preserve the pending
+IDs, and retry on a later run. Do not continue issuing requests into the throttle.
 
 The stdin form avoids leaving plaintext transcript staging files on disk.
 
 ## Initial backfill
 
-The 50-item recent list is not enough for a complete backfill. Discover all sidebar conversation IDs through the signed-in ChatGPT UI, then fetch every transcript through `read_thread`. The UI step collects IDs and titles only; do not inspect cookies, local storage, auth headers, or private endpoints.
+The 50-item recent list is not enough for an arbitrary historical backfill. Use a complete OpenAI
+export for the one-time bootstrap, then let the live collector maintain the incremental tail. The
+collector never inspects cookies, local storage, auth headers, or private endpoints.
 
 Completeness requires all of the following:
 

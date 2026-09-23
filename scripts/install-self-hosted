@@ -40,6 +40,8 @@ cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" --workspace
 /usr/bin/install -m 755 "$REPO_ROOT/scripts/run-chat-history-http-with-bitwarden.py" "$DATA_HOME/bin/run-chat-history-http-with-bitwarden.py"
 /usr/bin/install -m 755 "$REPO_ROOT/scripts/chat-history-migrate" "$DATA_HOME/bin/chat-history-migrate"
 /usr/bin/install -m 755 "$REPO_ROOT/scripts/sync-codex-remote" "$DATA_HOME/bin/sync-codex-remote"
+/usr/bin/install -m 755 "$REPO_ROOT/scripts/chatgpt-live-collector.mjs" "$DATA_HOME/bin/chatgpt-live-collector.mjs"
+/usr/bin/install -m 755 "$REPO_ROOT/scripts/chatgpt-live-collector-service" "$DATA_HOME/bin/chatgpt-live-collector-service"
 
 if [ "$INSTALL_PLUGIN" = true ]; then
   command -v codex >/dev/null 2>&1 || { echo "Codex CLI is required unless --skip-plugin is used." >&2; exit 1; }

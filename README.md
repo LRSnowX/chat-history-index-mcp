@@ -96,6 +96,17 @@ Live ChatGPT.app collection uses the dedicated `chatgpt_state`,
 seeding tools. See `docs/chatgpt-app-collector.md` for the bridge contract and
 completeness rules.
 
+On macOS, install the deterministic live ChatGPT collector after the binaries:
+
+```bash
+./scripts/install-self-hosted --skip-plugin
+"$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service" install
+```
+
+It uses ChatGPT.app's bundled signed `codex-app-tools` MCP (`list_threads` and
+`read_thread`) on a 120-second default cadence. It does not invoke a model or
+read browser/session credentials.
+
 ## Managed data home
 
 The default data home is:

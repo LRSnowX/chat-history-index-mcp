@@ -33,9 +33,19 @@ Useful commands:
 
 ## ChatGPT.app collection
 
-When the ChatGPT/Codex desktop tool surface exposes the first-party `list_threads` and
-`read_thread` bridge operations, use the index's dedicated ChatGPT collector tools rather than
-constructing normalized imports ad hoc:
+On the primary macOS host, normal incremental ChatGPT collection is handled by the deterministic
+`local.chat-history-index-chatgpt-sync` LaunchAgent. It uses ChatGPT.app's bundled signed runtime
+and the first-party `codex-app-tools` MCP (`list_threads` / `read_thread`) without invoking a
+model. Do not duplicate this sync in an interactive maintenance run.
+
+Check it with:
+
+```bash
+SERVICE="$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service"
+"$SERVICE" status
+```
+
+The underlying collector contract remains:
 
 1. Call `list_threads(limit: 50)` and adapt the result to the documented discovery snapshot.
 2. Call `chatgpt_plan_recent` before reading transcripts. If it reports discovery overflow, do

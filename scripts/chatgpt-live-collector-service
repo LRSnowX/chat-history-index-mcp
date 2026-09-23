@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DATA_HOME="${CHAT_HISTORY_DATA_HOME:-$HOME/Library/Application Support/chat-history-index-mcp}"
+LABEL="local.chat-history-index-chatgpt-sync"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+CHATGPT_NODE="/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
+COLLECTOR="$DATA_HOME/bin/chatgpt-live-collector.mjs"
+
+usage() {
+  echo "usage: $0 install [--interval SECONDS] | start | stop | restart | status | run | uninstall" >&2
+}
+
+COMMAND="${1:-}"
+[ -n "$COMMAND" ] || { usage; exit 2; }
+shift
+
+case "$COMMAND" in
+  install)
+    INTERVAL=120
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --interval) INTERVAL="$2"; shift 2 ;;
+        *) usage; exit 2 ;;
+      esac
+    done
+    [[ "$INTERVAL" =~ ^[0-9]+$ ]] && [ "$INTERVAL" -ge 30 ] || { echo "--interval must be an integer >= 30" >&2; exit 2; }
+    [ -x "$CHATGPT_NODE" ] || { echo "ChatGPT.app bundled Node is missing: $CHATGPT_NODE" >&2; exit 1; }
+    [ -f "$COLLECTOR" ] || { echo "run scripts/install-self-hosted first" >&2; exit 1; }
+    /bin/mkdir -p "$HOME/Library/LaunchAgents" "$DATA_HOME/logs"
+    /usr/bin/python3 - "$PLIST" "$LABEL" "$DATA_HOME" "$CHATGPT_NODE" "$COLLECTOR" "$INTERVAL" <<'PY'
+import plistlib, sys
+path, label, data_home, node, collector, interval = sys.argv[1:]
+payload = {
+    "Label": label,
+    "ProgramArguments": [node, collector],
+    "EnvironmentVariables": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "CHAT_HISTORY_DATA_HOME": data_home,
+    },
+    "RunAtLoad": True,
+    "StartInterval": int(interval),
+    "ProcessType": "Background",
+    "StandardOutPath": f"{data_home}/logs/chatgpt-live-collector.log",
+    "StandardErrorPath": f"{data_home}/logs/chatgpt-live-collector.error.log",
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle, sort_keys=True)
+PY
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+    echo "Installed and started $LABEL (interval ${INTERVAL}s)"
+    ;;
+  start)
+    if ! launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+      launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    fi
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+    ;;
+  stop) launchctl bootout "gui/$(id -u)/$LABEL" ;;
+  restart)
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+    ;;
+  status) launchctl print "gui/$(id -u)/$LABEL" ;;
+  run)
+    exec "$CHATGPT_NODE" "$COLLECTOR"
+    ;;
+  uninstall)
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    /bin/rm -f "$PLIST"
+    echo "Removed $LABEL; ChatGPT index data and sync state were preserved."
+    ;;
+  *) usage; exit 2 ;;
+esac
