@@ -601,6 +601,7 @@ struct PreparedConversation {
     parent_conversation_id: Option<String>,
     messages: Vec<PreparedMessage>,
     attachments: Vec<AttachmentRecord>,
+    replace_attachments: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -729,6 +730,7 @@ impl PreparedConversation {
             parent_conversation_id: None,
             messages,
             attachments,
+            replace_attachments: true,
         })
     }
 
@@ -798,6 +800,7 @@ impl PreparedConversation {
             parent_conversation_id,
             messages,
             attachments: Vec::new(),
+            replace_attachments: false,
         })
     }
 }
@@ -971,10 +974,12 @@ fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> any
         "DELETE FROM messages WHERE conversation_id = ?1",
         params![prepared.conversation_id],
     )?;
-    tx.execute(
-        "DELETE FROM attachments WHERE conversation_id = ?1",
-        params![prepared.conversation_id],
-    )?;
+    if prepared.replace_attachments {
+        tx.execute(
+            "DELETE FROM attachments WHERE conversation_id = ?1",
+            params![prepared.conversation_id],
+        )?;
+    }
     tx.execute(
         r#"
         INSERT INTO conversations (
@@ -1104,22 +1109,24 @@ fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> any
             ],
         )?;
     }
-    for attachment in &prepared.attachments {
-        tx.execute(
-            r#"
-            INSERT INTO attachments (conversation_id, attachment_id, archive_path, extension, size_bytes, source_ref, linkage_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                prepared.conversation_id,
-                attachment.attachment_id,
-                attachment.archive_path,
-                attachment.extension,
-                attachment.size_bytes,
-                attachment.source_ref,
-                serde_json::to_string(&attachment.linkage_json)?,
-            ],
-        )?;
+    if prepared.replace_attachments {
+        for attachment in &prepared.attachments {
+            tx.execute(
+                r#"
+                INSERT INTO attachments (conversation_id, attachment_id, archive_path, extension, size_bytes, source_ref, linkage_json)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    prepared.conversation_id,
+                    attachment.attachment_id,
+                    attachment.archive_path,
+                    attachment.extension,
+                    attachment.size_bytes,
+                    attachment.source_ref,
+                    serde_json::to_string(&attachment.linkage_json)?,
+                ],
+            )?;
+        }
     }
     if content_changed {
         upsert_job(

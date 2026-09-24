@@ -2,7 +2,8 @@ use std::{fs, io::Write, path::Path};
 
 use chat_history_core::embedding::EmbeddingVector;
 use chat_history_core::{
-    DataHome, ImportMode, ImportOptions, IndexService, SearchMode, SearchOptions, encode_embedding,
+    DataHome, ImportMode, ImportOptions, IndexService, NormalizedConversation, NormalizedMessage,
+    SearchMode, SearchOptions, encode_embedding,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -140,6 +141,39 @@ async fn imports_nested_zip_and_supports_search() -> anyhow::Result<()> {
     assert_eq!(
         raw["title"],
         Value::String("Voice note with attachment".to_string())
+    );
+
+    service.import_normalized(
+        vec![NormalizedConversation {
+            source: "chatgpt".to_string(),
+            source_instance: None,
+            source_conversation_id: "conv-voice-note".to_string(),
+            title: "Voice note updated live".to_string(),
+            create_time: Some(1_735_689_600.0),
+            update_time: Some(1_735_690_000.0),
+            model: None,
+            source_url: None,
+            source_path: None,
+            messages: vec![NormalizedMessage {
+                message_id: "live-user-1".to_string(),
+                role: "user".to_string(),
+                create_time: Some(1_735_689_700.0),
+                text: "Updated through the live bridge without a binary attachment payload."
+                    .to_string(),
+                raw: Value::Null,
+            }],
+            raw: serde_json::json!({"collector":"chatgpt-app-bridge-v1"}),
+        }],
+        Some(Path::new("chatgpt-app-bridge")),
+    )?;
+    let updated = service
+        .get_conversation("conv-voice-note", true)?
+        .expect("updated conversation detail");
+    assert_eq!(updated.conversation.title, "Voice note updated live");
+    assert_eq!(updated.attachments.len(), 1);
+    assert_eq!(
+        updated.attachments[0].source_ref,
+        "file_00000000abcdef1234567890"
     );
 
     let fts_results = service

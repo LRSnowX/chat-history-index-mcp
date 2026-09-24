@@ -33,10 +33,10 @@ Useful commands:
 
 ## ChatGPT.app collection
 
-On the primary macOS host, normal incremental ChatGPT collection is handled by the deterministic
-`local.chat-history-index-chatgpt-sync` LaunchAgent. It uses ChatGPT.app's bundled signed runtime
-and the first-party `codex-app-tools` MCP (`list_threads` / `read_thread`) without invoking a
-model. Do not duplicate this sync in an interactive maintenance run.
+On the primary macOS host, normal incremental ChatGPT collection is handled by a single daemon
+bootstrapped as an MCP sidecar by ChatGPT.app's official app-server. It inherits the first-party
+App Tools pipe from that host and uses `codex-app-tools` (`list_threads` / `read_thread`) without
+invoking a model. Do not duplicate this sync in an interactive maintenance run or a LaunchAgent.
 
 Check it with:
 

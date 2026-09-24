@@ -7,6 +7,8 @@ CHATGPT_NODE="/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
 COLLECTOR="$DATA_HOME/bin/chatgpt-live-collector.mjs"
 STATUS="$DATA_HOME/cache/chatgpt-live-collector-status.json"
 DAEMON_LOCK="$DATA_HOME/cache/chatgpt-live-collector-daemon.lock"
+LEGACY_LABEL="local.chat-history-index-chatgpt-sync"
+LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 BEGIN_MARKER="# BEGIN chat-history-index-mcp ChatGPT live collector"
 END_MARKER="# END chat-history-index-mcp ChatGPT live collector"
 
@@ -25,6 +27,12 @@ daemon_pid() {
 
 pid_alive() {
   [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+}
+
+remove_legacy_launch_agent() {
+  launchctl bootout "gui/$(id -u)/$LEGACY_LABEL" >/dev/null 2>&1 || true
+  launchctl remove "$LEGACY_LABEL" >/dev/null 2>&1 || true
+  rm -f "$LEGACY_PLIST"
 }
 
 stop_daemon() {
@@ -163,12 +171,14 @@ case "$COMMAND" in
     [[ "$INTERVAL" =~ ^[0-9]+$ ]] && [ "$INTERVAL" -ge 30 ] || { echo "--interval must be an integer >= 30" >&2; exit 2; }
     [ -x "$CHATGPT_NODE" ] || { echo "ChatGPT.app bundled Node is missing: $CHATGPT_NODE" >&2; exit 1; }
     [ -f "$COLLECTOR" ] || { echo "run scripts/install-self-hosted first" >&2; exit 1; }
+    remove_legacy_launch_agent
     write_config "$((INTERVAL * 1000))"
     stop_daemon
     restart_app_server
     echo "Installed ChatGPT live collector (interval ${INTERVAL}s)."
     ;;
   start)
+    remove_legacy_launch_agent
     pid="$(daemon_pid)"
     if pid_alive "$pid"; then
       echo "ChatGPT live collector daemon is already running (pid $pid)."
@@ -181,6 +191,7 @@ case "$COMMAND" in
     echo "Stopped ChatGPT live collector daemon. It will bootstrap again when ChatGPT app-server is restarted."
     ;;
   restart)
+    remove_legacy_launch_agent
     stop_daemon
     restart_app_server
     ;;
@@ -190,6 +201,7 @@ case "$COMMAND" in
     if [ -f "$STATUS" ]; then cat "$STATUS"; else echo '{"state":"not-started"}'; fi
     ;;
   uninstall)
+    remove_legacy_launch_agent
     stop_daemon
     remove_config
     restart_app_server
