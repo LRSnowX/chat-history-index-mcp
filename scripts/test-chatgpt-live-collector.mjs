@@ -126,6 +126,7 @@ test("NativeAppToolsClient uses the ChatGPT host framing and namespace contract"
     assert.equal(requests[0].method, "tools/list");
     assert.deepEqual(requests[0].params, { threadStartKind: "all" });
     assert.equal(requests[1].method, "tools/call");
+    assert.equal(requests[1].params.callerSource, "codex");
     assert.equal(requests[1].params.namespace, "chatgpt");
     assert.equal(requests[1].params.threadId, "context-thread");
     assert.equal(requests[1].params.tool, "list_threads");

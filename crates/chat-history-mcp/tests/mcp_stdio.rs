@@ -112,6 +112,24 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
 
     let args: serde_json::Map<String, serde_json::Value> =
         serde_json::from_value(serde_json::json!({
+            "conversation_id": "conv-rust-index",
+            "message_limit": 1,
+            "tail": true
+        }))?;
+    let memory_tail = client
+        .call_tool(CallToolRequestParams::new("memory_get_thread").with_arguments(args))
+        .await?;
+    assert_eq!(memory_tail.is_error, Some(false));
+    let memory_tail_json = memory_tail
+        .structured_content
+        .as_ref()
+        .expect("tail structured");
+    assert_eq!(memory_tail_json["message_offset"], 1);
+    assert_eq!(memory_tail_json["returned_messages"], 1);
+    assert_eq!(memory_tail_json["thread"]["messages"][0]["turn_index"], 1);
+
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
             "project": "Rust",
             "query": "SQLite",
             "relevant_limit": 5,
@@ -121,6 +139,15 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         .call_tool(CallToolRequestParams::new("memory_project_context").with_arguments(args))
         .await?;
     assert_eq!(project_context.is_error, Some(false));
+    let project_context_json = project_context
+        .structured_content
+        .as_ref()
+        .expect("project context structured");
+    assert_eq!(
+        project_context_json["continuation"]["conversation_id"],
+        "conv-rust-index"
+    );
+    assert_eq!(project_context_json["continuation"]["returned_messages"], 2);
 
     let collector_state = client
         .call_tool(CallToolRequestParams::new("chatgpt_state"))

@@ -159,6 +159,7 @@ struct MemoryGetThreadRequest {
     conversation_id: String,
     message_offset: Option<usize>,
     message_limit: Option<usize>,
+    tail: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -168,6 +169,7 @@ struct MemoryProjectContextRequest {
     sources: Option<Vec<String>>,
     relevant_limit: Option<usize>,
     recent_limit: Option<usize>,
+    continuation_message_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -545,6 +547,9 @@ impl ChatHistoryMcp {
         &self,
         Parameters(request): Parameters<MemoryGetThreadRequest>,
     ) -> Result<Json<MemoryThreadResponse>, String> {
+        if request.tail.unwrap_or(false) && request.message_offset.is_some() {
+            return Err("message_offset cannot be combined with tail=true".to_string());
+        }
         let detail = self
             .service
             .get_conversation(&request.conversation_id, false)
@@ -559,8 +564,12 @@ impl ChatHistoryMcp {
             }));
         };
         let total_messages = detail.messages.len();
-        let offset = request.message_offset.unwrap_or(0).min(total_messages);
-        let limit = bounded_limit(request.message_limit, 80, 250);
+        let limit = bounded_limit(request.message_limit, 20, 250);
+        let offset = if request.tail.unwrap_or(false) {
+            total_messages.saturating_sub(limit)
+        } else {
+            request.message_offset.unwrap_or(0).min(total_messages)
+        };
         let end = offset.saturating_add(limit).min(total_messages);
         let messages = detail.messages[offset..end]
             .iter()
@@ -595,6 +604,7 @@ impl ChatHistoryMcp {
     ) -> Result<Json<MemoryProjectContextResponse>, String> {
         let relevant_limit = bounded_limit(request.relevant_limit, 8, 20);
         let recent_limit = bounded_limit(request.recent_limit, 6, 20);
+        let continuation_message_limit = bounded_limit(request.continuation_message_limit, 8, 16);
         let explicit_sources = request.sources;
         let query = request
             .query
@@ -655,10 +665,13 @@ impl ChatHistoryMcp {
             let recent = merge_unique_results(primary_recent, fallback_recent, recent_limit);
             ("chatgpt-first-fallback-all".to_string(), relevant, recent)
         };
+        let continuation =
+            self.memory_continuation_from_recent(&recent, continuation_message_limit)?;
         Ok(Json(MemoryProjectContextResponse {
             project: request.project,
             query,
             source_policy,
+            continuation,
             relevant: relevant.into_iter().map(memory_hit).collect(),
             recent: recent.into_iter().map(memory_hit).collect(),
         }))
@@ -834,6 +847,60 @@ impl ChatHistoryMcp {
             .is_some_and(|url| normalize_project_text(url).contains(&needle));
         Ok(title_matches || source_path_matches || source_url_matches)
     }
+
+    fn memory_continuation_from_recent(
+        &self,
+        recent: &[SearchResult],
+        limit: usize,
+    ) -> Result<Option<MemoryContinuation>, String> {
+        let mut short_fallback = None;
+        for prefer_chatgpt in [true, false] {
+            for candidate in recent {
+                if (candidate.source == "chatgpt") != prefer_chatgpt {
+                    continue;
+                }
+                let detail = self
+                    .service
+                    .get_conversation(&candidate.conversation_id, false)
+                    .map_err(|error| error.to_string())?;
+                let Some(detail) = detail else {
+                    continue;
+                };
+                let total_messages = detail.messages.len();
+                if total_messages == 0 {
+                    continue;
+                }
+                let offset = total_messages.saturating_sub(limit);
+                let messages = detail.messages[offset..]
+                    .iter()
+                    .map(|message| MemoryMessage {
+                        message_id: message.message_id.clone(),
+                        role: message.role.clone(),
+                        create_time: message.create_time,
+                        turn_index: message.turn_index,
+                        text: message.normalized_text.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let continuation = MemoryContinuation {
+                    conversation_id: detail.conversation.conversation_id,
+                    source: detail.conversation.source,
+                    title: detail.conversation.title,
+                    update_time: detail.conversation.update_time,
+                    message_offset: offset,
+                    returned_messages: messages.len(),
+                    total_messages,
+                    messages,
+                };
+                if continuation.total_messages >= 4 {
+                    return Ok(Some(continuation));
+                }
+                if short_fallback.is_none() {
+                    short_fallback = Some(continuation);
+                }
+            }
+        }
+        Ok(short_fallback)
+    }
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -911,6 +978,7 @@ struct MemoryProjectContextResponse {
     project: String,
     query: String,
     source_policy: String,
+    continuation: Option<MemoryContinuation>,
     relevant: Vec<MemoryHit>,
     recent: Vec<MemoryHit>,
 }
@@ -935,6 +1003,18 @@ struct MemoryThreadResponse {
 struct MemoryThread {
     conversation: ConversationRecord,
     summary: Option<SummaryRecord>,
+    messages: Vec<MemoryMessage>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct MemoryContinuation {
+    conversation_id: String,
+    source: String,
+    title: String,
+    update_time: Option<f64>,
+    message_offset: usize,
+    returned_messages: usize,
+    total_messages: usize,
     messages: Vec<MemoryMessage>,
 }
 

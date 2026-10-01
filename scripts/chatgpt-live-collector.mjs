@@ -140,6 +140,7 @@ class NativeAppToolsClient {
     if (tool == null) throw new Error(`ChatGPT App Tools does not expose ${name}`);
     const result = await this.request("tools/call", {
       arguments: args,
+      callerSource: "codex",
       callId: `chat-history-${randomUUID()}`,
       namespace: tool.namespace,
       threadId: contextThreadId,
