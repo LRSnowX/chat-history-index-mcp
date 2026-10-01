@@ -149,6 +149,16 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     );
     assert_eq!(project_context_json["continuation"]["returned_messages"], 2);
     assert_eq!(
+        project_context_json["continuations"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        project_context_json["continuations"][0]["conversation_id"],
+        "conv-rust-index"
+    );
+    assert_eq!(
         project_context_json["relevant"].as_array().map(Vec::len),
         Some(0)
     );

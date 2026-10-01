@@ -564,7 +564,7 @@ impl ChatHistoryMcp {
             }));
         };
         let total_messages = detail.messages.len();
-        let limit = bounded_limit(request.message_limit, 20, 250);
+        let limit = bounded_limit(request.message_limit, 12, 250);
         let offset = if request.tail.unwrap_or(false) {
             total_messages.saturating_sub(limit)
         } else {
@@ -672,13 +672,15 @@ impl ChatHistoryMcp {
             let recent = merge_unique_results(primary_recent, fallback_recent, recent_limit);
             ("chatgpt-first-fallback-all".to_string(), relevant, recent)
         };
-        let continuation =
-            self.memory_continuation_from_recent(&recent, continuation_message_limit)?;
+        let continuations =
+            self.memory_continuations_from_recent(&recent, continuation_message_limit, 2)?;
+        let continuation = continuations.first().cloned();
         Ok(Json(MemoryProjectContextResponse {
             project: request.project,
             query,
             source_policy,
             continuation,
+            continuations,
             relevant: relevant.into_iter().map(memory_hit).collect(),
             recent: recent.into_iter().map(memory_hit).collect(),
         }))
@@ -855,12 +857,13 @@ impl ChatHistoryMcp {
         Ok(title_matches || source_path_matches || source_url_matches)
     }
 
-    fn memory_continuation_from_recent(
+    fn memory_continuations_from_recent(
         &self,
         recent: &[SearchResult],
         limit: usize,
-    ) -> Result<Option<MemoryContinuation>, String> {
-        let mut short_fallback = None;
+        max_threads: usize,
+    ) -> Result<Vec<MemoryContinuation>, String> {
+        let mut continuations = Vec::new();
         for prefer_chatgpt in [true, false] {
             for candidate in recent {
                 if (candidate.source == "chatgpt") != prefer_chatgpt {
@@ -898,15 +901,13 @@ impl ChatHistoryMcp {
                     total_messages,
                     messages,
                 };
-                if continuation.total_messages >= 4 {
-                    return Ok(Some(continuation));
-                }
-                if short_fallback.is_none() {
-                    short_fallback = Some(continuation);
+                continuations.push(continuation);
+                if continuations.len() >= max_threads {
+                    return Ok(continuations);
                 }
             }
         }
-        Ok(short_fallback)
+        Ok(continuations)
     }
 }
 
@@ -986,6 +987,7 @@ struct MemoryProjectContextResponse {
     query: String,
     source_policy: String,
     continuation: Option<MemoryContinuation>,
+    continuations: Vec<MemoryContinuation>,
     relevant: Vec<MemoryHit>,
     recent: Vec<MemoryHit>,
 }
@@ -1013,7 +1015,7 @@ struct MemoryThread {
     messages: Vec<MemoryMessage>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 struct MemoryContinuation {
     conversation_id: String,
     source: String,
@@ -1025,7 +1027,7 @@ struct MemoryContinuation {
     messages: Vec<MemoryMessage>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 struct MemoryMessage {
     message_id: String,
     role: String,

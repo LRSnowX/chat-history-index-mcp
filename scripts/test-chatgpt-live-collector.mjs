@@ -9,6 +9,7 @@ import {
   NativeAppToolsClient,
   bridgeMessages,
   bridgeThread,
+  readCompleteThread,
 } from "./chatgpt-live-collector.mjs";
 
 function encodeNativeFrame(message) {
@@ -74,6 +75,59 @@ test("bridgeMessages fails closed near the App Tools per-message output cap", ()
   });
   assert.equal(messages.length, 1);
   assert.equal(messages[0].truncated, true);
+});
+
+test("readCompleteThread requests assistant outputs but indexes only conversation messages", async () => {
+  const calls = [];
+  const client = {
+    async callTool(name, args, contextThreadId) {
+      calls.push({ name, args, contextThreadId });
+      return {
+        isError: false,
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            thread: {
+              id: "thread-1",
+              title: "Project chat",
+              createdAt: 10,
+              updatedAt: 20,
+            },
+            page: { order: "newest_first", hasMore: false, nextCursor: null },
+            turns: [{
+              id: "turn-1",
+              status: "completed",
+              startedAt: 10,
+              completedAt: 20,
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-1",
+                  content: [{ type: "text", text: "question" }],
+                },
+                { type: "toolCall", id: "tool-1", name: "read" },
+                { type: "toolResult", id: "tool-result-1", text: "large tool output" },
+                { type: "agentMessage", id: "assistant-1", text: "answer" },
+              ],
+            }],
+            attachments: [],
+          }),
+        }],
+      };
+    },
+  };
+
+  const transcript = await readCompleteThread(client, "thread-1", "context-thread");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "read_thread");
+  assert.equal(calls[0].args.includeOutputs, true);
+  assert.deepEqual(
+    transcript.pages[0].messages.map((message) => [message.role, message.text]),
+    [
+      ["assistant", "answer"],
+      ["user", "question"],
+    ],
+  );
 });
 
 test("NativeAppToolsClient uses the ChatGPT host framing and namespace contract", async () => {

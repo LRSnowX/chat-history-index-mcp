@@ -275,7 +275,10 @@ async function readCompleteThread(client, threadId, contextThreadId) {
     const args = {
       threadId,
       turnLimit: TURN_LIMIT,
-      includeOutputs: false,
+      // Assistant responses are output items in the native ChatGPT thread bridge.
+      // Request them, then let bridgeMessages keep only userMessage/agentMessage
+      // while ignoring tool calls, tool outputs, and other non-conversation items.
+      includeOutputs: true,
       maxOutputCharsPerItem: MAX_MESSAGE_CHARS,
     };
     if (cursor != null) args.cursor = cursor;
