@@ -132,7 +132,7 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         serde_json::from_value(serde_json::json!({
             "project": "Rust",
             "query": "SQLite",
-            "relevant_limit": 5,
+            "relevant_limit": 0,
             "recent_limit": 3
         }))?;
     let project_context = client
@@ -148,6 +148,10 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         "conv-rust-index"
     );
     assert_eq!(project_context_json["continuation"]["returned_messages"], 2);
+    assert_eq!(
+        project_context_json["relevant"].as_array().map(Vec::len),
+        Some(0)
+    );
 
     let collector_state = client
         .call_tool(CallToolRequestParams::new("chatgpt_state"))

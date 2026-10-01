@@ -602,7 +602,7 @@ impl ChatHistoryMcp {
         &self,
         Parameters(request): Parameters<MemoryProjectContextRequest>,
     ) -> Result<Json<MemoryProjectContextResponse>, String> {
-        let relevant_limit = bounded_limit(request.relevant_limit, 8, 20);
+        let relevant_limit = request.relevant_limit.unwrap_or(8).min(20);
         let recent_limit = bounded_limit(request.recent_limit, 6, 20);
         let continuation_message_limit = bounded_limit(request.continuation_message_limit, 8, 16);
         let explicit_sources = request.sources;
@@ -613,28 +613,35 @@ impl ChatHistoryMcp {
             .unwrap_or(&request.project)
             .to_string();
         let (source_policy, relevant, recent) = if let Some(sources) = explicit_sources {
-            let relevant = self
-                .memory_search_results(
+            let relevant = if relevant_limit == 0 {
+                Vec::new()
+            } else {
+                self.memory_search_results(
                     &query,
                     Some(&request.project),
                     sources.clone(),
                     relevant_limit,
                 )
-                .await?;
+                .await?
+            };
             let recent = self
                 .memory_recent_results(Some(&request.project), sources, None, recent_limit)
                 .await?;
             ("explicit".to_string(), relevant, recent)
         } else {
-            let primary_relevant = self
-                .memory_search_results(
+            let primary_relevant = if relevant_limit == 0 {
+                Vec::new()
+            } else {
+                self.memory_search_results(
                     &query,
                     Some(&request.project),
                     vec!["chatgpt".to_string()],
                     relevant_limit,
                 )
-                .await?;
-            let fallback_relevant = if primary_relevant.len() < relevant_limit {
+                .await?
+            };
+            let fallback_relevant = if relevant_limit > 0 && primary_relevant.len() < relevant_limit
+            {
                 self.memory_search_results(
                     &query,
                     Some(&request.project),
