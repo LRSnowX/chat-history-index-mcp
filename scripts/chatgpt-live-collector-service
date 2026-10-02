@@ -15,7 +15,7 @@ BEGIN_MARKER="# BEGIN chat-history-index-mcp ChatGPT live collector"
 END_MARKER="# END chat-history-index-mcp ChatGPT live collector"
 
 usage() {
-  echo "usage: $0 install [--interval SECONDS] [--memory-projects CSV] [--memory-model MODEL] [--memory-scan-limit N] [--memory-max-conversations N] [--memory-max-messages N] | start | stop | restart | status | uninstall" >&2
+  echo "usage: $0 install [--interval SECONDS] [--memory-projects CSV] [--memory-model MODEL] [--memory-scan-limit N] [--memory-max-conversations N] [--memory-max-messages N] [--memory-max-pending-candidates N] | start | stop | restart | status | uninstall" >&2
 }
 
 app_server_pid() {
@@ -78,10 +78,11 @@ write_config() {
   local memory_scan_limit="$3"
   local memory_max_conversations="$4"
   local memory_max_messages="$5"
-  local memory_model="$6"
+  local memory_max_pending_candidates="$6"
+  local memory_model="$7"
   mkdir -p "$HOME/.codex"
   touch "$CONFIG"
-  /usr/bin/python3 - "$CONFIG" "$CHATGPT_NODE" "$COLLECTOR" "$DATA_HOME" "$interval_ms" "$memory_projects" "$memory_scan_limit" "$memory_max_conversations" "$memory_max_messages" "$memory_model" "$BEGIN_MARKER" "$END_MARKER" <<'PY'
+  /usr/bin/python3 - "$CONFIG" "$CHATGPT_NODE" "$COLLECTOR" "$DATA_HOME" "$interval_ms" "$memory_projects" "$memory_scan_limit" "$memory_max_conversations" "$memory_max_messages" "$memory_max_pending_candidates" "$memory_model" "$BEGIN_MARKER" "$END_MARKER" <<'PY'
 from pathlib import Path
 import json, os, shutil, stat, sys, time
 
@@ -95,6 +96,7 @@ import json, os, shutil, stat, sys, time
     memory_scan_limit,
     memory_max_conversations,
     memory_max_messages,
+    memory_max_pending_candidates,
     memory_model,
     begin,
     end,
@@ -135,6 +137,7 @@ if memory_projects.strip():
         f"CHAT_HISTORY_MEMORY_AUTO_SCAN_LIMIT = {json.dumps(memory_scan_limit)}\n"
         f"CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS = {json.dumps(memory_max_conversations)}\n"
         f"CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES = {json.dumps(memory_max_messages)}\n"
+        f"CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES = {json.dumps(memory_max_pending_candidates)}\n"
     )
     if memory_model.strip():
         memory_env += f"CHAT_HISTORY_MEMORY_MODEL = {json.dumps(memory_model)}\n"
@@ -197,6 +200,7 @@ case "$COMMAND" in
     MEMORY_SCAN_LIMIT=500
     MEMORY_MAX_CONVERSATIONS=1
     MEMORY_MAX_MESSAGES=8
+    MEMORY_MAX_PENDING_CANDIDATES=20
     MEMORY_MODEL=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -206,6 +210,7 @@ case "$COMMAND" in
         --memory-scan-limit) MEMORY_SCAN_LIMIT="$2"; shift 2 ;;
         --memory-max-conversations) MEMORY_MAX_CONVERSATIONS="$2"; shift 2 ;;
         --memory-max-messages) MEMORY_MAX_MESSAGES="$2"; shift 2 ;;
+        --memory-max-pending-candidates) MEMORY_MAX_PENDING_CANDIDATES="$2"; shift 2 ;;
         *) usage; exit 2 ;;
       esac
     done
@@ -213,6 +218,7 @@ case "$COMMAND" in
     [[ "$MEMORY_SCAN_LIMIT" =~ ^[0-9]+$ ]] && [ "$MEMORY_SCAN_LIMIT" -ge 1 ] && [ "$MEMORY_SCAN_LIMIT" -le 1000 ] || { echo "--memory-scan-limit must be an integer from 1 to 1000" >&2; exit 2; }
     [[ "$MEMORY_MAX_CONVERSATIONS" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_CONVERSATIONS" -ge 1 ] && [ "$MEMORY_MAX_CONVERSATIONS" -le 10 ] || { echo "--memory-max-conversations must be an integer from 1 to 10" >&2; exit 2; }
     [[ "$MEMORY_MAX_MESSAGES" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_MESSAGES" -ge 1 ] && [ "$MEMORY_MAX_MESSAGES" -le 16 ] || { echo "--memory-max-messages must be an integer from 1 to 16" >&2; exit 2; }
+    [[ "$MEMORY_MAX_PENDING_CANDIDATES" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_PENDING_CANDIDATES" -ge 1 ] && [ "$MEMORY_MAX_PENDING_CANDIDATES" -le 100 ] || { echo "--memory-max-pending-candidates must be an integer from 1 to 100" >&2; exit 2; }
     if [ -n "$MEMORY_MODEL" ] && [ -z "$MEMORY_PROJECTS" ]; then
       echo "--memory-model requires --memory-projects" >&2
       exit 2
@@ -220,7 +226,7 @@ case "$COMMAND" in
     [ -x "$CHATGPT_NODE" ] || { echo "ChatGPT.app bundled Node is missing: $CHATGPT_NODE" >&2; exit 1; }
     [ -f "$COLLECTOR" ] || { echo "run scripts/install-self-hosted first" >&2; exit 1; }
     remove_legacy_launch_agent
-    write_config "$((INTERVAL * 1000))" "$MEMORY_PROJECTS" "$MEMORY_SCAN_LIMIT" "$MEMORY_MAX_CONVERSATIONS" "$MEMORY_MAX_MESSAGES" "$MEMORY_MODEL"
+    write_config "$((INTERVAL * 1000))" "$MEMORY_PROJECTS" "$MEMORY_SCAN_LIMIT" "$MEMORY_MAX_CONVERSATIONS" "$MEMORY_MAX_MESSAGES" "$MEMORY_MAX_PENDING_CANDIDATES" "$MEMORY_MODEL"
     stop_daemon
     restart_app_server
     if [ -n "$MEMORY_PROJECTS" ]; then

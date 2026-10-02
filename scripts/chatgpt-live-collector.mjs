@@ -33,6 +33,7 @@ const MEMORY_COMPILER_STATUS_RECENT_RUNS = 5;
 const DEFAULT_MEMORY_AUTO_SCAN_LIMIT = 500;
 const DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS = 1;
 const DEFAULT_MEMORY_AUTO_MAX_MESSAGES = 8;
+const DEFAULT_MEMORY_AUTO_MAX_PENDING_CANDIDATES = 20;
 
 function pipeIdentity(pipePath) {
   return createHash("sha256").update(pipePath).digest("hex").slice(0, 16);
@@ -454,7 +455,12 @@ function memoryCompilerRunSummary(payload) {
               : 0,
             failures: Array.isArray(entry.result?.failures) ? entry.result.failures.length : 0,
           }
-          : { error: String(entry.error ?? "").slice(0, 1_000) }),
+          : entry.status === "blocked_by_health"
+            ? {
+              blockers: Array.isArray(entry.health?.blockers) ? entry.health.blockers.slice(0, 10) : [],
+              warnings: Array.isArray(entry.health?.warnings) ? entry.health.warnings.slice(0, 10) : [],
+            }
+            : { error: String(entry.error ?? "").slice(0, 1_000) }),
       }))
       : [],
     ...(payload.error == null ? {} : { error: String(payload.error).slice(0, 1_000) }),
@@ -530,6 +536,7 @@ function memoryAutoConfig(env = process.env) {
       scanLimit: DEFAULT_MEMORY_AUTO_SCAN_LIMIT,
       maxConversations: DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS,
       maxMessages: DEFAULT_MEMORY_AUTO_MAX_MESSAGES,
+      maxPendingCandidates: DEFAULT_MEMORY_AUTO_MAX_PENDING_CANDIDATES,
       model,
     };
   }
@@ -560,7 +567,98 @@ function memoryAutoConfig(env = process.env) {
       16,
       "CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES",
     ),
+    maxPendingCandidates: boundedInteger(
+      env.CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES,
+      DEFAULT_MEMORY_AUTO_MAX_PENDING_CANDIDATES,
+      1,
+      100,
+      "CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES",
+    ),
     model,
+  };
+}
+
+function memoryAutoHealthGate(health, maxPendingCandidates) {
+  const blockers = [];
+  const warnings = [];
+  const requiredCount = (value, name) => {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      throw new Error(`invalid memory health count: ${name}`);
+    }
+    return parsed;
+  };
+  const warningCount = (value) => {
+    if (value == null) return 0;
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+  };
+  const checkpointPrefixProblems = requiredCount(
+    health?.checkpoint_prefix_problem,
+    "checkpoint_prefix_problem",
+  );
+  const pendingRevalidationProblems = requiredCount(
+    health?.pending_revalidation_problem_count,
+    "pending_revalidation_problem_count",
+  );
+  const pendingCandidates = requiredCount(
+    health?.candidates?.pending,
+    "candidates.pending",
+  );
+  const incompleteCanonical = warningCount(health?.incomplete_canonical_conversation_count);
+  const staleOrUnverified = warningCount(health?.active_stale_or_unverified);
+  const rejectedSnapshots = warningCount(health?.tracked_rejected_lower_quality_snapshots);
+
+  if (checkpointPrefixProblems > 0) {
+    blockers.push({
+      code: "checkpoint_prefix_problem",
+      count: checkpointPrefixProblems,
+    });
+  }
+  if (pendingRevalidationProblems > 0) {
+    blockers.push({
+      code: "pending_revalidation_problem",
+      count: pendingRevalidationProblems,
+    });
+  }
+  if (pendingCandidates > maxPendingCandidates) {
+    blockers.push({
+      code: "pending_candidate_backlog",
+      count: pendingCandidates,
+      limit: maxPendingCandidates,
+    });
+  }
+  if (incompleteCanonical > 0) {
+    warnings.push({
+      code: "incomplete_canonical_evidence",
+      count: incompleteCanonical,
+    });
+  }
+  if (staleOrUnverified > 0) {
+    warnings.push({
+      code: "stale_or_unverified_active_memory",
+      count: staleOrUnverified,
+    });
+  }
+  if (rejectedSnapshots > 0) {
+    warnings.push({
+      code: "rejected_lower_quality_evidence",
+      count: rejectedSnapshots,
+    });
+  }
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    warnings,
+    summary: {
+      checkpoint_prefix_problem: checkpointPrefixProblems,
+      pending_revalidation_problem_count: pendingRevalidationProblems,
+      pending_candidates: pendingCandidates,
+      max_pending_candidates: maxPendingCandidates,
+      incomplete_canonical_conversation_count: incompleteCanonical,
+      active_stale_or_unverified: staleOrUnverified,
+      tracked_rejected_lower_quality_snapshots: rejectedSnapshots,
+    },
   };
 }
 
@@ -624,12 +722,26 @@ function runMemoryCompilerWorker() {
     scan_limit: config.scanLimit,
     max_conversations: config.maxConversations,
     max_messages: config.maxMessages,
+    max_pending_candidates: config.maxPendingCandidates,
   });
   const results = [];
   let failed = false;
   try {
     for (const project of config.projects) {
       try {
+        const health = cliJson([
+          "memory-health",
+          "--project", project,
+        ]);
+        const healthGate = memoryAutoHealthGate(health, config.maxPendingCandidates);
+        if (!healthGate.ok) {
+          results.push({
+            project,
+            status: "blocked_by_health",
+            health: healthGate,
+          });
+          continue;
+        }
         const result = cliJson([
           "memory-compile-project",
           "--project", project,
@@ -1093,6 +1205,7 @@ export {
   bridgeThread,
   ensureDaemonReady,
   memoryAutoConfig,
+  memoryAutoHealthGate,
   appendMemoryCompilerHistory,
   memoryCompilerHistorySummary,
   messageText,

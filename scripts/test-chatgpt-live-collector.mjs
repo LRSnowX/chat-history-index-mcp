@@ -13,6 +13,7 @@ import {
   bridgeThread,
   memoryCompilerHistorySummary,
   memoryAutoConfig,
+  memoryAutoHealthGate,
   maybeScheduleMemoryCompiler,
   readCompleteThread,
   readMemoryCompilerHistory,
@@ -91,6 +92,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
     scanLimit: 500,
     maxConversations: 1,
     maxMessages: 8,
+    maxPendingCandidates: 20,
     model: null,
   });
   assert.deepEqual(
@@ -107,8 +109,16 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
       scanLimit: 250,
       maxConversations: 2,
       maxMessages: 6,
+      maxPendingCandidates: 20,
       model: "gpt-5.6-sol",
     },
+  );
+  assert.deepEqual(
+    memoryAutoConfig({
+      CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "7",
+    }).maxPendingCandidates,
+    7,
   );
   assert.throws(
     () => memoryAutoConfig({
@@ -116,6 +126,70 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
       CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS: "0",
     }),
     /must be an integer between 1 and 10/,
+  );
+  assert.throws(
+    () => memoryAutoConfig({
+      CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "101",
+    }),
+    /must be an integer between 1 and 100/,
+  );
+});
+
+test("memory auto compiler health gate blocks state-integrity problems but keeps evidence warnings advisory", () => {
+  const healthyWithWarnings = memoryAutoHealthGate({
+    checkpoint_prefix_problem: 0,
+    pending_revalidation_problem_count: 0,
+    candidates: { pending: 3 },
+    incomplete_canonical_conversation_count: 2,
+    active_stale_or_unverified: 1,
+    tracked_rejected_lower_quality_snapshots: 4,
+  }, 20);
+  assert.equal(healthyWithWarnings.ok, true);
+  assert.deepEqual(healthyWithWarnings.blockers, []);
+  assert.deepEqual(
+    healthyWithWarnings.warnings.map((warning) => warning.code),
+    [
+      "incomplete_canonical_evidence",
+      "stale_or_unverified_active_memory",
+      "rejected_lower_quality_evidence",
+    ],
+  );
+
+  const blocked = memoryAutoHealthGate({
+    checkpoint_prefix_problem: 1,
+    pending_revalidation_problem_count: 2,
+    candidates: { pending: 21 },
+  }, 20);
+  assert.equal(blocked.ok, false);
+  assert.deepEqual(
+    blocked.blockers.map((blocker) => blocker.code),
+    [
+      "checkpoint_prefix_problem",
+      "pending_revalidation_problem",
+      "pending_candidate_backlog",
+    ],
+  );
+  assert.deepEqual(blocked.blockers[2], {
+    code: "pending_candidate_backlog",
+    count: 21,
+    limit: 20,
+  });
+  assert.throws(
+    () => memoryAutoHealthGate({
+      checkpoint_prefix_problem: "not-a-number",
+      pending_revalidation_problem_count: 0,
+      candidates: { pending: 0 },
+    }, 20),
+    /invalid memory health count: checkpoint_prefix_problem/,
+  );
+  assert.throws(
+    () => memoryAutoHealthGate({
+      checkpoint_prefix_problem: 0,
+      pending_revalidation_problem_count: 0,
+      candidates: {},
+    }, 20),
+    /invalid memory health count: candidates\.pending/,
   );
 });
 
@@ -232,12 +306,19 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
       [
         "#!/bin/sh",
         `printf '%s\\n' "$*" >> "${callsPath}"`,
-        `printf '%s\\n' '${JSON.stringify({
+        `if [ "$1" = "memory-health" ]; then printf '%s\\n' '${JSON.stringify({
+          checkpoint_prefix_problem: 0,
+          pending_revalidation_problem_count: 0,
+          candidates: { pending: 0 },
+          incomplete_canonical_conversation_count: 0,
+          active_stale_or_unverified: 0,
+          tracked_rejected_lower_quality_snapshots: 0,
+        })}'; else printf '%s\\n' '${JSON.stringify({
           project: "LEMonX",
           model_attempts: 0,
           staged: [],
           failures: [],
-        })}'`,
+        })}'; fi`,
         "",
       ].join("\n"),
       { mode: 0o755 },
@@ -258,6 +339,7 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
     assert.equal(run.status, 0, run.stderr);
     const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n");
     assert.deepEqual(calls, [
+      "memory-health --project LEMonX",
       "memory-compile-project --project LEMonX --scan-limit 250 --max-conversations 1 --max-messages 6",
     ]);
     const status = JSON.parse(
@@ -277,6 +359,67 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
     assert.equal(history.runs[0].state, "completed");
     assert.equal(history.runs[0].projects[0].project, "LEMonX");
     assert.equal(fs.existsSync(path.join(cache, "memory-auto-compiler.lock")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("memory compiler worker blocks unhealthy projects before model compilation without recording a worker failure", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-history-memory-health-gate-"));
+  try {
+    const bin = path.join(root, "bin");
+    const cache = path.join(root, "cache");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(cache, { recursive: true });
+    const callsPath = path.join(root, "calls.txt");
+    const fakeCli = path.join(bin, "chat-history-cli");
+    fs.writeFileSync(
+      fakeCli,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$*" >> "${callsPath}"`,
+        `if [ "$1" = "memory-health" ]; then printf '%s\\n' '${JSON.stringify({
+          checkpoint_prefix_problem: 1,
+          pending_revalidation_problem_count: 0,
+          candidates: { pending: 0 },
+          incomplete_canonical_conversation_count: 1,
+          active_stale_or_unverified: 0,
+          tracked_rejected_lower_quality_snapshots: 0,
+        })}'; else echo "compiler must not run" >&2; exit 99; fi`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const collector = path.join(path.dirname(new URL(import.meta.url).pathname), "chatgpt-live-collector.mjs");
+    const run = spawnSync(process.execPath, [collector, "--memory-compiler-worker"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CHAT_HISTORY_DATA_HOME: root,
+        CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      },
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n");
+    assert.deepEqual(calls, ["memory-health --project LEMonX"]);
+    const status = JSON.parse(
+      fs.readFileSync(path.join(cache, "memory-auto-compiler-status.json"), "utf8"),
+    );
+    assert.equal(status.state, "completed");
+    assert.equal(status.results[0].status, "blocked_by_health");
+    assert.equal(status.results[0].health.blockers[0].code, "checkpoint_prefix_problem");
+    assert.equal(status.results[0].health.warnings[0].code, "incomplete_canonical_evidence");
+    const history = JSON.parse(
+      fs.readFileSync(path.join(cache, "memory-auto-compiler-history.json"), "utf8"),
+    );
+    assert.equal(history.total_runs, 1);
+    assert.equal(history.consecutive_failures, 0);
+    assert.equal(history.last_failure_at, null);
+    assert.equal(history.runs[0].projects[0].status, "blocked_by_health");
+    assert.deepEqual(history.runs[0].projects[0].blockers, [{
+      code: "checkpoint_prefix_problem",
+      count: 1,
+    }]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -261,9 +261,19 @@ total-run, last-success/last-failure, and consecutive-failure counters; the MCP
 status surface exposes a compact five-run summary. Telemetry failures do not
 fail collection or compilation.
 
+The opt-in worker is health-gated before model invocation. It blocks automatic
+compilation when a checkpoint evidence prefix is unhealthy, when a pending
+candidate already fails current revalidation, or when the pending candidate
+review backlog exceeds the configured bound (20 by default). Known partial
+conversation evidence, stale/unverified active memory, and rejected
+lower-quality snapshots are warnings rather than project-wide blockers.
+`blocked_by_health` is retained in scheduler status/history as a successful
+safety outcome and does not increment the worker failure counter.
+
 The remaining Phase 3 work is orchestration and review:
 
-- decide whether and where to opt projects into the default-off scheduler;
+- decide which projects, if any, should be explicitly opted into the
+  default-off, health-gated scheduler;
 - optionally add a richer review UI around the existing operator CLI;
 - define conservative promotion policy classes if any operation is ever made
   automatic;

@@ -30,7 +30,8 @@ SERVICE="$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-li
   --memory-projects LEMonX,Arcos \
   --memory-model gpt-5.6-sol \
   --memory-max-conversations 1 \
-  --memory-max-messages 8
+  --memory-max-messages 8 \
+  --memory-max-pending-candidates 20
 ```
 
 `--memory-model` is optional. When supplied it writes
@@ -47,6 +48,26 @@ candidates; it never promotes them into durable Working Memory automatically.
 Scheduler/configuration/model failures are logged separately and do not roll
 back the collector cursor or turn a successful transcript import into a failed
 ingestion cycle.
+
+Before invoking the model, the worker runs the read-only
+`memory-health --project <project>` preflight. Automatic compilation is blocked
+for that project when compiler-state integrity is already unhealthy:
+
+- one or more compiler checkpoints have a changed/missing evidence prefix;
+- a pending candidate already fails current revalidation;
+- the pending review backlog exceeds `--memory-max-pending-candidates`
+  (default 20, valid range 1-100).
+
+Incomplete canonical ChatGPT evidence, stale/unverified active memory, and
+tracked rejected-lower-quality snapshots are reported as warnings rather than
+blocking the whole project. The compiler already fails closed on incomplete
+conversation evidence, so one historical partial transcript should not disable
+all future project compilation.
+
+A health-gated project is reported as `blocked_by_health`. That is a successful
+safety decision, not a worker failure: the model is not invoked and the
+scheduler failure counter is not incremented. A failure to execute the health
+check itself remains a normal worker error.
 
 The collector intentionally uses ChatGPT.app's bundled, OpenAI-signed runtime chain:
 
@@ -117,7 +138,8 @@ has run, its last worker status is stored separately at
 `cache/memory-auto-compiler-status.json`. A bounded history of the most recent
 20 worker runs is stored at `cache/memory-auto-compiler-history.json`; it keeps
 total-run count, last success/failure timestamps, consecutive-failure count,
-and compact per-project run summaries rather than full compiler payloads. The
+and compact per-project run summaries rather than full compiler payloads.
+Health-gated runs retain bounded blocker/warning codes in this history. The
 read-only MCP status surface includes the last worker status plus a five-run
 history summary, while the service `status` command prints both bounded files
 without triggering another run. Telemetry-write failures are isolated from the
