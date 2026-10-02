@@ -746,6 +746,7 @@ async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() 
     let temp = TempDir::new()?;
     let service = service(&temp);
     let matching_id = "plan-lemonx";
+    let incomplete_id = "plan-lemonx-incomplete";
     let other_id = "plan-other";
     service.import_normalized(
         vec![
@@ -757,6 +758,14 @@ async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() 
                     message("a1", "assistant", "continue", 2.0),
                     message("u2", "user", "next", 3.0),
                     message("a2", "assistant", "done", 4.0),
+                ],
+            ),
+            chatgpt_conversation(
+                incomplete_id,
+                19.5,
+                vec![
+                    message("iu1", "user", "continue", 1.0),
+                    message("iu2", "user", "continue again", 2.0),
                 ],
             ),
             {
@@ -777,14 +786,28 @@ async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() 
     )?;
 
     let plan = service.plan_memory_project("LEMonX", 50, 2, 2).await?;
-    assert_eq!(plan.matched, 1);
+    assert_eq!(plan.matched, 2);
     assert_eq!(plan.caught_up, 0);
     assert_eq!(plan.ready.len(), 1);
     assert_eq!(plan.ready[0].conversation_id, matching_id);
     assert_eq!(plan.ready[0].from_turn_index, 0);
     assert_eq!(plan.ready[0].through_turn_index, 1);
     assert_eq!(plan.ready[0].message_count, 2);
-    assert!(plan.failures.is_empty());
+    assert_eq!(plan.failures.len(), 1);
+    assert_eq!(plan.failures[0].conversation_id, incomplete_id);
+    assert!(
+        plan.failures[0]
+            .error
+            .contains("multi-message transcript has no assistant messages")
+    );
+    let error = service
+        .prepare_memory_compilation("LEMonX", incomplete_id, 2)
+        .expect_err("incomplete ChatGPT evidence must fail before model invocation");
+    assert!(
+        error
+            .to_string()
+            .contains("multi-message transcript has no assistant messages")
+    );
     assert!(service.pending_memory_candidates("LEMonX")?.is_empty());
 
     let input = service
@@ -803,9 +826,11 @@ async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() 
     })?;
 
     let caught_up = service.plan_memory_project("LEMonX", 50, 2, 2).await?;
-    assert_eq!(caught_up.matched, 1);
+    assert_eq!(caught_up.matched, 2);
     assert_eq!(caught_up.caught_up, 1);
     assert!(caught_up.ready.is_empty());
+    assert_eq!(caught_up.failures.len(), 1);
+    assert_eq!(caught_up.failures[0].conversation_id, incomplete_id);
     assert!(service.pending_memory_candidates("LEMonX")?.is_empty());
     Ok(())
 }

@@ -108,7 +108,9 @@ requires the same strong project match as single-conversation compilation, and
 is bounded by both scan count and model-call count. The defaults are 500 recent
 conversations scanned, at most 2 model attempts, and at most 8 new messages per
 conversation. One conversation failure is reported without aborting the rest of
-the bounded batch.
+the bounded batch. Before any model invocation, the compiler also rejects
+multi-message ChatGPT canonical snapshots that contain no assistant messages;
+these are treated as incomplete evidence rather than guessed or summarized.
 
 The compiler uses the current Codex CLI account default model unless
 `CHAT_HISTORY_MEMORY_MODEL` is set to a non-empty model name. It invokes Codex

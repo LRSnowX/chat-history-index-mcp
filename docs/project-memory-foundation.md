@@ -221,7 +221,10 @@ The initial evidence snapshot layer is implemented. Follow-up work should add:
 
 The durable state machine and model-driven incremental compiler are implemented.
 The compiler processes only new evidence since the last compiled snapshot
-prefix and can emit staged candidate operations:
+prefix and can emit staged candidate operations. Before model invocation it
+rejects incomplete multi-message ChatGPT canonical snapshots that contain no
+assistant messages, so known partial collector evidence cannot become durable
+memory through model guesswork.
 
 - add
 - supersede

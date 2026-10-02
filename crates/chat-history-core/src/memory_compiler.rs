@@ -188,6 +188,7 @@ impl IndexService {
             .ok_or_else(|| anyhow!("conversation does not exist: {conversation_id}"))?;
         let checkpoint = self.memory_compile_checkpoint(project, conversation_id)?;
         let conn = open_database(&self.managed_db_path())?;
+        ensure_compilable_snapshot_evidence(&conn, &snapshot_id)?;
 
         if let Some(checkpoint) = &checkpoint {
             let tx = conn.unchecked_transaction()?;
@@ -525,6 +526,26 @@ fn validate_project_compiler_bounds(
     ensure!(
         (1..=MAX_MEMORY_COMPILER_MESSAGES).contains(&max_messages),
         "max_messages must be between 1 and {MAX_MEMORY_COMPILER_MESSAGES}"
+    );
+    Ok(())
+}
+
+fn ensure_compilable_snapshot_evidence(
+    conn: &rusqlite::Connection,
+    snapshot_id: &str,
+) -> anyhow::Result<()> {
+    let (source, message_count, assistant_message_count): (String, i64, i64) = conn.query_row(
+        r#"
+        SELECT source, message_count, assistant_message_count
+        FROM conversation_snapshots
+        WHERE snapshot_id = ?1
+        "#,
+        params![snapshot_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    ensure!(
+        !(source == "chatgpt" && message_count >= 2 && assistant_message_count == 0),
+        "canonical ChatGPT snapshot is incomplete: multi-message transcript has no assistant messages"
     );
     Ok(())
 }
