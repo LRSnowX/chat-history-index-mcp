@@ -8,6 +8,7 @@ pub mod embedding;
 pub mod error;
 pub mod gemini;
 pub mod ingest;
+pub mod memory;
 pub mod models;
 pub mod openai;
 pub mod ranking;
@@ -21,6 +22,10 @@ pub use chatgpt::{
 };
 pub use data_home::{DataHome, ImportMode, ManagedPaths};
 pub use ingest::{ImportOptions, ImportReport, IndexService, decode_embedding, encode_embedding};
+pub use memory::{
+    MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope, MemoryStatus,
+    ProjectWorkingMemory,
+};
 pub use models::{
     ConversationDetail, ConversationRecord, DatabaseHealth, IndexStats, JobKind, JobStatus,
     NormalizedConversation, NormalizedMessage, RestoreReport, SearchMode, SearchOptions,

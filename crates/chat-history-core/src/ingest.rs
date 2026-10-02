@@ -58,6 +58,7 @@ impl Default for ImportOptions {
 pub struct ImportReport {
     pub archive_path: PathBuf,
     pub conversations_indexed: usize,
+    pub conversations_skipped_lower_quality: usize,
     pub messages_indexed: usize,
     pub attachments_indexed: usize,
     pub summaries_completed: usize,
@@ -214,9 +215,15 @@ impl IndexService {
         let import_result: anyhow::Result<()> = (|| {
             for conversation in conversations {
                 let prepared = PreparedConversation::from_normalized(archive_id, conversation)?;
-                write_conversation(&conn, &prepared)?;
-                report.conversations_indexed += 1;
-                report.messages_indexed += prepared.messages.len();
+                match write_conversation(&conn, &prepared)? {
+                    ConversationWriteOutcome::Written => {
+                        report.conversations_indexed += 1;
+                        report.messages_indexed += prepared.messages.len();
+                    }
+                    ConversationWriteOutcome::SkippedLowerQuality => {
+                        report.conversations_skipped_lower_quality += 1;
+                    }
+                }
             }
             if reindex {
                 self.reindex_fts()?;
@@ -565,10 +572,16 @@ impl IndexService {
                 conversation,
                 asset_index,
             )?;
-            write_conversation(conn, &prepared)?;
-            report.conversations_indexed += 1;
-            report.messages_indexed += prepared.messages.len();
-            report.attachments_indexed += prepared.attachments.len();
+            match write_conversation(conn, &prepared)? {
+                ConversationWriteOutcome::Written => {
+                    report.conversations_indexed += 1;
+                    report.messages_indexed += prepared.messages.len();
+                    report.attachments_indexed += prepared.attachments.len();
+                }
+                ConversationWriteOutcome::SkippedLowerQuality => {
+                    report.conversations_skipped_lower_quality += 1;
+                }
+            }
             Ok(())
         };
         stream_json_array(member, &mut processor)?;
@@ -953,7 +966,25 @@ fn collect_asset_tokens(value: &Value, tokens: &mut BTreeSet<String>) {
     }
 }
 
-fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationWriteOutcome {
+    Written,
+    SkippedLowerQuality,
+}
+
+#[derive(Debug)]
+struct ExistingConversationQuality {
+    transcript_text: String,
+    message_count: i64,
+    user_message_count: i64,
+    assistant_message_count: i64,
+    message_ids: HashSet<String>,
+}
+
+fn write_conversation(
+    conn: &Connection,
+    prepared: &PreparedConversation,
+) -> anyhow::Result<ConversationWriteOutcome> {
     let tx = conn.unchecked_transaction()?;
     let existing: Option<(String, String, Option<String>)> = tx
         .query_row(
@@ -962,6 +993,35 @@ fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> any
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
+    let existing_quality = if existing.is_some() {
+        let (transcript_text, message_count, user_message_count, assistant_message_count) = tx
+            .query_row(
+                "SELECT transcript_text, message_count, user_message_count, assistant_message_count FROM conversations WHERE conversation_id = ?1",
+                params![prepared.conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        let mut stmt = tx.prepare("SELECT message_id FROM messages WHERE conversation_id = ?1")?;
+        let message_ids = stmt
+            .query_map(params![prepared.conversation_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<HashSet<_>, _>>()?;
+        Some(ExistingConversationQuality {
+            transcript_text,
+            message_count,
+            user_message_count,
+            assistant_message_count,
+            message_ids,
+        })
+    } else {
+        None
+    };
+    if existing_quality
+        .as_ref()
+        .is_some_and(|quality| incoming_conversation_is_lower_quality(quality, prepared))
+    {
+        return Ok(ConversationWriteOutcome::SkippedLowerQuality);
+    }
     let content_changed = existing
         .as_ref()
         .map(|(title, transcript, parent)| {
@@ -1147,7 +1207,41 @@ fn write_conversation(conn: &Connection, prepared: &PreparedConversation) -> any
         )?;
     }
     tx.commit()?;
-    Ok(())
+    Ok(ConversationWriteOutcome::Written)
+}
+
+fn incoming_conversation_is_lower_quality(
+    existing: &ExistingConversationQuality,
+    incoming: &PreparedConversation,
+) -> bool {
+    if !existing.transcript_text.trim().is_empty() && incoming.transcript_text.trim().is_empty() {
+        return true;
+    }
+
+    let existing_has_dialogue =
+        existing.user_message_count > 0 && existing.assistant_message_count > 0;
+    let incoming_has_dialogue =
+        incoming.user_message_count > 0 && incoming.assistant_message_count > 0;
+    if existing_has_dialogue && incoming.message_count >= 2 && !incoming_has_dialogue {
+        return true;
+    }
+
+    if incoming.message_count < existing.message_count {
+        let incoming_ids = incoming
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<HashSet<_>>();
+        let is_strict_subset = incoming_ids.len() < existing.message_ids.len()
+            && incoming_ids
+                .iter()
+                .all(|message_id| existing.message_ids.contains(*message_id));
+        if is_strict_subset {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub fn encode_embedding(values: &[f32]) -> Vec<u8> {

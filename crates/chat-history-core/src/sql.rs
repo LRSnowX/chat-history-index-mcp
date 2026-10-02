@@ -108,6 +108,55 @@ CREATE TABLE IF NOT EXISTS runs (
   notes_json TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS memory_items (
+  memory_id TEXT PRIMARY KEY,
+  scope_type TEXT NOT NULL CHECK(scope_type IN ('global', 'project')),
+  scope_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN (
+    'invariant',
+    'preference',
+    'decision',
+    'state',
+    'blocker',
+    'task',
+    'result',
+    'hypothesis',
+    'artifact_reference'
+  )),
+  memory_key TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('active', 'resolved', 'superseded', 'archived')),
+  importance INTEGER NOT NULL CHECK(importance BETWEEN 0 AND 100),
+  confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+  valid_from REAL,
+  valid_until REAL,
+  supersedes_memory_id TEXT REFERENCES memory_items(memory_id),
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  last_verified_at REAL,
+  CHECK(
+    (scope_type = 'global' AND scope_id = '')
+    OR
+    (scope_type = 'project' AND length(trim(scope_id)) > 0)
+  )
+);
+
+CREATE TABLE IF NOT EXISTS memory_evidence (
+  memory_id TEXT NOT NULL REFERENCES memory_items(memory_id) ON DELETE CASCADE,
+  evidence_kind TEXT NOT NULL CHECK(evidence_kind IN (
+    'user_statement',
+    'conversation_turn',
+    'document',
+    'git_commit',
+    'repository_state',
+    'devspace_result'
+  )),
+  evidence_ref TEXT NOT NULL,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at REAL NOT NULL,
+  PRIMARY KEY(memory_id, evidence_kind, evidence_ref)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
   conversation_id UNINDEXED,
   title,
@@ -122,4 +171,11 @@ CREATE INDEX IF NOT EXISTS idx_conversations_update_time ON conversations(update
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_turn ON messages(conversation_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_jobs_kind_status ON jobs(kind, status);
 CREATE INDEX IF NOT EXISTS idx_embedding_chunks_model ON conversation_embedding_chunks(embedding_model, embedding_dimensions);
+CREATE INDEX IF NOT EXISTS idx_memory_items_scope_status ON memory_items(scope_type, scope_id, status);
+CREATE INDEX IF NOT EXISTS idx_memory_items_scope_kind ON memory_items(scope_type, scope_id, kind);
+CREATE INDEX IF NOT EXISTS idx_memory_items_key ON memory_items(memory_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_active_key
+  ON memory_items(scope_type, scope_id, memory_key)
+  WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_memory_evidence_memory_id ON memory_evidence(memory_id);
 "#;

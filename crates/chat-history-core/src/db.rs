@@ -16,6 +16,8 @@ use crate::{
     sql::SCHEMA,
 };
 
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+
 const REQUIRED_TABLES: &[&str] = &[
     "conversations",
     "messages",
@@ -32,7 +34,7 @@ pub fn open_database(path: &Path) -> anyhow::Result<Connection> {
         .with_context(|| format!("opening database at {}", path.display()))?;
     conn.execute_batch(SCHEMA)?;
     migrate_conversation_sources(&conn)?;
-    conn.pragma_update(None, "user_version", 1)?;
+    conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     Ok(conn)
 }
 
