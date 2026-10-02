@@ -1,7 +1,8 @@
 use std::{fs, io::Write, process::Stdio};
 
 use chat_history_core::{
-    DataHome, ImportMode, ImportOptions, IndexService, MemoryItem, MemoryKind, MemoryScope,
+    DataHome, ImportMode, ImportOptions, IndexService, MemoryCandidateInput,
+    MemoryCandidatePayload, MemoryCompilationBatch, MemoryItem, MemoryKind, MemoryScope,
     MemoryStatus,
 };
 use rmcp::{
@@ -122,6 +123,54 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
             evidence: Vec::new(),
         })?;
     }
+    let compiler_input = service
+        .prepare_memory_compilation("Rust", "conv-rust-index", 8)?
+        .expect("fixture conversation is compilable");
+    let mut candidates = (0..14)
+        .map(|index| MemoryCandidateInput {
+            candidate_id: format!("pending-{index:02}"),
+            payload: MemoryCandidatePayload::Add {
+                memory_id: format!("pending-memory-{index:02}"),
+                kind: MemoryKind::State,
+                key: format!("pending_key_{index:02}"),
+                value: serde_json::json!({"text": format!("pending proposal {index:02}")}),
+                importance: 70,
+                confidence: 0.8,
+                valid_from: Some(1_800_000_100.0),
+                valid_until: None,
+                last_verified_at: Some(1_800_000_100.0),
+            },
+            rationale: format!("private rationale {index:02}"),
+            evidence: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    candidates.push(MemoryCandidateInput {
+        candidate_id: "pending-invalid".to_string(),
+        payload: MemoryCandidatePayload::Add {
+            memory_id: "pending-memory-invalid".to_string(),
+            kind: MemoryKind::State,
+            key: "current_goal".to_string(),
+            value: serde_json::json!({"text": "conflicts with active memory"}),
+            importance: 70,
+            confidence: 0.8,
+            valid_from: Some(1_800_000_100.0),
+            valid_until: None,
+            last_verified_at: Some(1_800_000_100.0),
+        },
+        rationale: "private invalid rationale".to_string(),
+        evidence: Vec::new(),
+    });
+    service.stage_memory_compilation(&MemoryCompilationBatch {
+        project: "Rust".to_string(),
+        conversation_id: compiler_input.conversation_id,
+        source_snapshot_id: compiler_input.source_snapshot_id,
+        through_turn_index: compiler_input.through_turn_index,
+        through_message_id: compiler_input.through_message_id,
+        compiler_version: "memory-compiler-v1".to_string(),
+        model_label: Some("private-model-label".to_string()),
+        created_at: 1_800_000_100.0,
+        candidates,
+    })?;
 
     let transport = TokioChildProcess::builder(
         tokio::process::Command::new(env!("CARGO_BIN_EXE_chat-history-mcp")).configure(|cmd| {
@@ -306,6 +355,89 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         project_context_json["collaboration_memory"]["items"][0]["value"]["text"],
         "preserve upstream compatibility"
     );
+    assert_eq!(project_context_json["pending_memory"]["project"], "Rust");
+    assert_eq!(
+        project_context_json["pending_memory"]["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(8)
+    );
+    assert_eq!(
+        project_context_json["pending_memory"]["items"][0]["candidate_id"],
+        "pending-13"
+    );
+    assert_eq!(
+        project_context_json["pending_memory"]["revalidation_excluded_count"],
+        1
+    );
+    assert!(
+        project_context_json["pending_memory"]["generated_at"]
+            .as_f64()
+            .is_some()
+    );
+    let pending_item = &project_context_json["pending_memory"]["items"][0];
+    for field in [
+        "candidate_id",
+        "operation",
+        "payload",
+        "created_at",
+        "conversation_id",
+        "source_snapshot_id",
+        "through_turn_index",
+    ] {
+        assert!(pending_item.get(field).is_some(), "missing {field}");
+    }
+    for field in ["rationale", "model_label", "decision_reason", "reviews"] {
+        assert!(pending_item.get(field).is_none(), "unexpected {field}");
+    }
+    assert_eq!(
+        project_context_json["authority_policy"]["current_state_priority"],
+        serde_json::json!([
+            "live_repository_or_authoritative_project_files",
+            "active_project_working_memory",
+            "pending_memory",
+            "raw_conversation_continuations"
+        ])
+    );
+    assert!(
+        project_context_json["authority_policy"]["pending_memory_rule"]
+            .as_str()
+            .is_some_and(|rule| rule.contains("untrusted proposals"))
+    );
+
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "project": "Rust",
+            "relevant_limit": 0,
+            "recent_limit": 1,
+            "pending_limit": 99
+        }))?;
+    let bounded_high = client
+        .call_tool(CallToolRequestParams::new("memory_project_context").with_arguments(args))
+        .await?;
+    assert_eq!(
+        bounded_high.structured_content.as_ref().unwrap()["pending_memory"]["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(12)
+    );
+
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "project": "Rust",
+            "relevant_limit": 0,
+            "recent_limit": 1,
+            "pending_limit": 0
+        }))?;
+    let bounded_low = client
+        .call_tool(CallToolRequestParams::new("memory_project_context").with_arguments(args))
+        .await?;
+    assert_eq!(
+        bounded_low.structured_content.as_ref().unwrap()["pending_memory"]["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
 
     let args: serde_json::Map<String, serde_json::Value> =
         serde_json::from_value(serde_json::json!({
@@ -323,8 +455,9 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     assert_eq!(memory_health_json["project"], "Rust");
     assert_eq!(memory_health_json["stale_after_days"], 30);
     assert_eq!(memory_health_json["memory_items"]["active"], 13);
-    assert_eq!(memory_health_json["candidates"]["pending"], 0);
-    assert_eq!(memory_health_json["checkpoint_count"], 0);
+    assert_eq!(memory_health_json["candidates"]["pending"], 15);
+    assert_eq!(memory_health_json["pending_revalidation_problem_count"], 1);
+    assert_eq!(memory_health_json["checkpoint_count"], 1);
 
     let collector_state = client
         .call_tool(CallToolRequestParams::new("chatgpt_state"))

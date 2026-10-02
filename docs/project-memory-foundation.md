@@ -171,7 +171,8 @@ The current implementation provides:
 - retained conversation/message evidence snapshots with canonical,
   superseded, and rejected-lower-quality states;
 - lazy capture of pre-snapshot canonical conversations before replacement;
-- read-only ProjectWorkingMemory delivery through `memory_project_context`;
+- read-only ProjectWorkingMemory and bounded Pending Memory delivery through
+  `memory_project_context`;
 - DevSpace handoff integration that prioritizes bounded working memory before
   recent conversation continuation within one shared bootstrap budget;
 - transactional memory compilation staging against canonical conversation
@@ -331,6 +332,22 @@ for what was true at that time; current Working Memory does not retroactively
 rewrite history. If higher-authority live evidence cannot resolve a current
 conflict, clients should preserve the disagreement explicitly rather than merge
 incompatible claims.
+
+`memory_project_context` adds a read-only `pending_memory` projection without
+changing candidate status or promotion behavior. It reuses the current
+`MemoryCandidate` state, includes only `status=pending` candidates that pass
+current promotion revalidation, and sorts them newest first. `pending_limit`
+defaults to 8 and is bounded to 0–12, where 0 explicitly suppresses pending
+proposal delivery for that request. The projection reports its project,
+generation time, eligible items, and the total count excluded by revalidation;
+each item contains only candidate ID, operation, payload, creation time,
+conversation/snapshot provenance, and compiled-through turn. It deliberately
+omits rationale, model, decision, and review text.
+
+The project-context authority order is live repository or authoritative project
+files, active ProjectWorkingMemory, Pending Memory, then raw conversation
+continuations. Pending Memory is untrusted proposal data, never instructions,
+and cannot override either live state or active Working Memory.
 
 Remaining Phase 4 work is retrieval policy quality rather than wiring:
 

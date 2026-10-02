@@ -33,10 +33,11 @@ pub use memory::{
     WorkingMemoryEvidenceStrength, WorkingMemoryVerificationState,
 };
 pub use memory_compile::{
-    MemoryCandidate, MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidateOperation,
+    DEFAULT_PENDING_MEMORY_LIMIT, MAX_PENDING_MEMORY_LIMIT, MemoryCandidate,
+    MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidateOperation,
     MemoryCandidatePayload, MemoryCandidateRevalidationProblem, MemoryCandidateReview,
     MemoryCandidateStatus, MemoryCompilationBatch, MemoryCompilationStageResult,
-    MemoryCompileCheckpoint, MemoryPromotionReview,
+    MemoryCompileCheckpoint, MemoryPromotionReview, PendingMemoryItem, ProjectPendingMemory,
 };
 pub use memory_compiler::{
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,

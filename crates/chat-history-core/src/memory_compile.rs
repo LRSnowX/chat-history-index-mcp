@@ -16,6 +16,9 @@ use crate::{
     },
 };
 
+pub const DEFAULT_PENDING_MEMORY_LIMIT: usize = 8;
+pub const MAX_PENDING_MEMORY_LIMIT: usize = 12;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryCandidateOperation {
@@ -166,6 +169,25 @@ pub struct MemoryCandidate {
     pub decision_reason: Option<String>,
     pub promoted_memory_id: Option<String>,
     pub evidence: Vec<MemoryEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PendingMemoryItem {
+    pub candidate_id: String,
+    pub operation: MemoryCandidateOperation,
+    pub payload: MemoryCandidatePayload,
+    pub created_at: f64,
+    pub conversation_id: String,
+    pub source_snapshot_id: String,
+    pub through_turn_index: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectPendingMemory {
+    pub project: String,
+    pub generated_at: f64,
+    pub items: Vec<PendingMemoryItem>,
+    pub revalidation_excluded_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -330,6 +352,58 @@ impl IndexService {
         ids.into_iter()
             .map(|id| load_candidate(&conn, &id)?.ok_or_else(|| anyhow!("missing candidate {id}")))
             .collect()
+    }
+
+    pub fn project_pending_memory(
+        &self,
+        project: &str,
+        limit: usize,
+    ) -> anyhow::Result<ProjectPendingMemory> {
+        ensure!(!project.trim().is_empty(), "project cannot be empty");
+        let limit = limit.min(MAX_PENDING_MEMORY_LIMIT);
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let tx = conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare(
+            r#"
+            SELECT candidate_id
+            FROM memory_candidates
+            WHERE project = ?1 AND status = 'pending'
+            ORDER BY created_at DESC, candidate_id DESC
+            "#,
+        )?;
+        let ids = stmt
+            .query_map(params![project], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut items = Vec::with_capacity(limit.min(ids.len()));
+        let mut revalidation_excluded_count = 0;
+        for id in ids {
+            let candidate =
+                load_candidate(&tx, &id)?.ok_or_else(|| anyhow!("missing candidate {id}"))?;
+            if candidate_stale_reason(&tx, &candidate)?.is_some() {
+                revalidation_excluded_count += 1;
+                continue;
+            }
+            if items.len() < limit {
+                items.push(PendingMemoryItem {
+                    candidate_id: candidate.candidate_id,
+                    operation: candidate.operation,
+                    payload: candidate.payload,
+                    created_at: candidate.created_at,
+                    conversation_id: candidate.conversation_id,
+                    source_snapshot_id: candidate.source_snapshot_id,
+                    through_turn_index: candidate.through_turn_index,
+                });
+            }
+        }
+
+        Ok(ProjectPendingMemory {
+            project: project.to_string(),
+            generated_at: chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+            items,
+            revalidation_excluded_count,
+        })
     }
 
     pub fn pending_memory_candidate_revalidation_problems(

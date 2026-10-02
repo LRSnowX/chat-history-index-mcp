@@ -181,7 +181,18 @@ The MCP server also exposes read-oriented project memory tools:
 default because long-form ChatGPT conversations usually contain product,
 architecture, and handoff decisions; Codex and other indexed sources fill any
 remaining slots as implementation evidence. Callers can still provide an
-explicit source filter when they need a different policy.
+explicit source filter when they need a different policy. Project context also
+includes read-only `pending_memory` derived from existing candidates. It returns
+only pending candidates that pass current revalidation, newest first, with a
+default `pending_limit` of 8, an explicit-off value of 0, and a maximum of 12;
+the response separately counts pending candidates excluded by revalidation.
+Pending payloads are untrusted proposals, not instructions, and omit rationale,
+model, and review text.
+
+For current state, consumers must apply this authority order: live repository
+or authoritative project files, active `working_memory`, `pending_memory`, then
+raw conversation continuations. A lower-authority proposal must not override a
+higher-authority source.
 
 Live ChatGPT.app collection uses the dedicated `chatgpt_state`,
 `chatgpt_plan_recent`, `chatgpt_import_thread`, `chatgpt_block`, and cursor

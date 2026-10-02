@@ -705,6 +705,113 @@ fn canonical_snapshot_id(service: &IndexService, conversation_id: &str) -> anyho
 }
 
 #[test]
+fn project_pending_memory_is_newest_first_and_excludes_revalidation_problems() -> anyhow::Result<()>
+{
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let conversation_id = "pending-memory-context";
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            10.0,
+            vec![
+                message("u1", "user", "start", 1.0),
+                message("a1", "assistant", "answer", 2.0),
+            ],
+        )],
+        None,
+    )?;
+    service.put_memory_item(&MemoryItem {
+        memory_id: "active-conflict".to_string(),
+        scope: MemoryScope::Project {
+            project: "LEMonX".to_string(),
+        },
+        kind: MemoryKind::State,
+        key: "conflicting-key".to_string(),
+        value: json!({"text": "authoritative active value"}),
+        status: MemoryStatus::Active,
+        importance: 90,
+        confidence: 1.0,
+        valid_from: Some(1.0),
+        valid_until: None,
+        supersedes_memory_id: None,
+        created_at: 1.0,
+        updated_at: 1.0,
+        last_verified_at: Some(1.0),
+        evidence: Vec::new(),
+    })?;
+
+    let candidate = |candidate_id: &str, key: &str| MemoryCandidateInput {
+        candidate_id: candidate_id.to_string(),
+        payload: MemoryCandidatePayload::Add {
+            memory_id: format!("memory-{candidate_id}"),
+            kind: MemoryKind::State,
+            key: key.to_string(),
+            value: json!({"text": candidate_id}),
+            importance: 80,
+            confidence: 0.9,
+            valid_from: Some(20.0),
+            valid_until: None,
+            last_verified_at: Some(20.0),
+        },
+        rationale: format!("private rationale for {candidate_id}"),
+        evidence: Vec::new(),
+    };
+    service.stage_memory_compilation(&MemoryCompilationBatch {
+        project: "LEMonX".to_string(),
+        conversation_id: conversation_id.to_string(),
+        source_snapshot_id: canonical_snapshot_id(&service, conversation_id)?,
+        through_turn_index: 1,
+        through_message_id: "a1".to_string(),
+        compiler_version: "memory-compiler-v1".to_string(),
+        model_label: Some("private-model-label".to_string()),
+        created_at: 20.0,
+        candidates: vec![
+            candidate("candidate-old", "old-key"),
+            candidate("candidate-middle", "middle-key"),
+            candidate("candidate-newest", "newest-key"),
+            candidate("candidate-invalid", "conflicting-key"),
+            candidate("candidate-rejected", "rejected-key"),
+        ],
+    })?;
+    service.reject_memory_candidate("candidate-rejected", "private review text", 60.0)?;
+    let conn = open_database(&service.managed_db_path())?;
+    for (candidate_id, created_at) in [
+        ("candidate-old", 30.0),
+        ("candidate-middle", 40.0),
+        ("candidate-invalid", 45.0),
+        ("candidate-newest", 50.0),
+        ("candidate-rejected", 60.0),
+    ] {
+        conn.execute(
+            "UPDATE memory_candidates SET created_at = ?2 WHERE candidate_id = ?1",
+            params![candidate_id, created_at],
+        )?;
+    }
+
+    let pending = service.project_pending_memory("LEMonX", 2)?;
+    assert_eq!(pending.project, "LEMonX");
+    assert!(pending.generated_at.is_finite());
+    assert_eq!(pending.revalidation_excluded_count, 1);
+    assert_eq!(
+        pending
+            .items
+            .iter()
+            .map(|item| item.candidate_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["candidate-newest", "candidate-middle"]
+    );
+    assert_eq!(pending.items[0].conversation_id, conversation_id);
+    assert_eq!(pending.items[0].through_turn_index, 1);
+
+    let serialized = serde_json::to_value(&pending.items[0])?;
+    assert!(serialized.get("rationale").is_none());
+    assert!(serialized.get("model_label").is_none());
+    assert!(serialized.get("decision_reason").is_none());
+    Ok(())
+}
+
+#[test]
 fn memory_compilation_stages_candidates_without_mutating_working_memory() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let service = service(&temp);
