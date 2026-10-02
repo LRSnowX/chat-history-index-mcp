@@ -410,8 +410,16 @@ The read-only `memory-health` CLI now exposes:
 - pending candidates whose current evidence/memory revalidation would already
   fail, reported read-only without marking them stale.
 
-DevSpace already exposes per-handoff byte-budget telemetry (`bytes_used`,
-`byte_budget`, and per-section truncation). Future health work should connect
-that host telemetry with CHIM diagnostics where useful, and expand incomplete
-evidence diagnostics beyond the known ChatGPT user-only transcript failure
-class when new concrete failure modes are observed.
+DevSpace now connects this CHIM health report with live repository state and
+the exact host handoff packet through the operator-only
+`devspace memory inspect <project-or-path> [--json]` command. The inspection
+recomputes repository freshness, host-side Working Memory verification,
+per-section handoff budget telemetry, and CHIM health in one read-only result.
+It calls CHIM's internal read-only `memory_health` MCP tool, which is not
+forwarded to the model-facing DevSpace tool surface and does not invoke the
+compiler or another model.
+
+Future health work should expand incomplete-evidence diagnostics beyond the
+known ChatGPT user-only transcript failure class only when new concrete failure
+modes are observed. Additional dashboards or richer UIs are optional; the
+operator CLI is the canonical compact diagnostic surface.
