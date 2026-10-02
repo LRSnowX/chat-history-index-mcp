@@ -286,10 +286,17 @@ DevSpace passes the response through unchanged and continues to authorize
 `memory_get_thread` only from returned conversation/evidence hits; provenance
 references inside Working Memory do not expand thread authorization.
 
+The `memory_search` response also carries a structured `authority_policy`.
+For current-state questions it orders live repository/authoritative project
+files ahead of active ProjectWorkingMemory, with historical conversation
+evidence last. For historical questions, dated evidence remains authoritative
+for what was true at that time; current Working Memory does not retroactively
+rewrite history. If higher-authority live evidence cannot resolve a current
+conflict, clients should preserve the disagreement explicitly rather than merge
+incompatible claims.
+
 Remaining Phase 4 work is retrieval policy quality rather than wiring:
 
-- explicit preference between working-memory facts and conflicting historical
-  evidence in answer-generation guidance;
 - retrieval/answer evaluation benchmarks for current-state, decision-history,
   blocker, and task questions;
 - optional stronger lexical/semantic memory-item ranking when deterministic

@@ -533,6 +533,7 @@ impl ChatHistoryMcp {
             } else {
                 "hybrid".to_string()
             },
+            authority_policy: memory_authority_policy(),
             project: request.project,
             working_memory,
             working_memory_truncated,
@@ -1015,8 +1016,32 @@ struct ChatGptSeedFromIndexResponse {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+struct MemoryAuthorityPolicy {
+    current_state_priority: Vec<String>,
+    current_state_conflict_rule: String,
+    historical_question_rule: String,
+}
+
+fn memory_authority_policy() -> MemoryAuthorityPolicy {
+    MemoryAuthorityPolicy {
+        current_state_priority: vec![
+            "live_repository_or_authoritative_project_files".to_string(),
+            "active_project_working_memory".to_string(),
+            "historical_conversation_evidence".to_string(),
+        ],
+        current_state_conflict_rule:
+            "For current-state claims, prefer the highest available authority. If higher-authority live evidence does not resolve a conflict, preserve the disagreement explicitly rather than merging incompatible claims."
+                .to_string(),
+        historical_question_rule:
+            "For questions about past decisions, rationale, or chronology, use dated historical evidence for what was true then; current Working Memory does not retroactively overwrite history."
+                .to_string(),
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 struct MemorySearchResponse {
     retrieval_mode: String,
+    authority_policy: MemoryAuthorityPolicy,
     project: Option<String>,
     working_memory: Option<ProjectWorkingMemory>,
     working_memory_truncated: bool,

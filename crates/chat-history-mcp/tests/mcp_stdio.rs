@@ -174,6 +174,23 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         Some(12)
     );
     assert_eq!(memory_search_json["working_memory_truncated"], true);
+    assert_eq!(
+        memory_search_json["authority_policy"]["current_state_priority"][0],
+        "live_repository_or_authoritative_project_files"
+    );
+    assert_eq!(
+        memory_search_json["authority_policy"]["current_state_priority"][1],
+        "active_project_working_memory"
+    );
+    assert_eq!(
+        memory_search_json["authority_policy"]["current_state_priority"][2],
+        "historical_conversation_evidence"
+    );
+    assert!(
+        memory_search_json["authority_policy"]["historical_question_rule"]
+            .as_str()
+            .is_some_and(|value| value.contains("does not retroactively overwrite history"))
+    );
 
     let args: serde_json::Map<String, serde_json::Value> =
         serde_json::from_value(serde_json::json!({"query": "Rust SQLite", "limit": 5}))?;
@@ -186,6 +203,10 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         .as_ref()
         .expect("global memory search structured");
     assert_eq!(global_memory_search_json["retrieval_mode"], "hybrid");
+    assert_eq!(
+        global_memory_search_json["authority_policy"]["current_state_priority"][0],
+        "live_repository_or_authoritative_project_files"
+    );
     assert!(global_memory_search_json["working_memory"].is_null());
     assert_eq!(global_memory_search_json["working_memory_truncated"], false);
 
