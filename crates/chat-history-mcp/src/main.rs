@@ -497,13 +497,25 @@ impl ChatHistoryMcp {
     }
 
     #[tool(
-        description = "Search long-term AI conversation memory. Uses multilingual hybrid retrieval by default and optionally scopes results to a project."
+        description = "Search long-term project memory. When scoped to a project, returns bounded durable Working Memory first, then multilingual hybrid conversation evidence; without a project it remains hybrid evidence search."
     )]
     async fn memory_search(
         &self,
         Parameters(request): Parameters<MemorySearchRequest>,
     ) -> Result<Json<MemorySearchResponse>, String> {
         let limit = bounded_limit(request.limit, 8, 20);
+        let mut working_memory = request
+            .project
+            .as_deref()
+            .map(|project| self.service.project_working_memory(project))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let working_memory_truncated = working_memory
+            .as_ref()
+            .is_some_and(|memory| memory.items.len() > 12);
+        if let Some(memory) = working_memory.as_mut() {
+            memory.items.truncate(12);
+        }
         let results = self
             .memory_search_results(
                 &request.query,
@@ -513,8 +525,14 @@ impl ChatHistoryMcp {
             )
             .await?;
         Ok(Json(MemorySearchResponse {
-            retrieval_mode: "hybrid".to_string(),
+            retrieval_mode: if working_memory.is_some() {
+                "working_memory_then_hybrid_evidence".to_string()
+            } else {
+                "hybrid".to_string()
+            },
             project: request.project,
+            working_memory,
+            working_memory_truncated,
             hits: results.into_iter().map(memory_hit).collect(),
         }))
     }
@@ -992,6 +1010,8 @@ struct ChatGptSeedFromIndexResponse {
 struct MemorySearchResponse {
     retrieval_mode: String,
     project: Option<String>,
+    working_memory: Option<ProjectWorkingMemory>,
+    working_memory_truncated: bool,
     hits: Vec<MemoryHit>,
 }
 

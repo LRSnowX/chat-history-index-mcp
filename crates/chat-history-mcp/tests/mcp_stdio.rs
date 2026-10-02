@@ -84,6 +84,27 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         last_verified_at: Some(1_800_000_000.0),
         evidence: Vec::new(),
     })?;
+    for index in 0..12 {
+        service.put_memory_item(&MemoryItem {
+            memory_id: format!("rust-secondary-{index}"),
+            scope: MemoryScope::Project {
+                project: "Rust".to_string(),
+            },
+            kind: MemoryKind::State,
+            key: format!("secondary_{index}"),
+            value: serde_json::json!({"text": format!("secondary memory {index}")}),
+            status: MemoryStatus::Active,
+            importance: 10 + index,
+            confidence: 1.0,
+            valid_from: Some(1_800_000_001.0 + f64::from(index)),
+            valid_until: None,
+            supersedes_memory_id: None,
+            created_at: 1_800_000_001.0 + f64::from(index),
+            updated_at: 1_800_000_001.0 + f64::from(index),
+            last_verified_at: Some(1_800_000_001.0 + f64::from(index)),
+            evidence: Vec::new(),
+        })?;
+    }
 
     let transport = TokioChildProcess::builder(
         tokio::process::Command::new(env!("CARGO_BIN_EXE_chat-history-mcp")).configure(|cmd| {
@@ -116,6 +137,40 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         .call_tool(CallToolRequestParams::new("memory_search").with_arguments(args))
         .await?;
     assert_eq!(memory_search.is_error, Some(false));
+    let memory_search_json = memory_search
+        .structured_content
+        .as_ref()
+        .expect("memory search structured");
+    assert_eq!(
+        memory_search_json["retrieval_mode"],
+        "working_memory_then_hybrid_evidence"
+    );
+    assert_eq!(memory_search_json["working_memory"]["project"], "Rust");
+    assert_eq!(
+        memory_search_json["working_memory"]["items"][0]["memory_id"],
+        "rust-current-goal"
+    );
+    assert_eq!(
+        memory_search_json["working_memory"]["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(12)
+    );
+    assert_eq!(memory_search_json["working_memory_truncated"], true);
+
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({"query": "Rust SQLite", "limit": 5}))?;
+    let global_memory_search = client
+        .call_tool(CallToolRequestParams::new("memory_search").with_arguments(args))
+        .await?;
+    assert_eq!(global_memory_search.is_error, Some(false));
+    let global_memory_search_json = global_memory_search
+        .structured_content
+        .as_ref()
+        .expect("global memory search structured");
+    assert_eq!(global_memory_search_json["retrieval_mode"], "hybrid");
+    assert!(global_memory_search_json["working_memory"].is_null());
+    assert_eq!(global_memory_search_json["working_memory_truncated"], false);
 
     let args: serde_json::Map<String, serde_json::Value> =
         serde_json::from_value(serde_json::json!({"project": "Rust", "limit": 5}))?;

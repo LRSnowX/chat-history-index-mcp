@@ -255,11 +255,29 @@ The remaining Phase 3 work is orchestration and review:
 
 No MCP model-facing memory write surface exists.
 
-### Phase 4 — Memory-first retrieval
+### Phase 4 follow-up — Memory-first retrieval policy
 
-Answer ordinary project-state/history questions from MemoryItems first.
-Conversation search becomes a deeper evidence lookup rather than the default
-knowledge surface.
+The initial memory-first retrieval path is implemented. Project-scoped
+`memory_search` returns bounded ProjectWorkingMemory first and hybrid
+conversation evidence second. Working Memory is ordered by the core
+importance/recency policy and capped at 12 items at the MCP boundary with an
+explicit truncation flag. Unscoped search remains the original hybrid evidence
+search.
+
+DevSpace passes the response through unchanged and continues to authorize
+`memory_get_thread` only from returned conversation/evidence hits; provenance
+references inside Working Memory do not expand thread authorization.
+
+Remaining Phase 4 work is retrieval policy quality rather than wiring:
+
+- query-aware selection among large active Working Memory sets instead of only
+  top importance/recency;
+- explicit preference between working-memory facts and conflicting historical
+  evidence in answer-generation guidance;
+- retrieval/answer evaluation benchmarks for current-state, decision-history,
+  blocker, and task questions;
+- optional memory-key search/ranking before conversation evidence when the
+  active set grows beyond the bounded MCP response.
 
 ### Phase 5 follow-up — Complete DevSpace HandoffPacket
 
