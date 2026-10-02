@@ -357,10 +357,15 @@ The DevSpace HandoffPacket now combines:
 The repository snapshot includes branch/HEAD, optional upstream divergence,
 dirty-state counters, and a bounded changed-path sample. DevSpace exposes these
 live/authoritative sections explicitly and instructs the host to prefer them
-over stale stored memory when they conflict. A repository HEAD commit timestamp
-is the next host-side freshness anchor so conversation-only operational memories
-can be demoted for revalidation when Git has advanced beyond their verification
-time without requiring CHIM to know local repository paths.
+over stale stored memory when they conflict. The repository snapshot now also
+includes the HEAD commit timestamp. DevSpace combines that live timestamp and
+dirty-working-tree state with CHIM's read-only Working Memory verification
+sidecar to derive a separate host freshness state. Operational state/task/
+blocker memories are conservatively demoted to `needs_revalidation` when
+source verification metadata is unavailable, the working tree is dirty, or
+repository HEAD is newer than the memory's `last_verified_at`. Stable,
+tentative, and expired classifications are not overwritten by this host-side
+operational freshness rule.
 
 CollaborationMemory is materialized from active global MemoryItems, but only
 the stable rule-like kinds `invariant`, `preference`, and `decision` enter
