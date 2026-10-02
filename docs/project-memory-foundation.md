@@ -279,20 +279,24 @@ Remaining Phase 4 work is retrieval policy quality rather than wiring:
 - optional memory-key search/ranking before conversation evidence when the
   active set grows beyond the bounded MCP response.
 
-### Phase 5 follow-up — Complete DevSpace HandoffPacket
+### Phase 5 follow-up — Collaboration Memory
 
-The read path now combines ProjectWorkingMemory with bounded recent episodic
-continuation under one shared dynamic-memory budget. The remaining HandoffPacket
-work should add and normalize:
+The DevSpace HandoffPacket now combines:
 
-- collaboration memory;
-- live repository snapshot;
-- authoritative project references.
+- bounded ProjectWorkingMemory;
+- bounded recent episodic continuation;
+- a live repository snapshot refreshed on every workspace open;
+- explicit authoritative project-instruction references.
 
-Repository state and authoritative project files already outrank stored memory
-in the host instruction contract. The remaining work is to expose those stronger
-sources as explicit structured packet sections rather than only as host
-instructions and separately loaded project files.
+The repository snapshot includes branch/HEAD, optional upstream divergence,
+dirty-state counters, and a bounded changed-path sample. DevSpace exposes these
+live/authoritative sections explicitly and instructs the host to prefer them
+over stale stored memory when they conflict.
+
+The main remaining Phase 5 work is collaboration memory: stable cross-project
+working preferences and collaboration rules should become a small structured
+handoff section instead of being duplicated across project instructions or
+conversation history.
 
 ### Phase 6 follow-up — Memory health
 
