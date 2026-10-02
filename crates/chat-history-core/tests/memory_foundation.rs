@@ -1499,13 +1499,6 @@ fn model_compiler_stages_only_valid_delta_evidence_and_keeps_ids_deterministic()
             vec![
                 message("u1", "user", "Start checkpoint A.", 1.0),
                 message("a1", "assistant", "Checkpoint A is active.", 2.0),
-                message("u2", "user", "Do not use subagents.", 3.0),
-                message(
-                    "a2",
-                    "assistant",
-                    "Subagents require explicit approval.",
-                    4.0,
-                ),
             ],
         )],
         None,
@@ -1514,6 +1507,7 @@ fn model_compiler_stages_only_valid_delta_evidence_and_keeps_ids_deterministic()
     let input = service
         .prepare_memory_compilation("LEMonX", conversation_id, 2)?
         .expect("compiler has an initial delta");
+    assert_eq!(input.bootstrap_skipped_prefix_messages, 0);
     assert_eq!(input.from_turn_index, 0);
     assert_eq!(input.through_turn_index, 1);
     assert_eq!(
@@ -1676,6 +1670,7 @@ fn model_compiler_stages_only_valid_delta_evidence_and_keeps_ids_deterministic()
         .prepare_memory_compilation("LEMonX", conversation_id, DEFAULT_MEMORY_COMPILER_MESSAGES)?
         .expect("new delta exists");
     assert_eq!(next.from_turn_index, 2);
+    assert_eq!(next.bootstrap_skipped_prefix_messages, 0);
     assert_eq!(next.messages[0].message_id, "u2");
     assert_eq!(next.pending_candidates.len(), 1);
     assert_eq!(
@@ -1710,6 +1705,45 @@ fn model_compiler_stages_only_valid_delta_evidence_and_keeps_ids_deterministic()
         error
             .to_string()
             .contains("no longer preserves the compiled prefix")
+    );
+    Ok(())
+}
+
+#[test]
+fn first_memory_compilation_bootstraps_from_the_tail_of_a_long_conversation() -> anyhow::Result<()>
+{
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let conversation_id = "tail-bootstrap";
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            10.0,
+            vec![
+                message("u1", "user", "old one", 1.0),
+                message("a1", "assistant", "old one", 2.0),
+                message("u2", "user", "old two", 3.0),
+                message("a2", "assistant", "old two", 4.0),
+                message("u3", "user", "current state", 5.0),
+                message("a3", "assistant", "current state confirmed", 6.0),
+            ],
+        )],
+        None,
+    )?;
+
+    let input = service
+        .prepare_memory_compilation("LEMonX", conversation_id, 2)?
+        .expect("tail bootstrap should produce input");
+    assert_eq!(input.bootstrap_skipped_prefix_messages, 4);
+    assert_eq!(input.from_turn_index, 4);
+    assert_eq!(input.through_turn_index, 5);
+    assert_eq!(
+        input
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["u3", "a3"]
     );
     Ok(())
 }
