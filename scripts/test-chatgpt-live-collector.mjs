@@ -116,9 +116,16 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
   assert.deepEqual(
     memoryAutoConfig({
       CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
-      CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "7",
+      CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "8",
     }).maxPendingCandidates,
-    7,
+    8,
+  );
+  assert.throws(
+    () => memoryAutoConfig({
+      CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "7",
+    }),
+    /must be an integer between 8 and 100/,
   );
   assert.throws(
     () => memoryAutoConfig({
@@ -132,7 +139,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
       CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
       CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "101",
     }),
-    /must be an integer between 1 and 100/,
+    /must be an integer between 8 and 100/,
   );
 });
 
@@ -144,7 +151,7 @@ test("memory auto compiler health gate blocks state-integrity problems but keeps
     incomplete_canonical_conversation_count: 2,
     active_stale_or_unverified: 1,
     tracked_rejected_lower_quality_snapshots: 4,
-  }, 20);
+  }, 20, 1);
   assert.equal(healthyWithWarnings.ok, true);
   assert.deepEqual(healthyWithWarnings.blockers, []);
   assert.deepEqual(
@@ -159,8 +166,8 @@ test("memory auto compiler health gate blocks state-integrity problems but keeps
   const blocked = memoryAutoHealthGate({
     checkpoint_prefix_problem: 1,
     pending_revalidation_problem_count: 2,
-    candidates: { pending: 21 },
-  }, 20);
+    candidates: { pending: 13 },
+  }, 20, 1);
   assert.equal(blocked.ok, false);
   assert.deepEqual(
     blocked.blockers.map((blocker) => blocker.code),
@@ -172,15 +179,36 @@ test("memory auto compiler health gate blocks state-integrity problems but keeps
   );
   assert.deepEqual(blocked.blockers[2], {
     code: "pending_candidate_backlog",
-    count: 21,
+    count: 13,
     limit: 20,
+    max_new_candidates: 8,
+    required_headroom: 8,
+  });
+  const exactHeadroom = memoryAutoHealthGate({
+    checkpoint_prefix_problem: 0,
+    pending_revalidation_problem_count: 0,
+    candidates: { pending: 12 },
+  }, 20, 1);
+  assert.equal(exactHeadroom.ok, true);
+  const multiAttemptBlocked = memoryAutoHealthGate({
+    checkpoint_prefix_problem: 0,
+    pending_revalidation_problem_count: 0,
+    candidates: { pending: 5 },
+  }, 20, 2);
+  assert.equal(multiAttemptBlocked.ok, false);
+  assert.deepEqual(multiAttemptBlocked.blockers[0], {
+    code: "pending_candidate_backlog",
+    count: 5,
+    limit: 20,
+    max_new_candidates: 16,
+    required_headroom: 16,
   });
   assert.throws(
     () => memoryAutoHealthGate({
       checkpoint_prefix_problem: "not-a-number",
       pending_revalidation_problem_count: 0,
       candidates: { pending: 0 },
-    }, 20),
+    }, 20, 1),
     /invalid memory health count: checkpoint_prefix_problem/,
   );
   assert.throws(
@@ -188,7 +216,7 @@ test("memory auto compiler health gate blocks state-integrity problems but keeps
       checkpoint_prefix_problem: 0,
       pending_revalidation_problem_count: 0,
       candidates: {},
-    }, 20),
+    }, 20, 1),
     /invalid memory health count: candidates\.pending/,
   );
 });

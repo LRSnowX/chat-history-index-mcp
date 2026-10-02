@@ -34,6 +34,7 @@ const DEFAULT_MEMORY_AUTO_SCAN_LIMIT = 500;
 const DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS = 1;
 const DEFAULT_MEMORY_AUTO_MAX_MESSAGES = 8;
 const DEFAULT_MEMORY_AUTO_MAX_PENDING_CANDIDATES = 20;
+const MAX_MEMORY_CANDIDATES_PER_MODEL_ATTEMPT = 8;
 
 function pipeIdentity(pipePath) {
   return createHash("sha256").update(pipePath).digest("hex").slice(0, 16);
@@ -570,7 +571,7 @@ function memoryAutoConfig(env = process.env) {
     maxPendingCandidates: boundedInteger(
       env.CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES,
       DEFAULT_MEMORY_AUTO_MAX_PENDING_CANDIDATES,
-      1,
+      MAX_MEMORY_CANDIDATES_PER_MODEL_ATTEMPT,
       100,
       "CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES",
     ),
@@ -578,7 +579,7 @@ function memoryAutoConfig(env = process.env) {
   };
 }
 
-function memoryAutoHealthGate(health, maxPendingCandidates) {
+function memoryAutoHealthGate(health, maxPendingCandidates, maxConversations = 1) {
   const blockers = [];
   const warnings = [];
   const requiredCount = (value, name) => {
@@ -605,6 +606,11 @@ function memoryAutoHealthGate(health, maxPendingCandidates) {
     health?.candidates?.pending,
     "candidates.pending",
   );
+  const modelAttempts = requiredCount(maxConversations, "max_conversations");
+  if (modelAttempts < 1 || modelAttempts > 10) {
+    throw new Error("invalid memory health count: max_conversations");
+  }
+  const maxNewCandidates = modelAttempts * MAX_MEMORY_CANDIDATES_PER_MODEL_ATTEMPT;
   const incompleteCanonical = warningCount(health?.incomplete_canonical_conversation_count);
   const staleOrUnverified = warningCount(health?.active_stale_or_unverified);
   const rejectedSnapshots = warningCount(health?.tracked_rejected_lower_quality_snapshots);
@@ -621,11 +627,13 @@ function memoryAutoHealthGate(health, maxPendingCandidates) {
       count: pendingRevalidationProblems,
     });
   }
-  if (pendingCandidates > maxPendingCandidates) {
+  if (pendingCandidates + maxNewCandidates > maxPendingCandidates) {
     blockers.push({
       code: "pending_candidate_backlog",
       count: pendingCandidates,
       limit: maxPendingCandidates,
+      max_new_candidates: maxNewCandidates,
+      required_headroom: maxNewCandidates,
     });
   }
   if (incompleteCanonical > 0) {
@@ -733,7 +741,11 @@ function runMemoryCompilerWorker() {
           "memory-health",
           "--project", project,
         ]);
-        const healthGate = memoryAutoHealthGate(health, config.maxPendingCandidates);
+        const healthGate = memoryAutoHealthGate(
+          health,
+          config.maxPendingCandidates,
+          config.maxConversations,
+        );
         if (!healthGate.ok) {
           results.push({
             project,

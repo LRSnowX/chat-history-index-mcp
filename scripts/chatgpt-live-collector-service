@@ -218,7 +218,7 @@ case "$COMMAND" in
     [[ "$MEMORY_SCAN_LIMIT" =~ ^[0-9]+$ ]] && [ "$MEMORY_SCAN_LIMIT" -ge 1 ] && [ "$MEMORY_SCAN_LIMIT" -le 1000 ] || { echo "--memory-scan-limit must be an integer from 1 to 1000" >&2; exit 2; }
     [[ "$MEMORY_MAX_CONVERSATIONS" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_CONVERSATIONS" -ge 1 ] && [ "$MEMORY_MAX_CONVERSATIONS" -le 10 ] || { echo "--memory-max-conversations must be an integer from 1 to 10" >&2; exit 2; }
     [[ "$MEMORY_MAX_MESSAGES" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_MESSAGES" -ge 1 ] && [ "$MEMORY_MAX_MESSAGES" -le 16 ] || { echo "--memory-max-messages must be an integer from 1 to 16" >&2; exit 2; }
-    [[ "$MEMORY_MAX_PENDING_CANDIDATES" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_PENDING_CANDIDATES" -ge 1 ] && [ "$MEMORY_MAX_PENDING_CANDIDATES" -le 100 ] || { echo "--memory-max-pending-candidates must be an integer from 1 to 100" >&2; exit 2; }
+    [[ "$MEMORY_MAX_PENDING_CANDIDATES" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_PENDING_CANDIDATES" -ge 8 ] && [ "$MEMORY_MAX_PENDING_CANDIDATES" -le 100 ] || { echo "--memory-max-pending-candidates must be an integer from 8 to 100" >&2; exit 2; }
     if [ -n "$MEMORY_MODEL" ] && [ -z "$MEMORY_PROJECTS" ]; then
       echo "--memory-model requires --memory-projects" >&2
       exit 2

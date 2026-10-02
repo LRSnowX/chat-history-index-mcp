@@ -55,8 +55,12 @@ for that project when compiler-state integrity is already unhealthy:
 
 - one or more compiler checkpoints have a changed/missing evidence prefix;
 - a pending candidate already fails current revalidation;
-- the pending review backlog exceeds `--memory-max-pending-candidates`
-  (default 20, valid range 1-100).
+- the pending review backlog does not have enough headroom for the worst-case
+  output of the configured automatic model attempts. Each attempt may stage at
+  most 8 candidates, so with the default
+  `--memory-max-conversations 1 --memory-max-pending-candidates 20`, automatic
+  compilation stops once 13 or more pending candidates already exist. The
+  pending-candidate cap defaults to 20 and accepts 8-100.
 
 Incomplete canonical ChatGPT evidence, stale/unverified active memory, and
 tracked rejected-lower-quality snapshots are reported as warnings rather than
