@@ -60,6 +60,7 @@ fn normalized_import_refuses_an_obvious_conversation_quality_regression() -> any
     let report = service.import_normalized(vec![initial], None)?;
     assert_eq!(report.conversations_indexed, 1);
     assert_eq!(report.conversations_skipped_lower_quality, 0);
+    assert_snapshot_statuses(&service, id, &[("canonical", 1)])?;
 
     let degraded = chatgpt_conversation(
         id,
@@ -72,6 +73,11 @@ fn normalized_import_refuses_an_obvious_conversation_quality_regression() -> any
     let report = service.import_normalized(vec![degraded], None)?;
     assert_eq!(report.conversations_indexed, 0);
     assert_eq!(report.conversations_skipped_lower_quality, 1);
+    assert_snapshot_statuses(
+        &service,
+        id,
+        &[("canonical", 1), ("rejected_lower_quality", 1)],
+    )?;
 
     let retained = service
         .get_conversation(id, false)?
@@ -108,6 +114,96 @@ fn normalized_import_refuses_an_obvious_conversation_quality_regression() -> any
         .expect("conversation remains indexed");
     assert_eq!(retained.conversation.message_count, 6);
     assert_eq!(retained.conversation.assistant_message_count, 3);
+    assert_snapshot_statuses(
+        &service,
+        id,
+        &[
+            ("canonical", 1),
+            ("rejected_lower_quality", 1),
+            ("superseded", 1),
+        ],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn first_phase_three_reimport_snapshots_the_legacy_canonical_before_rejecting() -> anyhow::Result<()>
+{
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let id = "legacy-conversation";
+
+    let initial = chatgpt_conversation(
+        id,
+        10.0,
+        vec![
+            message("u1", "user", "start", 1.0),
+            message("a1", "assistant", "answer one", 2.0),
+            message("u2", "user", "continue", 3.0),
+            message("a2", "assistant", "answer two", 4.0),
+        ],
+    );
+    service.import_normalized(vec![initial], None)?;
+
+    {
+        let conn = open_database(&service.managed_db_path())?;
+        conn.execute("DELETE FROM conversation_snapshot_messages", [])?;
+        conn.execute("DELETE FROM conversation_snapshots", [])?;
+        conn.pragma_update(None, "user_version", 2)?;
+    }
+
+    let degraded = chatgpt_conversation(
+        id,
+        11.0,
+        vec![
+            message("u1", "user", "start", 1.0),
+            message("u2", "user", "continue", 3.0),
+        ],
+    );
+    let report = service.import_normalized(vec![degraded], None)?;
+    assert_eq!(report.conversations_indexed, 0);
+    assert_eq!(report.conversations_skipped_lower_quality, 1);
+    assert_snapshot_statuses(
+        &service,
+        id,
+        &[("canonical", 1), ("rejected_lower_quality", 1)],
+    )?;
+
+    let conn = open_database(&service.managed_db_path())?;
+    let canonical_messages: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM conversation_snapshot_messages m
+        JOIN conversation_snapshots s ON s.snapshot_id = m.snapshot_id
+        WHERE s.conversation_id = ?1 AND s.selection_status = 'canonical'
+        "#,
+        params![id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(canonical_messages, 4);
+    Ok(())
+}
+
+fn assert_snapshot_statuses(
+    service: &IndexService,
+    conversation_id: &str,
+    expected: &[(&str, i64)],
+) -> anyhow::Result<()> {
+    let conn = open_database(&service.managed_db_path())?;
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM conversation_snapshots WHERE conversation_id = ?1",
+        params![conversation_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(total, expected.iter().map(|(_, count)| *count).sum::<i64>());
+    for (status, count) in expected {
+        let actual: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversation_snapshots WHERE conversation_id = ?1 AND selection_status = ?2",
+            params![conversation_id, status],
+            |row| row.get(0),
+        )?;
+        assert_eq!(actual, *count, "unexpected snapshot count for {status}");
+    }
     Ok(())
 }
 
@@ -184,6 +280,8 @@ fn legacy_database_restores_and_upgrades_to_memory_schema() -> anyhow::Result<()
     let legacy = temp.path().join("legacy-v1.sqlite3");
     {
         let conn = open_database(&legacy)?;
+        conn.execute("DROP TABLE conversation_snapshot_messages", [])?;
+        conn.execute("DROP TABLE conversation_snapshots", [])?;
         conn.execute("DROP TABLE memory_evidence", [])?;
         conn.execute("DROP TABLE memory_items", [])?;
         conn.pragma_update(None, "user_version", 1)?;
@@ -191,14 +289,14 @@ fn legacy_database_restores_and_upgrades_to_memory_schema() -> anyhow::Result<()
 
     let destination = temp.path().join("restored").join("index.sqlite3");
     let report = restore_database(&legacy, &destination)?;
-    assert_eq!(report.health.schema_version, 2);
+    assert_eq!(report.health.schema_version, 3);
 
     let conn = open_database(&destination)?;
-    let memory_tables: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('memory_items', 'memory_evidence')",
+    let foundation_tables: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('memory_items', 'memory_evidence', 'conversation_snapshots', 'conversation_snapshot_messages')",
         params![],
         |row| row.get(0),
     )?;
-    assert_eq!(memory_tables, 2);
+    assert_eq!(foundation_tables, 4);
     Ok(())
 }

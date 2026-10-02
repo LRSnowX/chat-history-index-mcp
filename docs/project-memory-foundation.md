@@ -130,14 +130,22 @@ silently classified as worse without evidence.
 
 The import report exposes lower-quality rejections explicitly.
 
-This is the first protection against a live collector overwriting a more
-complete OpenAI export or earlier complete snapshot with a partial transcript.
-Longer term, CHIM should retain multiple evidence snapshots and materialize a
-canonical conversation view instead of replacing snapshots in place.
+Each new ingest is also retained as an evidence snapshot with its own message
+rows. Accepted snapshots become the canonical materialized view, previous
+canonical snapshots become superseded, and rejected lower-quality snapshots are
+retained as rejected evidence rather than discarded.
+
+For conversations that predate snapshot support, the existing canonical
+conversation is captured lazily immediately before the first reimport that
+could replace it. This avoids a large eager migration while ensuring the legacy
+canonical evidence is preserved before mutation.
 
 ## Schema lifecycle
 
-Project Memory Foundation introduces schema version 2.
+Project Memory Foundation uses schema version 3:
+
+- version 2 introduced MemoryItem and MemoryEvidence;
+- version 3 introduced retained conversation/message evidence snapshots.
 
 The new tables are created by normal database opening. Legacy version-1
 databases and backups remain restorable: pre-migration health inspection keeps
@@ -155,6 +163,9 @@ The current implementation provides:
 - explicit transactional supersession;
 - active ProjectWorkingMemory materialization;
 - conversation quality-regression protection;
+- retained conversation/message evidence snapshots with canonical,
+  superseded, and rejected-lower-quality states;
+- lazy capture of pre-snapshot canonical conversations before replacement;
 - schema-v1 restore compatibility.
 
 It does not yet provide:
@@ -171,11 +182,15 @@ conflict handling, and compiler rules are implemented and tested.
 
 ## Next phases
 
-### Phase 2 — Evidence snapshots
+### Phase 2 follow-up — Snapshot policy expansion
 
-Replace destructive conversation refresh semantics with retained evidence
-snapshots plus a canonical materialized view. Define quality/source precedence
-without assuming that newest or longest is always best.
+The initial evidence snapshot layer is implemented. Follow-up work should add:
+
+- attachment snapshots where attachment provenance matters;
+- richer source/quality precedence beyond the current provable-regression
+  rules;
+- snapshot inspection/health APIs;
+- optional historical backfill when complete snapshot coverage is useful.
 
 ### Phase 3 — Incremental Memory Compiler
 

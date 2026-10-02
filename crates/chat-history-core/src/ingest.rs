@@ -1016,12 +1016,45 @@ fn write_conversation(
     } else {
         None
     };
-    if existing_quality
+    if existing.is_some() {
+        persist_legacy_canonical_snapshot(&tx, &prepared.conversation_id)?;
+    }
+    let incoming_snapshot_id = persist_prepared_snapshot(&tx, prepared)?;
+    if let Some(reason) = existing_quality
         .as_ref()
-        .is_some_and(|quality| incoming_conversation_is_lower_quality(quality, prepared))
+        .and_then(|quality| incoming_conversation_quality_regression(quality, prepared))
     {
+        tx.execute(
+            r#"
+            UPDATE conversation_snapshots
+            SET selection_status = 'rejected_lower_quality', selection_reason = ?2
+            WHERE snapshot_id = ?1 AND selection_status IN ('candidate', 'rejected_lower_quality')
+            "#,
+            params![incoming_snapshot_id, reason],
+        )?;
+        tx.commit()?;
         return Ok(ConversationWriteOutcome::SkippedLowerQuality);
     }
+    tx.execute(
+        r#"
+        UPDATE conversation_snapshots
+        SET selection_status = 'superseded',
+            selection_reason = 'replaced by a newer accepted canonical snapshot'
+        WHERE conversation_id = ?1
+          AND selection_status = 'canonical'
+          AND snapshot_id <> ?2
+        "#,
+        params![prepared.conversation_id, incoming_snapshot_id],
+    )?;
+    tx.execute(
+        r#"
+        UPDATE conversation_snapshots
+        SET selection_status = 'canonical',
+            selection_reason = 'accepted as canonical conversation view'
+        WHERE snapshot_id = ?1
+        "#,
+        params![incoming_snapshot_id],
+    )?;
     let content_changed = existing
         .as_ref()
         .map(|(title, transcript, parent)| {
@@ -1210,12 +1243,12 @@ fn write_conversation(
     Ok(ConversationWriteOutcome::Written)
 }
 
-fn incoming_conversation_is_lower_quality(
+fn incoming_conversation_quality_regression(
     existing: &ExistingConversationQuality,
     incoming: &PreparedConversation,
-) -> bool {
+) -> Option<&'static str> {
     if !existing.transcript_text.trim().is_empty() && incoming.transcript_text.trim().is_empty() {
-        return true;
+        return Some("incoming transcript is empty while canonical transcript is non-empty");
     }
 
     let existing_has_dialogue =
@@ -1223,7 +1256,7 @@ fn incoming_conversation_is_lower_quality(
     let incoming_has_dialogue =
         incoming.user_message_count > 0 && incoming.assistant_message_count > 0;
     if existing_has_dialogue && incoming.message_count >= 2 && !incoming_has_dialogue {
-        return true;
+        return Some("incoming snapshot loses user/assistant dialogue coverage");
     }
 
     if incoming.message_count < existing.message_count {
@@ -1237,11 +1270,192 @@ fn incoming_conversation_is_lower_quality(
                 .iter()
                 .all(|message_id| existing.message_ids.contains(*message_id));
         if is_strict_subset {
-            return true;
+            return Some("incoming message set is a strict subset of canonical messages");
         }
     }
 
-    false
+    None
+}
+
+fn persist_legacy_canonical_snapshot(
+    tx: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+) -> anyhow::Result<()> {
+    let existing_snapshot: Option<String> = tx
+        .query_row(
+            "SELECT snapshot_id FROM conversation_snapshots WHERE conversation_id = ?1 AND selection_status = 'canonical'",
+            params![conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing_snapshot.is_some() {
+        return Ok(());
+    }
+
+    let raw_json_sha256_hex: String = tx.query_row(
+        "SELECT raw_json_sha256_hex FROM conversations WHERE conversation_id = ?1",
+        params![conversation_id],
+        |row| row.get(0),
+    )?;
+    let message_ids = existing_message_ids_in_order(tx, conversation_id)?;
+    let transcript_text: String = tx.query_row(
+        "SELECT transcript_text FROM conversations WHERE conversation_id = ?1",
+        params![conversation_id],
+        |row| row.get(0),
+    )?;
+    let snapshot_id = conversation_snapshot_id(
+        conversation_id,
+        &raw_json_sha256_hex,
+        &transcript_text,
+        message_ids.iter().map(String::as_str),
+    );
+    tx.execute(
+        r#"
+        INSERT OR IGNORE INTO conversation_snapshots (
+          snapshot_id, conversation_id, archive_id, archive_member, source_member, title,
+          create_time, update_time, default_model_slug, message_count, user_message_count,
+          assistant_message_count, transcript_text, raw_conversation_zstd, raw_json_sha256_hex,
+          source, source_instance, source_conversation_id, source_url, source_path,
+          parent_conversation_id, selection_status, selection_reason
+        )
+        SELECT ?1, conversation_id, archive_id, archive_member, source_member, title,
+               create_time, update_time, default_model_slug, message_count, user_message_count,
+               assistant_message_count, transcript_text, raw_conversation_zstd, raw_json_sha256_hex,
+               source, source_instance, source_conversation_id, source_url, source_path,
+               parent_conversation_id, 'canonical', 'canonical baseline captured before snapshot migration'
+        FROM conversations
+        WHERE conversation_id = ?2
+        "#,
+        params![snapshot_id, conversation_id],
+    )?;
+    tx.execute(
+        r#"
+        UPDATE conversation_snapshots
+        SET selection_status = 'canonical',
+            selection_reason = 'canonical baseline captured before snapshot migration'
+        WHERE snapshot_id = ?1
+        "#,
+        params![snapshot_id],
+    )?;
+    tx.execute(
+        r#"
+        INSERT OR IGNORE INTO conversation_snapshot_messages (
+          snapshot_id, message_id, role, create_time, turn_index, normalized_text, raw_message_json
+        )
+        SELECT ?1, message_id, role, create_time, turn_index, normalized_text, raw_message_json
+        FROM messages
+        WHERE conversation_id = ?2
+        ORDER BY turn_index ASC
+        "#,
+        params![snapshot_id, conversation_id],
+    )?;
+    Ok(())
+}
+
+fn persist_prepared_snapshot(
+    tx: &rusqlite::Transaction<'_>,
+    prepared: &PreparedConversation,
+) -> anyhow::Result<String> {
+    let snapshot_id = conversation_snapshot_id(
+        &prepared.conversation_id,
+        &prepared.raw_json_sha256_hex,
+        &prepared.transcript_text,
+        prepared
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str()),
+    );
+    tx.execute(
+        r#"
+        INSERT OR IGNORE INTO conversation_snapshots (
+          snapshot_id, conversation_id, archive_id, archive_member, source_member, title,
+          create_time, update_time, default_model_slug, message_count, user_message_count,
+          assistant_message_count, transcript_text, raw_conversation_zstd, raw_json_sha256_hex,
+          source, source_instance, source_conversation_id, source_url, source_path,
+          parent_conversation_id, selection_status, selection_reason
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                ?16, ?17, ?18, ?19, ?20, ?21, 'candidate', NULL)
+        "#,
+        params![
+            snapshot_id,
+            prepared.conversation_id,
+            prepared.archive_id,
+            prepared.archive_member,
+            prepared.source_member,
+            prepared.title,
+            prepared.create_time,
+            prepared.update_time,
+            prepared.default_model_slug,
+            prepared.message_count,
+            prepared.user_message_count,
+            prepared.assistant_message_count,
+            prepared.transcript_text,
+            prepared.raw_conversation_zstd,
+            prepared.raw_json_sha256_hex,
+            prepared.source,
+            prepared.source_instance,
+            prepared.source_conversation_id,
+            prepared.source_url,
+            prepared.source_path,
+            prepared.parent_conversation_id,
+        ],
+    )?;
+    for message in &prepared.messages {
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO conversation_snapshot_messages (
+              snapshot_id, message_id, role, create_time, turn_index, normalized_text, raw_message_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                snapshot_id,
+                message.message_id,
+                message.role,
+                message.create_time,
+                message.turn_index,
+                message.normalized_text,
+                serde_json::to_string(&message.raw_message_json)?,
+            ],
+        )?;
+    }
+    Ok(snapshot_id)
+}
+
+fn existing_message_ids_in_order(
+    tx: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut stmt = tx.prepare(
+        "SELECT message_id FROM messages WHERE conversation_id = ?1 ORDER BY turn_index ASC",
+    )?;
+    stmt.query_map(params![conversation_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn conversation_snapshot_id<'a>(
+    conversation_id: &str,
+    raw_json_sha256_hex: &str,
+    transcript_text: &str,
+    message_ids: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let mut digest = Sha256::new();
+    for part in [
+        "conversation-snapshot-v1",
+        conversation_id,
+        raw_json_sha256_hex,
+        transcript_text,
+    ] {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    for message_id in message_ids {
+        digest.update((message_id.len() as u64).to_le_bytes());
+        digest.update(message_id.as_bytes());
+    }
+    format!("snapshot:{}", hex::encode(digest.finalize()))
 }
 
 pub fn encode_embedding(values: &[f32]) -> Vec<u8> {

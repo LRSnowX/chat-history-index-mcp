@@ -108,6 +108,49 @@ CREATE TABLE IF NOT EXISTS runs (
   notes_json TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS conversation_snapshots (
+  snapshot_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  archive_id INTEGER NOT NULL REFERENCES archives(id) ON DELETE CASCADE,
+  archive_member TEXT NOT NULL,
+  source_member TEXT NOT NULL,
+  title TEXT NOT NULL,
+  create_time REAL,
+  update_time REAL,
+  default_model_slug TEXT,
+  message_count INTEGER NOT NULL,
+  user_message_count INTEGER NOT NULL,
+  assistant_message_count INTEGER NOT NULL,
+  transcript_text TEXT NOT NULL,
+  raw_conversation_zstd BLOB NOT NULL,
+  raw_json_sha256_hex TEXT NOT NULL,
+  source TEXT NOT NULL,
+  source_instance TEXT,
+  source_conversation_id TEXT NOT NULL,
+  source_url TEXT,
+  source_path TEXT,
+  parent_conversation_id TEXT,
+  selection_status TEXT NOT NULL CHECK(selection_status IN (
+    'candidate',
+    'canonical',
+    'superseded',
+    'rejected_lower_quality'
+  )),
+  selection_reason TEXT,
+  captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS conversation_snapshot_messages (
+  snapshot_id TEXT NOT NULL REFERENCES conversation_snapshots(snapshot_id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  create_time REAL,
+  turn_index INTEGER NOT NULL,
+  normalized_text TEXT NOT NULL,
+  raw_message_json TEXT NOT NULL,
+  PRIMARY KEY(snapshot_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS memory_items (
   memory_id TEXT PRIMARY KEY,
   scope_type TEXT NOT NULL CHECK(scope_type IN ('global', 'project')),
@@ -171,6 +214,13 @@ CREATE INDEX IF NOT EXISTS idx_conversations_update_time ON conversations(update
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_turn ON messages(conversation_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_jobs_kind_status ON jobs(kind, status);
 CREATE INDEX IF NOT EXISTS idx_embedding_chunks_model ON conversation_embedding_chunks(embedding_model, embedding_dimensions);
+CREATE INDEX IF NOT EXISTS idx_conversation_snapshots_conversation
+  ON conversation_snapshots(conversation_id, captured_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_snapshots_canonical
+  ON conversation_snapshots(conversation_id)
+  WHERE selection_status = 'canonical';
+CREATE INDEX IF NOT EXISTS idx_conversation_snapshot_messages_turn
+  ON conversation_snapshot_messages(snapshot_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_memory_items_scope_status ON memory_items(scope_type, scope_id, status);
 CREATE INDEX IF NOT EXISTS idx_memory_items_scope_kind ON memory_items(scope_type, scope_id, kind);
 CREATE INDEX IF NOT EXISTS idx_memory_items_key ON memory_items(memory_key);
