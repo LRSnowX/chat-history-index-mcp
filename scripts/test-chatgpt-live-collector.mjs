@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -9,7 +10,10 @@ import {
   NativeAppToolsClient,
   bridgeMessages,
   bridgeThread,
+  memoryAutoConfig,
+  maybeScheduleMemoryCompiler,
   readCompleteThread,
+  safeScheduleMemoryCompiler,
 } from "./chatgpt-live-collector.mjs";
 
 function encodeNativeFrame(message) {
@@ -75,6 +79,137 @@ test("bridgeMessages fails closed near the App Tools per-message output cap", ()
   });
   assert.equal(messages.length, 1);
   assert.equal(messages[0].truncated, true);
+});
+
+test("memory auto compiler is disabled by default and validates explicit bounds", () => {
+  assert.deepEqual(memoryAutoConfig({}), {
+    enabled: false,
+    projects: [],
+    scanLimit: 500,
+    maxConversations: 1,
+    maxMessages: 8,
+  });
+  assert.deepEqual(
+    memoryAutoConfig({
+      CHAT_HISTORY_MEMORY_AUTO_PROJECTS: " LEMonX,Arcos,LEMonX ",
+      CHAT_HISTORY_MEMORY_AUTO_SCAN_LIMIT: "250",
+      CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS: "2",
+      CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES: "6",
+    }),
+    {
+      enabled: true,
+      projects: ["LEMonX", "Arcos"],
+      scanLimit: 250,
+      maxConversations: 2,
+      maxMessages: 6,
+    },
+  );
+  assert.throws(
+    () => memoryAutoConfig({
+      CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS: "0",
+    }),
+    /must be an integer between 1 and 10/,
+  );
+});
+
+test("memory auto compiler schedules only after a successful import and explicit opt-in", () => {
+  const calls = [];
+  const fakeSpawn = (command, args, options) => {
+    calls.push({ command, args, options });
+    return { pid: 12345, unref() {} };
+  };
+  const enabledEnv = {
+    CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+  };
+  assert.deepEqual(
+    maybeScheduleMemoryCompiler({ imported: 1 }, fakeSpawn, {}),
+    { enabled: false, scheduled: false },
+  );
+  assert.deepEqual(
+    maybeScheduleMemoryCompiler({ imported: 0 }, fakeSpawn, enabledEnv),
+    { enabled: true, scheduled: false },
+  );
+  const scheduled = maybeScheduleMemoryCompiler({ imported: 2 }, fakeSpawn, enabledEnv);
+  assert.equal(scheduled.enabled, true);
+  assert.equal(scheduled.scheduled, true);
+  assert.equal(scheduled.pid, 12345);
+  assert.deepEqual(scheduled.projects, ["LEMonX"]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args.slice(-1), ["--memory-compiler-worker"]);
+  assert.equal(calls[0].options.detached, true);
+  assert.equal(calls[0].options.stdio, "ignore");
+});
+
+test("memory auto compiler scheduling errors do not escape into ingestion", () => {
+  const logged = [];
+  const result = safeScheduleMemoryCompiler(
+    { imported: 1 },
+    () => {
+      throw new Error("spawn failed");
+    },
+    { CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX" },
+    (payload) => logged.push(payload),
+  );
+  assert.equal(result.enabled, true);
+  assert.equal(result.scheduled, false);
+  assert.match(result.error, /spawn failed/);
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].event, "memory_auto_compile_schedule_error");
+});
+
+test("memory compiler worker is isolated, bounded, and releases its pid lock", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-history-memory-worker-"));
+  try {
+    const bin = path.join(root, "bin");
+    const cache = path.join(root, "cache");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(cache, { recursive: true });
+    const callsPath = path.join(root, "calls.txt");
+    const fakeCli = path.join(bin, "chat-history-cli");
+    fs.writeFileSync(
+      fakeCli,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$*" >> "${callsPath}"`,
+        `printf '%s\\n' '${JSON.stringify({
+          project: "LEMonX",
+          model_attempts: 0,
+          staged: [],
+          failures: [],
+        })}'`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const collector = path.join(path.dirname(new URL(import.meta.url).pathname), "chatgpt-live-collector.mjs");
+    const run = spawnSync(process.execPath, [collector, "--memory-compiler-worker"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CHAT_HISTORY_DATA_HOME: root,
+        CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+        CHAT_HISTORY_MEMORY_AUTO_SCAN_LIMIT: "250",
+        CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS: "1",
+        CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES: "6",
+      },
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n");
+    assert.deepEqual(calls, [
+      "memory-compile-project --project LEMonX --scan-limit 250 --max-conversations 1 --max-messages 6",
+    ]);
+    const status = JSON.parse(
+      fs.readFileSync(path.join(cache, "memory-auto-compiler-status.json"), "utf8"),
+    );
+    assert.equal(status.state, "completed");
+    assert.deepEqual(status.projects, ["LEMonX"]);
+    assert.equal(status.results.length, 1);
+    assert.equal(status.results[0].status, "ok");
+    assert.equal(fs.existsSync(path.join(cache, "memory-auto-compiler.lock")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("readCompleteThread requests assistant outputs but indexes only conversation messages", async () => {

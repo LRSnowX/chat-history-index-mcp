@@ -237,16 +237,21 @@ the candidate evidence prefix against the current canonical conversation
 snapshot; edited or branched evidence becomes stale instead of mutating current
 memory.
 
+The bounded ChatGPT live-collector scheduler infrastructure is implemented but
+disabled by default. It can be explicitly configured with a project allow-list;
+after accepted new evidence it launches a detached, lock-protected compiler
+worker so ingestion/cursor advancement completes independently. Scheduler and
+model failures are isolated from collection, and compilation still only stages
+candidates.
+
 The remaining Phase 3 work is orchestration and review:
 
-- optionally trigger the now-bounded project compiler after accepted new
-  evidence without blocking ingestion; scheduler logic can first consume the
-  zero-model-call project plan, and automatic execution must remain explicitly
-  configurable so background model usage is not implicit;
+- decide whether and where to opt projects into the default-off scheduler;
 - optionally add a richer review UI around the existing operator CLI;
 - define conservative promotion policy classes if any operation is ever made
   automatic;
-- add scheduler retry visibility beyond the current read-only checkpoint health.
+- add richer scheduler retry history beyond the current last-run worker status
+  and read-only checkpoint health.
 
 No MCP model-facing memory write surface exists.
 

@@ -20,6 +20,27 @@ The default cadence is 120 seconds. Change it at install time with
 `--interval SECONDS` (minimum 30 seconds). No ChatGPT collector LaunchAgent is
 created.
 
+Project-memory compilation is **disabled by default**. To opt specific projects
+into bounded compilation after newly accepted ChatGPT evidence, reinstall the
+collector configuration explicitly:
+
+```bash
+SERVICE="$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service"
+"$SERVICE" install \
+  --memory-projects LEMonX,Arcos \
+  --memory-max-conversations 1 \
+  --memory-max-messages 8
+```
+
+The optional scheduler runs only after a polling cycle imports at least one new
+conversation snapshot. It starts a detached worker after ingestion has already
+committed, uses its own PID lock, and invokes the existing bounded
+`memory-compile-project` operator path. Compiler output can only stage pending
+candidates; it never promotes them into durable Working Memory automatically.
+Scheduler/configuration/model failures are logged separately and do not roll
+back the collector cursor or turn a successful transcript import into a failed
+ingestion cycle.
+
 The collector intentionally uses ChatGPT.app's bundled, OpenAI-signed runtime chain:
 
 ```text
@@ -84,7 +105,11 @@ stops the daemon but preserves indexed history and sync state.
 
 Status lives at `cache/chatgpt-live-collector-status.json`. Logs are written under the managed
 data home as `logs/chatgpt-live-collector.log` and `logs/chatgpt-live-collector.error.log`. A
-clean no-change cycle is intentionally quiet.
+clean no-change cycle is intentionally quiet. When the optional memory compiler
+has run, its last worker status is stored separately at
+`cache/memory-auto-compiler-status.json`; the read-only collector status surface
+and service `status` command include that last worker status without triggering
+another run.
 
 ## Local collector state machine
 

@@ -6,6 +6,7 @@ CONFIG="$HOME/.codex/config.toml"
 CHATGPT_NODE="/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
 COLLECTOR="$DATA_HOME/bin/chatgpt-live-collector.mjs"
 STATUS="$DATA_HOME/cache/chatgpt-live-collector-status.json"
+MEMORY_STATUS="$DATA_HOME/cache/memory-auto-compiler-status.json"
 DAEMON_LOCK="$DATA_HOME/cache/chatgpt-live-collector-daemon.lock"
 LEGACY_LABEL="local.chat-history-index-chatgpt-sync"
 LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
@@ -13,7 +14,7 @@ BEGIN_MARKER="# BEGIN chat-history-index-mcp ChatGPT live collector"
 END_MARKER="# END chat-history-index-mcp ChatGPT live collector"
 
 usage() {
-  echo "usage: $0 install [--interval SECONDS] | start | stop | restart | status | uninstall" >&2
+  echo "usage: $0 install [--interval SECONDS] [--memory-projects CSV] [--memory-scan-limit N] [--memory-max-conversations N] [--memory-max-messages N] | start | stop | restart | status | uninstall" >&2
 }
 
 app_server_pid() {
@@ -72,13 +73,29 @@ restart_app_server() {
 
 write_config() {
   local interval_ms="$1"
+  local memory_projects="$2"
+  local memory_scan_limit="$3"
+  local memory_max_conversations="$4"
+  local memory_max_messages="$5"
   mkdir -p "$HOME/.codex"
   touch "$CONFIG"
-  /usr/bin/python3 - "$CONFIG" "$CHATGPT_NODE" "$COLLECTOR" "$DATA_HOME" "$interval_ms" "$BEGIN_MARKER" "$END_MARKER" <<'PY'
+  /usr/bin/python3 - "$CONFIG" "$CHATGPT_NODE" "$COLLECTOR" "$DATA_HOME" "$interval_ms" "$memory_projects" "$memory_scan_limit" "$memory_max_conversations" "$memory_max_messages" "$BEGIN_MARKER" "$END_MARKER" <<'PY'
 from pathlib import Path
-import os, shutil, stat, sys, time
+import json, os, shutil, stat, sys, time
 
-config, node, collector, data_home, interval_ms, begin, end = sys.argv[1:]
+(
+    config,
+    node,
+    collector,
+    data_home,
+    interval_ms,
+    memory_projects,
+    memory_scan_limit,
+    memory_max_conversations,
+    memory_max_messages,
+    begin,
+    end,
+) = sys.argv[1:]
 path = Path(config)
 text = path.read_text() if path.exists() else ""
 mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
@@ -108,6 +125,14 @@ for line in lines:
 
 while out and not out[-1].strip():
     out.pop()
+memory_env = ""
+if memory_projects.strip():
+    memory_env = (
+        f"CHAT_HISTORY_MEMORY_AUTO_PROJECTS = {json.dumps(memory_projects)}\n"
+        f"CHAT_HISTORY_MEMORY_AUTO_SCAN_LIMIT = {json.dumps(memory_scan_limit)}\n"
+        f"CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS = {json.dumps(memory_max_conversations)}\n"
+        f"CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES = {json.dumps(memory_max_messages)}\n"
+    )
 block = f'''{begin}
 [mcp_servers.chatgpt_live_collector]
 command = "{node}"
@@ -119,6 +144,7 @@ required = false
 [mcp_servers.chatgpt_live_collector.env]
 CHAT_HISTORY_DATA_HOME = "{data_home}"
 CHAT_HISTORY_CHATGPT_POLL_INTERVAL_MS = "{interval_ms}"
+{memory_env.rstrip()}
 {end}'''
 new_text = "\n".join(out) + ("\n\n" if out else "") + block + "\n"
 if new_text != text:
@@ -162,20 +188,35 @@ shift
 case "$COMMAND" in
   install)
     INTERVAL=120
+    MEMORY_PROJECTS=""
+    MEMORY_SCAN_LIMIT=500
+    MEMORY_MAX_CONVERSATIONS=1
+    MEMORY_MAX_MESSAGES=8
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --interval) INTERVAL="$2"; shift 2 ;;
+        --memory-projects) MEMORY_PROJECTS="$2"; shift 2 ;;
+        --memory-scan-limit) MEMORY_SCAN_LIMIT="$2"; shift 2 ;;
+        --memory-max-conversations) MEMORY_MAX_CONVERSATIONS="$2"; shift 2 ;;
+        --memory-max-messages) MEMORY_MAX_MESSAGES="$2"; shift 2 ;;
         *) usage; exit 2 ;;
       esac
     done
     [[ "$INTERVAL" =~ ^[0-9]+$ ]] && [ "$INTERVAL" -ge 30 ] || { echo "--interval must be an integer >= 30" >&2; exit 2; }
+    [[ "$MEMORY_SCAN_LIMIT" =~ ^[0-9]+$ ]] && [ "$MEMORY_SCAN_LIMIT" -ge 1 ] && [ "$MEMORY_SCAN_LIMIT" -le 1000 ] || { echo "--memory-scan-limit must be an integer from 1 to 1000" >&2; exit 2; }
+    [[ "$MEMORY_MAX_CONVERSATIONS" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_CONVERSATIONS" -ge 1 ] && [ "$MEMORY_MAX_CONVERSATIONS" -le 10 ] || { echo "--memory-max-conversations must be an integer from 1 to 10" >&2; exit 2; }
+    [[ "$MEMORY_MAX_MESSAGES" =~ ^[0-9]+$ ]] && [ "$MEMORY_MAX_MESSAGES" -ge 1 ] && [ "$MEMORY_MAX_MESSAGES" -le 16 ] || { echo "--memory-max-messages must be an integer from 1 to 16" >&2; exit 2; }
     [ -x "$CHATGPT_NODE" ] || { echo "ChatGPT.app bundled Node is missing: $CHATGPT_NODE" >&2; exit 1; }
     [ -f "$COLLECTOR" ] || { echo "run scripts/install-self-hosted first" >&2; exit 1; }
     remove_legacy_launch_agent
-    write_config "$((INTERVAL * 1000))"
+    write_config "$((INTERVAL * 1000))" "$MEMORY_PROJECTS" "$MEMORY_SCAN_LIMIT" "$MEMORY_MAX_CONVERSATIONS" "$MEMORY_MAX_MESSAGES"
     stop_daemon
     restart_app_server
-    echo "Installed ChatGPT live collector (interval ${INTERVAL}s)."
+    if [ -n "$MEMORY_PROJECTS" ]; then
+      echo "Installed ChatGPT live collector (interval ${INTERVAL}s, memory auto projects: $MEMORY_PROJECTS)."
+    else
+      echo "Installed ChatGPT live collector (interval ${INTERVAL}s, memory auto compiler disabled)."
+    fi
     ;;
   start)
     remove_legacy_launch_agent
@@ -199,6 +240,10 @@ case "$COMMAND" in
     pid="$(daemon_pid)"
     if pid_alive "$pid"; then echo "daemon_pid=$pid running=true"; else echo "daemon_pid=${pid:-none} running=false"; fi
     if [ -f "$STATUS" ]; then cat "$STATUS"; else echo '{"state":"not-started"}'; fi
+    if [ -f "$MEMORY_STATUS" ]; then
+      echo "memory_auto_compiler:"
+      cat "$MEMORY_STATUS"
+    fi
     ;;
   uninstall)
     remove_legacy_launch_agent

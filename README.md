@@ -144,6 +144,20 @@ On macOS, install the deterministic live ChatGPT collector after the binaries:
 "$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service" install
 ```
 
+That install keeps automatic memory compilation disabled. Opt-in is explicit,
+for example:
+
+```bash
+"$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service" install \
+  --memory-projects LEMonX,Arcos \
+  --memory-max-conversations 1
+```
+
+When enabled, the collector schedules a detached bounded compiler worker only
+after new ChatGPT evidence was successfully imported. The worker stages
+candidates only; promotion remains an explicit operator action. Memory compiler
+failures do not roll back or block ChatGPT collection.
+
 The service adds a small MCP bootstrap entry to `~/.codex/config.toml`. The
 official ChatGPT app-server starts that bootstrap with ChatGPT.app's bundled
 signed Node; while the trusted process chain is still intact, it creates one

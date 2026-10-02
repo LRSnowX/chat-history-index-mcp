@@ -25,6 +25,11 @@ const STATUS_PATH = path.join(DATA_HOME, "cache/chatgpt-live-collector-status.js
 const LOG_PATH = path.join(DATA_HOME, "logs/chatgpt-live-collector.log");
 const ERROR_LOG_PATH = path.join(DATA_HOME, "logs/chatgpt-live-collector.error.log");
 const DAEMON_LOCK = path.join(DATA_HOME, "cache/chatgpt-live-collector-daemon.lock");
+const MEMORY_COMPILER_LOCK = path.join(DATA_HOME, "cache/memory-auto-compiler.lock");
+const MEMORY_COMPILER_STATUS_PATH = path.join(DATA_HOME, "cache/memory-auto-compiler-status.json");
+const DEFAULT_MEMORY_AUTO_SCAN_LIMIT = 500;
+const DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS = 1;
+const DEFAULT_MEMORY_AUTO_MAX_MESSAGES = 8;
 
 function pipeIdentity(pipePath) {
   return createHash("sha256").update(pipePath).digest("hex").slice(0, 16);
@@ -390,6 +395,166 @@ function writeStatus(payload) {
   fs.renameSync(staged, STATUS_PATH);
 }
 
+function writeJsonStatus(file, payload) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const staged = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(staged, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(staged, file);
+}
+
+function boundedInteger(value, fallback, min, max, name) {
+  if (value == null || String(value).trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+function memoryAutoConfig(env = process.env) {
+  const projects = [...new Set(
+    String(env.CHAT_HISTORY_MEMORY_AUTO_PROJECTS ?? "")
+      .split(",")
+      .map((project) => project.trim())
+      .filter(Boolean),
+  )];
+  if (projects.length === 0) {
+    return {
+      enabled: false,
+      projects: [],
+      scanLimit: DEFAULT_MEMORY_AUTO_SCAN_LIMIT,
+      maxConversations: DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS,
+      maxMessages: DEFAULT_MEMORY_AUTO_MAX_MESSAGES,
+    };
+  }
+  if (projects.length > 10) {
+    throw new Error("CHAT_HISTORY_MEMORY_AUTO_PROJECTS supports at most 10 projects");
+  }
+  return {
+    enabled: true,
+    projects,
+    scanLimit: boundedInteger(
+      env.CHAT_HISTORY_MEMORY_AUTO_SCAN_LIMIT,
+      DEFAULT_MEMORY_AUTO_SCAN_LIMIT,
+      1,
+      1_000,
+      "CHAT_HISTORY_MEMORY_AUTO_SCAN_LIMIT",
+    ),
+    maxConversations: boundedInteger(
+      env.CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS,
+      DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS,
+      1,
+      10,
+      "CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS",
+    ),
+    maxMessages: boundedInteger(
+      env.CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES,
+      DEFAULT_MEMORY_AUTO_MAX_MESSAGES,
+      1,
+      16,
+      "CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES",
+    ),
+  };
+}
+
+function maybeScheduleMemoryCompiler(syncResult, spawnImpl = spawn, env = process.env) {
+  const config = memoryAutoConfig(env);
+  if (!config.enabled || !(Number(syncResult?.imported) > 0)) {
+    return { enabled: config.enabled, scheduled: false };
+  }
+  const child = spawnImpl(process.execPath, [process.argv[1], "--memory-compiler-worker"], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...env },
+  });
+  child.unref?.();
+  return {
+    enabled: true,
+    scheduled: true,
+    pid: child.pid ?? null,
+    projects: config.projects,
+    max_conversations: config.maxConversations,
+    max_messages: config.maxMessages,
+  };
+}
+
+function safeScheduleMemoryCompiler(
+  syncResult,
+  spawnImpl = spawn,
+  env = process.env,
+  onError = (payload) => appendLog(ERROR_LOG_PATH, payload),
+) {
+  try {
+    return maybeScheduleMemoryCompiler(syncResult, spawnImpl, env);
+  } catch (error) {
+    const detail = String(error?.message ?? error);
+    onError({
+      event: "memory_auto_compile_schedule_error",
+      error: detail,
+    });
+    return {
+      enabled: String(env.CHAT_HISTORY_MEMORY_AUTO_PROJECTS ?? "").trim().length > 0,
+      scheduled: false,
+      error: detail,
+    };
+  }
+}
+
+function runMemoryCompilerWorker() {
+  mustExist(CLI);
+  const config = memoryAutoConfig();
+  if (!config.enabled) return { event: "memory_auto_compile_skipped", reason: "disabled" };
+  const releaseLock = acquirePidLock(MEMORY_COMPILER_LOCK);
+  if (releaseLock == null) return { event: "memory_auto_compile_skipped", reason: "locked" };
+  const startedAt = new Date().toISOString();
+  writeJsonStatus(MEMORY_COMPILER_STATUS_PATH, {
+    state: "running",
+    pid: process.pid,
+    started_at: startedAt,
+    projects: config.projects,
+    scan_limit: config.scanLimit,
+    max_conversations: config.maxConversations,
+    max_messages: config.maxMessages,
+  });
+  const results = [];
+  let failed = false;
+  try {
+    for (const project of config.projects) {
+      try {
+        const result = cliJson([
+          "memory-compile-project",
+          "--project", project,
+          "--scan-limit", String(config.scanLimit),
+          "--max-conversations", String(config.maxConversations),
+          "--max-messages", String(config.maxMessages),
+        ]);
+        results.push({ project, status: "ok", result });
+      } catch (error) {
+        failed = true;
+        results.push({
+          project,
+          status: "error",
+          error: String(error?.message ?? error),
+        });
+      }
+    }
+    const payload = {
+      event: "memory_auto_compile",
+      state: failed ? "degraded" : "completed",
+      pid: process.pid,
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      projects: config.projects,
+      results,
+    };
+    writeJsonStatus(MEMORY_COMPILER_STATUS_PATH, payload);
+    appendLog(failed ? ERROR_LOG_PATH : LOG_PATH, payload);
+    return payload;
+  } finally {
+    releaseLock();
+  }
+}
+
 function acquirePidLock(lock) {
   fs.mkdirSync(path.dirname(lock), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -551,6 +716,7 @@ async function daemonLoop() {
       const result = contextThreadId == null
         ? { event: "chatgpt_live_sync_skipped", reason: "no-context-thread" }
         : await syncWithClient(client, contextThreadId);
+      const memoryScheduler = safeScheduleMemoryCompiler(result);
       const status = {
         state: "running",
         pid: process.pid,
@@ -560,6 +726,7 @@ async function daemonLoop() {
         pipe_identity: currentPipeIdentity,
         interval_ms: interval,
         last_result: result,
+        memory_scheduler: memoryScheduler,
       };
       writeStatus(status);
       if (result.imported > 0 || result.blocked > 0 || result.event !== "chatgpt_live_sync") {
@@ -730,6 +897,14 @@ function runMcpSidecar() {
       try {
         status = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8"));
       } catch {}
+      try {
+        status = {
+          ...status,
+          memory_compiler: JSON.parse(
+            fs.readFileSync(MEMORY_COMPILER_STATUS_PATH, "utf8"),
+          ),
+        };
+      } catch {}
       respond({
         content: [{ type: "text", text: JSON.stringify(status) }],
         structuredContent: status,
@@ -750,7 +925,21 @@ function runMcpSidecar() {
 }
 
 if (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  if (process.argv.includes("--daemon")) {
+  if (process.argv.includes("--memory-compiler-worker")) {
+    try {
+      runMemoryCompilerWorker();
+    } catch (error) {
+      const detail = String(error?.stack ?? error);
+      writeJsonStatus(MEMORY_COMPILER_STATUS_PATH, {
+        state: "degraded",
+        pid: process.pid,
+        checked_at: new Date().toISOString(),
+        error: detail,
+      });
+      appendLog(ERROR_LOG_PATH, { event: "memory_auto_compile_worker_error", error: detail });
+      process.exitCode = 1;
+    }
+  } else if (process.argv.includes("--daemon")) {
     daemonLoop().catch((error) => {
       appendLog(ERROR_LOG_PATH, { event: "chatgpt_live_collector_fatal", error: String(error?.stack ?? error) });
       process.exitCode = 1;
@@ -760,6 +949,8 @@ if (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]
   } else {
     syncOnce()
       .then((result) => {
+        const memoryScheduler = safeScheduleMemoryCompiler(result);
+        if (memoryScheduler.enabled) result.memory_scheduler = memoryScheduler;
         if (result.imported > 0 || result.blocked > 0 || result.event !== "chatgpt_live_sync") {
           console.log(JSON.stringify(result));
         }
@@ -776,8 +967,12 @@ export {
   bridgeMessages,
   bridgeThread,
   ensureDaemonReady,
+  memoryAutoConfig,
   messageText,
+  maybeScheduleMemoryCompiler,
+  safeScheduleMemoryCompiler,
   readCompleteThread,
+  runMemoryCompilerWorker,
   syncWithClient,
   syncOnce,
 };
