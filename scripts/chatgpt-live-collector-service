@@ -223,6 +223,10 @@ case "$COMMAND" in
       echo "--memory-model requires --memory-projects" >&2
       exit 2
     fi
+    if [ -n "$MEMORY_PROJECTS" ] && [ -z "$MEMORY_MODEL" ]; then
+      echo "--memory-projects requires --memory-model" >&2
+      exit 2
+    fi
     [ -x "$CHATGPT_NODE" ] || { echo "ChatGPT.app bundled Node is missing: $CHATGPT_NODE" >&2; exit 1; }
     [ -f "$COLLECTOR" ] || { echo "run scripts/install-self-hosted first" >&2; exit 1; }
     remove_legacy_launch_agent

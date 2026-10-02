@@ -34,7 +34,9 @@ SERVICE="$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-li
   --memory-max-pending-candidates 20
 ```
 
-`--memory-model` is optional. When supplied it writes
+`--memory-model` is required whenever automatic project-memory compilation is
+enabled with `--memory-projects`. This prevents unattended compilation from
+silently following a changing global Codex default model. The option writes
 `CHAT_HISTORY_MEMORY_MODEL` into the collector sidecar environment, so the
 detached compiler worker can use a scheduler-specific Codex model without
 changing the global Codex configuration. The configured model is included in

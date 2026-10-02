@@ -544,6 +544,11 @@ function memoryAutoConfig(env = process.env) {
   if (projects.length > 10) {
     throw new Error("CHAT_HISTORY_MEMORY_AUTO_PROJECTS supports at most 10 projects");
   }
+  if (model == null) {
+    throw new Error(
+      "CHAT_HISTORY_MEMORY_MODEL is required when CHAT_HISTORY_MEMORY_AUTO_PROJECTS is enabled",
+    );
+  }
   return {
     enabled: true,
     projects,

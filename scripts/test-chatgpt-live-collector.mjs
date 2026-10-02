@@ -45,6 +45,12 @@ test("bridgeThread maps ChatGPT sidebar metadata into the Rust discovery contrac
       update_time: 20,
     },
   );
+  assert.throws(
+    () => memoryAutoConfig({
+      CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+    }),
+    /CHAT_HISTORY_MEMORY_MODEL is required/,
+  );
 });
 
 test("bridgeMessages reverses items within newest-first turns for one final Rust reversal", () => {
@@ -116,6 +122,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
   assert.deepEqual(
     memoryAutoConfig({
       CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
       CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "8",
     }).maxPendingCandidates,
     8,
@@ -123,6 +130,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
   assert.throws(
     () => memoryAutoConfig({
       CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
       CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "7",
     }),
     /must be an integer between 8 and 100/,
@@ -130,6 +138,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
   assert.throws(
     () => memoryAutoConfig({
       CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
       CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS: "0",
     }),
     /must be an integer between 1 and 10/,
@@ -137,6 +146,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
   assert.throws(
     () => memoryAutoConfig({
       CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
       CHAT_HISTORY_MEMORY_AUTO_MAX_PENDING_CANDIDATES: "101",
     }),
     /must be an integer between 8 and 100/,
@@ -258,7 +268,10 @@ test("memory auto compiler scheduling errors do not escape into ingestion", () =
     () => {
       throw new Error("spawn failed");
     },
-    { CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX" },
+    {
+      CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+      CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
+    },
     (payload) => logged.push(payload),
   );
   assert.equal(result.enabled, true);
@@ -425,6 +438,7 @@ test("memory compiler worker blocks unhealthy projects before model compilation 
         ...process.env,
         CHAT_HISTORY_DATA_HOME: root,
         CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+        CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
       },
     });
     assert.equal(run.status, 0, run.stderr);
