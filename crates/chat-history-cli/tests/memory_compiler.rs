@@ -279,6 +279,15 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
     );
     assert_eq!(reviews[0].evidence.len(), 2);
     assert_eq!(reviews[1].evidence.len(), 1);
+    let reviewed = run_cli(
+        &data_home,
+        &["memory-candidate-reviews", candidate_ids[0].as_str()],
+        &[],
+    );
+    assert_eq!(reviewed["candidate_id"], candidate_ids[0]);
+    assert_eq!(reviewed["reviews"].as_array().unwrap().len(), 2);
+    assert_eq!(reviewed["reviews"][0]["outcome"], "promoted");
+    assert_eq!(reviewed["reviews"][1]["outcome"], "reverified");
 
     let rejected = run_cli(
         &data_home,

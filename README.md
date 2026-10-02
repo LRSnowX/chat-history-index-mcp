@@ -92,6 +92,7 @@ only; it never promotes them into durable Working Memory by itself:
 ./scripts/chat-history-cli memory-compile-project --project LEMonX
 ./scripts/chat-history-cli memory-candidates --project LEMonX
 ./scripts/chat-history-cli memory-candidate <candidate-id>
+./scripts/chat-history-cli memory-candidate-reviews <candidate-id>
 ./scripts/chat-history-cli memory-candidate-promote <candidate-id> \
   --reason "verified against current repository state" \
   --evidence git_commit:<sha> \
@@ -128,6 +129,8 @@ zero or more `KIND:REFERENCE` evidence values. Supported evidence kinds are
 `repository_state`, and `devspace_result`. Re-promoting an already promoted
 candidate with new review data reverifies the durable MemoryItem and appends a
 review-history record; an empty repeat remains idempotent.
+`memory-candidate-reviews` is read-only and returns the immutable ordered
+promotion/reverification/stale-review history for one candidate.
 
 `memory-health` is read-only and does not invoke Codex. It reports project
 MemoryItem lifecycle counts, candidate lifecycle counts, pending age, and

@@ -170,6 +170,10 @@ enum Command {
     MemoryCandidate {
         candidate_id: String,
     },
+    /// Inspect immutable promotion/reverification review history for one candidate.
+    MemoryCandidateReviews {
+        candidate_id: String,
+    },
     /// Explicitly promote one pending candidate after revalidation.
     MemoryCandidatePromote {
         candidate_id: String,
@@ -620,6 +624,16 @@ async fn main() -> anyhow::Result<()> {
                 .memory_candidate(&candidate_id)?
                 .with_context(|| format!("memory candidate does not exist: {candidate_id}"))?;
             print_json(&candidate)?;
+        }
+        Command::MemoryCandidateReviews { candidate_id } => {
+            service
+                .memory_candidate(&candidate_id)?
+                .with_context(|| format!("memory candidate does not exist: {candidate_id}"))?;
+            let reviews = service.memory_candidate_reviews(&candidate_id)?;
+            print_json(&serde_json::json!({
+                "candidate_id": candidate_id,
+                "reviews": reviews,
+            }))?;
         }
         Command::MemoryCandidatePromote {
             candidate_id,

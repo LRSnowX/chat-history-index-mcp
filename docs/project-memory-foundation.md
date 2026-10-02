@@ -193,9 +193,10 @@ The current implementation provides:
   authoritative active-memory revalidation, and duplicate/conflict rejection;
 - operator CLI commands to plan a bounded project batch without model calls,
   compile one conversation delta or a bounded recent project batch, inspect
-  pending candidates, inspect one candidate, explicitly promote it, or
-  explicitly reject it with a retained reason; planning never stages candidates
-  and compilation itself never promotes;
+  pending candidates, inspect one candidate, inspect its immutable review
+  history, explicitly promote it, or explicitly reject it with a retained
+  reason; planning never stages candidates and compilation itself never
+  promotes;
 - read-only project memory health inspection covering MemoryItem/candidate
   lifecycle counts, stale/unverified active state, checkpoint caught-up/behind
   turns, and canonical-prefix integrity;
