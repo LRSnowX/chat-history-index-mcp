@@ -108,6 +108,8 @@ pub struct MemoryProjectCompilerPlan {
     pub scanned: usize,
     pub matched: usize,
     pub caught_up: usize,
+    pub ready_total: usize,
+    pub ready_truncated: bool,
     pub ready: Vec<MemoryProjectCompilerPlanEntry>,
     pub failures: Vec<MemoryProjectCompilerFailure>,
 }
@@ -459,6 +461,8 @@ impl IndexService {
             scanned: candidates.len(),
             matched: 0,
             caught_up: 0,
+            ready_total: 0,
+            ready_truncated: false,
             ready: Vec::new(),
             failures: Vec::new(),
         };
@@ -470,16 +474,16 @@ impl IndexService {
             match self.prepare_memory_compilation(project, &candidate.conversation_id, max_messages)
             {
                 Ok(Some(input)) => {
-                    plan.ready.push(MemoryProjectCompilerPlanEntry {
-                        conversation_id: input.conversation_id,
-                        source_snapshot_id: input.source_snapshot_id,
-                        from_turn_index: input.from_turn_index,
-                        through_turn_index: input.through_turn_index,
-                        through_message_id: input.through_message_id,
-                        message_count: input.messages.len(),
-                    });
-                    if plan.ready.len() >= max_conversations {
-                        break;
+                    plan.ready_total += 1;
+                    if plan.ready.len() < max_conversations {
+                        plan.ready.push(MemoryProjectCompilerPlanEntry {
+                            conversation_id: input.conversation_id,
+                            source_snapshot_id: input.source_snapshot_id,
+                            from_turn_index: input.from_turn_index,
+                            through_turn_index: input.through_turn_index,
+                            through_message_id: input.through_message_id,
+                            message_count: input.messages.len(),
+                        });
                     }
                 }
                 Ok(None) => plan.caught_up += 1,
@@ -489,6 +493,7 @@ impl IndexService {
                 }),
             }
         }
+        plan.ready_truncated = plan.ready_total > plan.ready.len();
         Ok(plan)
     }
 

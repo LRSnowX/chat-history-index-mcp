@@ -1285,6 +1285,8 @@ async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() 
     let plan = service.plan_memory_project("LEMonX", 50, 2, 2).await?;
     assert_eq!(plan.matched, 2);
     assert_eq!(plan.caught_up, 0);
+    assert_eq!(plan.ready_total, 1);
+    assert!(!plan.ready_truncated);
     assert_eq!(plan.ready.len(), 1);
     assert_eq!(plan.ready[0].conversation_id, matching_id);
     assert_eq!(plan.ready[0].from_turn_index, 0);
@@ -1325,6 +1327,8 @@ async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() 
     let caught_up = service.plan_memory_project("LEMonX", 50, 2, 2).await?;
     assert_eq!(caught_up.matched, 2);
     assert_eq!(caught_up.caught_up, 1);
+    assert_eq!(caught_up.ready_total, 0);
+    assert!(!caught_up.ready_truncated);
     assert!(caught_up.ready.is_empty());
     assert_eq!(caught_up.failures.len(), 1);
     assert_eq!(caught_up.failures[0].conversation_id, incomplete_id);
@@ -1406,6 +1410,8 @@ async fn explicit_project_aliases_extend_strong_matching_without_changing_canoni
         .plan_memory_project("devspace-memory-adapter", 20, 2, 8)
         .await?;
     assert_eq!(plan.matched, 1);
+    assert_eq!(plan.ready_total, 1);
+    assert!(!plan.ready_truncated);
     assert_eq!(plan.ready.len(), 1);
     assert_eq!(plan.ready[0].conversation_id, conversation_id);
 
@@ -1430,6 +1436,53 @@ async fn explicit_project_aliases_extend_strong_matching_without_changing_canoni
     assert!(
         service.conversation_matches_project_strong(conversation_id, "chat-history-index-mcp",)?
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_memory_compile_plan_counts_full_backlog_while_bounding_ready_details()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    service.import_normalized(
+        vec![
+            chatgpt_conversation(
+                "plan-full-1",
+                30.0,
+                vec![
+                    message("u1", "user", "one", 1.0),
+                    message("a1", "assistant", "one", 2.0),
+                ],
+            ),
+            chatgpt_conversation(
+                "plan-full-2",
+                20.0,
+                vec![
+                    message("u2", "user", "two", 1.0),
+                    message("a2", "assistant", "two", 2.0),
+                ],
+            ),
+            chatgpt_conversation(
+                "plan-full-3",
+                10.0,
+                vec![
+                    message("u3", "user", "three", 1.0),
+                    message("a3", "assistant", "three", 2.0),
+                ],
+            ),
+        ],
+        None,
+    )?;
+
+    let plan = service.plan_memory_project("LEMonX", 50, 1, 8).await?;
+    assert_eq!(plan.scanned, 3);
+    assert_eq!(plan.matched, 3);
+    assert_eq!(plan.caught_up, 0);
+    assert_eq!(plan.ready_total, 3);
+    assert!(plan.ready_truncated);
+    assert_eq!(plan.ready.len(), 1);
+    assert_eq!(plan.ready[0].conversation_id, "plan-full-1");
+    assert!(plan.failures.is_empty());
     Ok(())
 }
 
