@@ -168,6 +168,13 @@ enum Command {
         #[arg(long)]
         reason: String,
     },
+    /// Inspect project memory, candidate, and compiler checkpoint health without model calls.
+    MemoryHealth {
+        #[arg(long)]
+        project: String,
+        #[arg(long, default_value_t = 30)]
+        stale_after_days: u32,
+    },
     Resume,
     Stats,
     Search {
@@ -608,6 +615,13 @@ async fn main() -> anyhow::Result<()> {
                 .memory_candidate(&candidate_id)?
                 .with_context(|| format!("memory candidate disappeared: {candidate_id}"))?;
             print_json(&candidate)?;
+        }
+        Command::MemoryHealth {
+            project,
+            stale_after_days,
+        } => {
+            let report = service.memory_health(&project, stale_after_days)?;
+            print_json(&report)?;
         }
         Command::Resume => {
             let report = service.resume().await?;

@@ -93,6 +93,7 @@ only; it never promotes them into durable Working Memory by itself:
 ./scripts/chat-history-cli memory-candidate <candidate-id>
 ./scripts/chat-history-cli memory-candidate-promote <candidate-id>
 ./scripts/chat-history-cli memory-candidate-reject <candidate-id> --reason "operator reason"
+./scripts/chat-history-cli memory-health --project LEMonX
 ```
 
 Project compilation scans recent conversations in metadata-recency order,
@@ -110,6 +111,11 @@ untrusted data, validates strict bounded JSON output, and writes only pending
 candidate operations. Candidate promotion remains a separate state transition.
 Promotion and rejection are explicit operator CLI actions; they are not exposed
 as model-facing MCP tools.
+
+`memory-health` is read-only and does not invoke Codex. It reports project
+MemoryItem lifecycle counts, candidate lifecycle counts, pending age, and
+per-conversation compiler checkpoints including caught-up/behind turns and
+whether the current canonical snapshot still preserves the compiled prefix.
 
 The MCP server also exposes read-oriented project memory tools:
 `memory_search`, `memory_recent`, `memory_get_thread`, and

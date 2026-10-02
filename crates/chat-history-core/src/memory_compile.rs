@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{anyhow, ensure};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -969,11 +969,11 @@ fn validate_checkpoint_progression(
 }
 
 pub(crate) fn snapshot_prefix_sha256_hex(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     snapshot_id: &str,
     through_turn_index: i64,
 ) -> anyhow::Result<String> {
-    let mut stmt = tx.prepare(
+    let mut stmt = conn.prepare(
         r#"
         SELECT message_id, role, turn_index, normalized_text
         FROM conversation_snapshot_messages

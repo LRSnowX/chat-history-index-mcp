@@ -11,6 +11,7 @@ pub mod ingest;
 pub mod memory;
 pub mod memory_compile;
 pub mod memory_compiler;
+pub mod memory_health;
 pub mod models;
 pub mod openai;
 pub mod ranking;
@@ -39,6 +40,10 @@ pub use memory_compiler::{
     MemoryCompilerInput, MemoryCompilerMessage, MemoryCompilerPendingCandidate,
     MemoryCompilerRunResult, MemoryProjectCompilerFailure, MemoryProjectCompilerResult,
     MemoryProjectCompilerStaged,
+};
+pub use memory_health::{
+    MemoryCandidateStatusCounts, MemoryCheckpointHealth, MemoryCheckpointPrefixStatus,
+    MemoryHealthReport, MemoryStatusCounts,
 };
 pub use models::{
     ConversationDetail, ConversationRecord, DatabaseHealth, IndexStats, JobKind, JobStatus,

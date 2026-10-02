@@ -1,8 +1,8 @@
 use chat_history_core::{
     DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, IndexService, MemoryCandidateDecision,
-    MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus, MemoryCompilationBatch,
-    MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope, MemoryStatus,
-    NormalizedConversation, NormalizedMessage,
+    MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus,
+    MemoryCheckpointPrefixStatus, MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind,
+    MemoryItem, MemoryKind, MemoryScope, MemoryStatus, NormalizedConversation, NormalizedMessage,
     db::{open_database, restore_database},
 };
 use rusqlite::params;
@@ -451,6 +451,17 @@ fn memory_compilation_stages_candidates_without_mutating_working_memory() -> any
     assert_eq!(checkpoint.through_turn_index, 5);
     assert_eq!(checkpoint.through_message_id, "a3");
     assert_eq!(service.pending_memory_candidates("LEMonX")?.len(), 1);
+    let healthy = service.memory_health("LEMonX", 30)?;
+    assert_eq!(healthy.memory_items.active, 1);
+    assert_eq!(healthy.candidates.pending, 1);
+    assert_eq!(healthy.checkpoint_count, 1);
+    assert_eq!(healthy.checkpoint_caught_up, 1);
+    assert_eq!(healthy.checkpoint_behind, 0);
+    assert_eq!(healthy.checkpoint_prefix_problem, 0);
+    assert_eq!(
+        healthy.checkpoints[0].prefix_status,
+        MemoryCheckpointPrefixStatus::Valid
+    );
 
     service.import_normalized(
         vec![chatgpt_conversation(
@@ -506,6 +517,14 @@ fn memory_compilation_stages_candidates_without_mutating_working_memory() -> any
     let working = service.project_working_memory("LEMonX")?;
     assert_eq!(working.items.len(), 1);
     assert_eq!(working.items[0].memory_id, "candidate-memory-1");
+    let unhealthy = service.memory_health("LEMonX", 30)?;
+    assert_eq!(unhealthy.candidates.stale, 1);
+    assert_eq!(unhealthy.checkpoint_caught_up, 0);
+    assert_eq!(unhealthy.checkpoint_prefix_problem, 1);
+    assert_eq!(
+        unhealthy.checkpoints[0].prefix_status,
+        MemoryCheckpointPrefixStatus::Changed
+    );
     Ok(())
 }
 

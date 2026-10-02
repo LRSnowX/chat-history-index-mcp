@@ -188,6 +188,9 @@ The current implementation provides:
   project batch, inspect pending candidates, inspect one candidate, explicitly
   promote it, or explicitly reject it with a retained reason; compilation
   itself never promotes;
+- read-only project memory health inspection covering MemoryItem/candidate
+  lifecycle counts, stale/unverified active state, checkpoint caught-up/behind
+  turns, and canonical-prefix integrity;
 - schema-v1 restore compatibility.
 
 It does not yet provide:
@@ -196,7 +199,7 @@ It does not yet provide:
 - automatic candidate promotion;
 - a richer operator review UI;
 - memory-first semantic search;
-- memory health/inspection CLI.
+- automatic scheduler/retry telemetry beyond the read-only health snapshot.
 
 This boundary prevents an LLM from writing long-term state before provenance,
 conflict handling, and compiler rules are implemented and tested.
@@ -241,7 +244,7 @@ The remaining Phase 3 work is orchestration and review:
 - optionally add a richer review UI around the existing operator CLI;
 - define conservative promotion policy classes if any operation is ever made
   automatic;
-- add retry/health visibility for compiler failures and caught-up state.
+- add scheduler retry visibility beyond the current read-only checkpoint health.
 
 No MCP model-facing memory write surface exists.
 
@@ -266,14 +269,18 @@ in the host instruction contract. The remaining work is to expose those stronger
 sources as explicit structured packet sections rather than only as host
 instructions and separately loaded project files.
 
-### Phase 6 — Memory health
+### Phase 6 follow-up — Memory health
 
-Expose diagnostics for:
+The read-only `memory-health` CLI now exposes:
 
 - working-memory age;
 - active/resolved/superseded item counts;
-- unresolved conflicts;
-- incomplete conversation evidence;
-- handoff byte budget;
 - stale/unverified memory;
-- skipped lower-quality snapshots.
+- candidate lifecycle counts and oldest pending age;
+- per-checkpoint caught-up/behind turns;
+- canonical-prefix changed/missing detection;
+- tracked rejected-lower-quality evidence counts.
+
+Future health work should add scheduler retry/error history, handoff byte-budget
+telemetry, richer unresolved-conflict reporting, and broader incomplete
+conversation evidence diagnostics.
