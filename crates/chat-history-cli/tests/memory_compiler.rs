@@ -161,6 +161,9 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
     assert!(prompt.contains("working_memory values"));
     assert!(prompt.contains("\"message_id\": \"a1\""));
     assert!(prompt.contains("Never invent candidate IDs"));
+    assert!(prompt.contains("transient tool, plugin, connector, network"));
+    assert!(prompt.contains("never label changing counts"));
+    assert!(prompt.contains("do not also store verbose intermediate test matrices"));
 
     let pending = service.pending_memory_candidates("LEMonX").unwrap();
     assert_eq!(pending.len(), 2);
