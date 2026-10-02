@@ -1,7 +1,7 @@
 use chat_history_core::{
     CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
-    DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, IndexService, MemoryCandidateDecision,
-    MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus,
+    DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, IndexService, MemoryAutoPromotionClass,
+    MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus,
     MemoryCheckpointPrefixStatus, MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind,
     MemoryItem, MemoryKind, MemoryPromotionReview, MemoryScope, MemoryStatus,
     NormalizedConversation, NormalizedMessage,
@@ -1561,6 +1561,246 @@ fn schema_five_backfills_legacy_promoted_candidate_review_once() -> anyhow::Resu
     assert_eq!(
         service.memory_candidate_reviews("legacy-promoted")?.len(),
         1
+    );
+    Ok(())
+}
+
+#[test]
+fn auto_promotion_plan_is_conservative_explainable_and_read_only() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let conversation_id = "promotion-policy-conversation";
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            10.0,
+            vec![
+                message("u1", "user", "set policy and continue work", 1.0),
+                message("a1", "assistant", "acknowledged", 2.0),
+            ],
+        )],
+        None,
+    )?;
+    let snapshot = canonical_snapshot_id(&service, conversation_id)?;
+    service.put_memory_item(&MemoryItem {
+        memory_id: "policy-target".to_string(),
+        scope: MemoryScope::Project {
+            project: "LEMonX".to_string(),
+        },
+        kind: MemoryKind::Task,
+        key: "policy_task".to_string(),
+        value: json!({"text": "finish verification"}),
+        status: MemoryStatus::Active,
+        importance: 90,
+        confidence: 1.0,
+        valid_from: Some(5.0),
+        valid_until: None,
+        supersedes_memory_id: None,
+        created_at: 5.0,
+        updated_at: 5.0,
+        last_verified_at: Some(5.0),
+        evidence: Vec::new(),
+    })?;
+
+    let evidence = |kind, reference: &str| MemoryEvidence {
+        kind,
+        reference: reference.to_string(),
+        detail: json!({}),
+        created_at: 10.0,
+    };
+    let new_memory = |candidate_id: &str,
+                      kind: MemoryKind,
+                      key: &str,
+                      confidence: f64,
+                      evidence: Vec<MemoryEvidence>| {
+        MemoryCandidateInput {
+            candidate_id: candidate_id.to_string(),
+            payload: MemoryCandidatePayload::Add {
+                memory_id: format!("memory-{candidate_id}"),
+                kind,
+                key: key.to_string(),
+                value: json!({"text": candidate_id}),
+                importance: 90,
+                confidence,
+                valid_from: Some(10.0),
+                valid_until: None,
+                last_verified_at: Some(10.0),
+            },
+            rationale: format!("policy test {candidate_id}"),
+            evidence,
+        }
+    };
+
+    service.stage_memory_compilation(&MemoryCompilationBatch {
+        project: "LEMonX".to_string(),
+        conversation_id: conversation_id.to_string(),
+        source_snapshot_id: snapshot,
+        through_turn_index: 1,
+        through_message_id: "a1".to_string(),
+        compiler_version: "memory-compiler-v1".to_string(),
+        model_label: Some("test-model".to_string()),
+        created_at: 10.0,
+        candidates: vec![
+            new_memory(
+                "policy-user-rule",
+                MemoryKind::Decision,
+                "explicit_rule",
+                0.99,
+                vec![evidence(
+                    MemoryEvidenceKind::UserStatement,
+                    "user:explicit-rule",
+                )],
+            ),
+            new_memory(
+                "policy-operational-result",
+                MemoryKind::Result,
+                "verified_result",
+                0.99,
+                vec![evidence(
+                    MemoryEvidenceKind::DevspaceResult,
+                    "devspace:verified-result",
+                )],
+            ),
+            MemoryCandidateInput {
+                candidate_id: "policy-resolve".to_string(),
+                payload: MemoryCandidatePayload::Resolve {
+                    target_memory_id: "policy-target".to_string(),
+                },
+                rationale: "verified task completion".to_string(),
+                evidence: vec![evidence(
+                    MemoryEvidenceKind::RepositoryState,
+                    "repo:verified-task-state",
+                )],
+            },
+            new_memory(
+                "policy-conversation-only",
+                MemoryKind::State,
+                "conversation_only",
+                0.99,
+                vec![evidence(
+                    MemoryEvidenceKind::ConversationTurn,
+                    "conversation:promotion-policy-conversation:message:a1",
+                )],
+            ),
+            new_memory(
+                "policy-low-confidence",
+                MemoryKind::Decision,
+                "low_confidence_rule",
+                0.95,
+                vec![evidence(
+                    MemoryEvidenceKind::UserStatement,
+                    "user:low-confidence",
+                )],
+            ),
+            new_memory(
+                "policy-hypothesis",
+                MemoryKind::Hypothesis,
+                "hypothesis",
+                0.99,
+                vec![evidence(
+                    MemoryEvidenceKind::UserStatement,
+                    "user:hypothesis",
+                )],
+            ),
+            MemoryCandidateInput {
+                candidate_id: "policy-archive".to_string(),
+                payload: MemoryCandidatePayload::Archive {
+                    target_memory_id: "policy-target".to_string(),
+                },
+                rationale: "archive proposal requires judgement".to_string(),
+                evidence: vec![evidence(
+                    MemoryEvidenceKind::DevspaceResult,
+                    "devspace:archive-signal",
+                )],
+            },
+            new_memory(
+                "policy-late-conflict",
+                MemoryKind::State,
+                "late_conflict",
+                0.99,
+                vec![evidence(
+                    MemoryEvidenceKind::RepositoryState,
+                    "repo:late-conflict",
+                )],
+            ),
+        ],
+    })?;
+
+    service.put_memory_item(&MemoryItem {
+        memory_id: "late-conflict-existing".to_string(),
+        scope: MemoryScope::Project {
+            project: "LEMonX".to_string(),
+        },
+        kind: MemoryKind::State,
+        key: "late_conflict".to_string(),
+        value: json!({"text": "existing"}),
+        status: MemoryStatus::Active,
+        importance: 90,
+        confidence: 1.0,
+        valid_from: Some(11.0),
+        valid_until: None,
+        supersedes_memory_id: None,
+        created_at: 11.0,
+        updated_at: 11.0,
+        last_verified_at: Some(11.0),
+        evidence: Vec::new(),
+    })?;
+
+    let plan = service.memory_auto_promotion_plan("LEMonX")?;
+    assert_eq!(plan.policy_version, "conservative-v1");
+    assert_eq!(plan.pending_count, 8);
+    assert_eq!(plan.eligible_count, 3);
+    assert_eq!(plan.requires_review_count, 5);
+    let by_id = plan
+        .evaluations
+        .iter()
+        .map(|evaluation| (evaluation.candidate_id.as_str(), evaluation))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    assert_eq!(
+        by_id["policy-user-rule"].class,
+        Some(MemoryAutoPromotionClass::UserAssertedRule)
+    );
+    assert!(by_id["policy-user-rule"].eligible);
+    assert_eq!(
+        by_id["policy-operational-result"].class,
+        Some(MemoryAutoPromotionClass::VerifiedOperationalMemory)
+    );
+    assert!(by_id["policy-operational-result"].eligible);
+    assert_eq!(
+        by_id["policy-resolve"].class,
+        Some(MemoryAutoPromotionClass::VerifiedOperationalResolution)
+    );
+    assert!(by_id["policy-resolve"].eligible);
+    assert_eq!(
+        by_id["policy-conversation-only"].blocker_codes,
+        vec!["operational_memory_requires_verified_evidence"]
+    );
+    assert_eq!(
+        by_id["policy-low-confidence"].blocker_codes,
+        vec!["confidence_below_policy_threshold"]
+    );
+    assert_eq!(
+        by_id["policy-hypothesis"].blocker_codes,
+        vec!["hypothesis_requires_review"]
+    );
+    assert_eq!(
+        by_id["policy-archive"].blocker_codes,
+        vec!["archive_requires_review"]
+    );
+    assert!(
+        by_id["policy-late-conflict"]
+            .blocker_codes
+            .contains(&"revalidation_failed".to_string())
+    );
+    assert!(by_id["policy-late-conflict"].revalidation_problem.is_some());
+
+    assert_eq!(service.pending_memory_candidates("LEMonX")?.len(), 8);
+    assert_eq!(service.project_working_memory("LEMonX")?.items.len(), 2);
+    assert!(
+        service
+            .get_memory_item("memory-policy-user-rule")?
+            .is_none()
     );
     Ok(())
 }

@@ -99,6 +99,7 @@ only; it never promotes them into durable Working Memory by itself:
   --evidence repository_state:<reference>
 ./scripts/chat-history-cli memory-candidate-reject <candidate-id> --reason "operator reason"
 ./scripts/chat-history-cli memory-health --project LEMonX
+./scripts/chat-history-cli memory-auto-promotion-plan --project LEMonX
 ./scripts/chat-history-cli memory-collaboration-list
 ./scripts/chat-history-cli memory-collaboration-author \
   --kind preference \
@@ -150,6 +151,18 @@ also scans strong-match project conversations for incomplete canonical ChatGPT
 evidence (multi-message transcripts with no assistant messages) and reports
 pending candidates that would currently fail promotion revalidation, without
 changing their status.
+
+`memory-auto-promotion-plan` is also read-only. It evaluates pending candidates
+against the conservative `conservative-v1` policy and explains stable blocker
+codes without promoting anything. Model-generated `conversation_turn`
+provenance alone is never sufficient, regardless of the candidate's reported
+confidence. Rule-like memories require explicit `user_statement` evidence;
+state/task/blocker/result memories require independently verified
+`git_commit`, `repository_state`, or `devspace_result` evidence; artifact
+references require document/repository evidence; hypotheses and archive
+operations always require review. New/superseding memories must also meet the
+policy's minimum importance/confidence thresholds. Current revalidation
+failures always make a candidate ineligible.
 
 Collaboration Memory authoring is also operator-only. `memory-collaboration-author`
 accepts only the stable global kinds `invariant`, `preference`, and `decision`;

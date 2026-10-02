@@ -12,6 +12,7 @@ pub mod memory;
 pub mod memory_compile;
 pub mod memory_compiler;
 pub mod memory_health;
+pub mod memory_promotion_policy;
 pub mod models;
 pub mod openai;
 pub mod ranking;
@@ -46,6 +47,10 @@ pub use memory_compiler::{
 pub use memory_health::{
     IncompleteCanonicalConversationHealth, MemoryCandidateStatusCounts, MemoryCheckpointHealth,
     MemoryCheckpointPrefixStatus, MemoryHealthReport, MemoryStatusCounts,
+};
+pub use memory_promotion_policy::{
+    AUTO_PROMOTION_POLICY_VERSION, MemoryAutoPromotionClass, MemoryAutoPromotionEvaluation,
+    MemoryAutoPromotionPlan,
 };
 pub use models::{
     ConversationDetail, ConversationRecord, DatabaseHealth, IndexStats, JobKind, JobStatus,

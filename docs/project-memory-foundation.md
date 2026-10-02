@@ -200,6 +200,8 @@ The current implementation provides:
 - read-only project memory health inspection covering MemoryItem/candidate
   lifecycle counts, stale/unverified active state, checkpoint caught-up/behind
   turns, and canonical-prefix integrity;
+- read-only conservative automatic-promotion eligibility planning with stable
+  blocker codes and no state mutation;
 - schema-v1 restore compatibility.
 
 It does not yet provide:
@@ -275,8 +277,19 @@ The remaining Phase 3 work is orchestration and review:
 - decide which projects, if any, should be explicitly opted into the
   default-off, health-gated scheduler;
 - optionally add a richer review UI around the existing operator CLI;
-- define conservative promotion policy classes if any operation is ever made
-  automatic;
+- observe the conservative auto-promotion eligibility plan on real candidates
+  before deciding whether any policy class should ever gain an automatic
+  executor.
+
+The initial `conservative-v1` eligibility policy is read-only. It deliberately
+does not trust model confidence by itself. Pure `conversation_turn` evidence
+always remains review-required. Rule-like invariant/preference/decision
+candidates need explicit `user_statement` provenance; operational
+state/blocker/task/result candidates need independently verified Git,
+repository-state, or DevSpace-result provenance; artifact references need
+document/repository provenance. Hypotheses and archive operations are never
+eligible. Revalidation failures always block eligibility. Add/supersede
+candidates must also meet minimum importance/confidence thresholds.
 
 No MCP model-facing memory write surface exists.
 

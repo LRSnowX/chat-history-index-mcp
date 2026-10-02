@@ -196,6 +196,11 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         stale_after_days: u32,
     },
+    /// Evaluate pending candidates against the conservative automatic-promotion policy. Read-only.
+    MemoryAutoPromotionPlan {
+        #[arg(long)]
+        project: String,
+    },
     /// List active stable cross-project collaboration rules.
     MemoryCollaborationList,
     /// Explicitly author or supersede one stable global collaboration rule.
@@ -708,6 +713,10 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let report = service.memory_health(&project, stale_after_days)?;
             print_json(&report)?;
+        }
+        Command::MemoryAutoPromotionPlan { project } => {
+            let plan = service.memory_auto_promotion_plan(&project)?;
+            print_json(&plan)?;
         }
         Command::MemoryCollaborationList => {
             print_json(&service.collaboration_memory()?)?;
