@@ -307,6 +307,25 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         "preserve upstream compatibility"
     );
 
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "project": "Rust",
+            "stale_after_days": 30
+        }))?;
+    let memory_health = client
+        .call_tool(CallToolRequestParams::new("memory_health").with_arguments(args))
+        .await?;
+    assert_eq!(memory_health.is_error, Some(false));
+    let memory_health_json = memory_health
+        .structured_content
+        .as_ref()
+        .expect("memory health structured");
+    assert_eq!(memory_health_json["project"], "Rust");
+    assert_eq!(memory_health_json["stale_after_days"], 30);
+    assert_eq!(memory_health_json["memory_items"]["active"], 13);
+    assert_eq!(memory_health_json["candidates"]["pending"], 0);
+    assert_eq!(memory_health_json["checkpoint_count"], 0);
+
     let collector_state = client
         .call_tool(CallToolRequestParams::new("chatgpt_state"))
         .await?;

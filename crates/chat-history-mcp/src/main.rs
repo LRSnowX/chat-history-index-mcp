@@ -10,8 +10,8 @@ use axum::{
 use chat_history_core::{
     ChatGptBlockedThread, ChatGptBridgeTranscript, ChatGptDiscoveryPlan, ChatGptSyncState,
     ChatGptThreadListSnapshot, CollaborationMemory, ConversationRecord, DataHome, ImportMode,
-    ImportOptions, IndexService, NormalizedConversation, ProjectWorkingMemory, SearchMode,
-    SearchOptions, SearchResult, SummaryRecord,
+    ImportOptions, IndexService, MemoryHealthReport, NormalizedConversation, ProjectWorkingMemory,
+    SearchMode, SearchOptions, SearchResult, SummaryRecord,
 };
 use clap::{Parser, ValueEnum};
 use rmcp::Json;
@@ -64,6 +64,7 @@ impl ChatHistoryMcp {
                     "index_export",
                     "index_stats",
                     "memory_get_thread",
+                    "memory_health",
                     "memory_project_context",
                     "memory_recent",
                     "memory_search",
@@ -171,6 +172,17 @@ struct MemoryProjectContextRequest {
     relevant_limit: Option<usize>,
     recent_limit: Option<usize>,
     continuation_message_limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryHealthRequest {
+    project: String,
+    #[serde(default = "default_memory_health_stale_after_days")]
+    stale_after_days: u32,
+}
+
+fn default_memory_health_stale_after_days() -> u32 {
+    30
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -561,6 +573,19 @@ impl ChatHistoryMcp {
             project: request.project,
             hits: results.into_iter().map(memory_hit).collect(),
         }))
+    }
+
+    #[tool(
+        description = "Inspect read-only project memory health, compiler checkpoints, candidate lifecycle, and incomplete evidence diagnostics without invoking a model."
+    )]
+    async fn memory_health(
+        &self,
+        Parameters(request): Parameters<MemoryHealthRequest>,
+    ) -> Result<Json<MemoryHealthReport>, String> {
+        self.service
+            .memory_health(&request.project, request.stale_after_days)
+            .map(Json)
+            .map_err(|error| error.to_string())
     }
 
     #[tool(
