@@ -87,6 +87,7 @@ Project-memory compilation is an explicit operator action and stages candidates
 only; it never promotes them into durable Working Memory by itself:
 
 ```bash
+./scripts/chat-history-cli memory-compile-plan --project LEMonX
 ./scripts/chat-history-cli memory-compile-conversation --project LEMonX <conversation-id>
 ./scripts/chat-history-cli memory-compile-project --project LEMonX
 ./scripts/chat-history-cli memory-candidates --project LEMonX
@@ -95,6 +96,12 @@ only; it never promotes them into durable Working Memory by itself:
 ./scripts/chat-history-cli memory-candidate-reject <candidate-id> --reason "operator reason"
 ./scripts/chat-history-cli memory-health --project LEMonX
 ```
+
+`memory-compile-plan` performs the same recent strong-match scan and bounded
+delta preparation without invoking Codex or staging candidates. It reports
+ready/caught-up/failure state and the exact turn range that a later compile
+would process. Legacy conversations may have their canonical evidence snapshot
+materialized lazily during planning.
 
 Project compilation scans recent conversations in metadata-recency order,
 requires the same strong project match as single-conversation compilation, and

@@ -38,8 +38,8 @@ pub use memory_compiler::{
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, MAX_MEMORY_COMPILER_MESSAGES, MEMORY_COMPILER_VERSION,
     MemoryCompilerInput, MemoryCompilerMessage, MemoryCompilerPendingCandidate,
-    MemoryCompilerRunResult, MemoryProjectCompilerFailure, MemoryProjectCompilerResult,
-    MemoryProjectCompilerStaged,
+    MemoryCompilerRunResult, MemoryProjectCompilerFailure, MemoryProjectCompilerPlan,
+    MemoryProjectCompilerPlanEntry, MemoryProjectCompilerResult, MemoryProjectCompilerStaged,
 };
 pub use memory_health::{
     MemoryCandidateStatusCounts, MemoryCheckpointHealth, MemoryCheckpointPrefixStatus,

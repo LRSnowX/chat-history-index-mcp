@@ -149,6 +149,17 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
         max_messages: usize,
     },
+    /// Plan a bounded recent project compilation without invoking a model or writing candidates.
+    MemoryCompilePlan {
+        #[arg(long)]
+        project: String,
+        #[arg(long, default_value_t = DEFAULT_MEMORY_PROJECT_SCAN_LIMIT)]
+        scan_limit: usize,
+        #[arg(long, default_value_t = DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS)]
+        max_conversations: usize,
+        #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
+        max_messages: usize,
+    },
     /// Inspect pending staged memory candidates for one project.
     MemoryCandidates {
         #[arg(long)]
@@ -580,6 +591,17 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
             print_json(&result)?;
+        }
+        Command::MemoryCompilePlan {
+            project,
+            scan_limit,
+            max_conversations,
+            max_messages,
+        } => {
+            let plan = service
+                .plan_memory_project(&project, scan_limit, max_conversations, max_messages)
+                .await?;
+            print_json(&plan)?;
         }
         Command::MemoryCandidates { project } => {
             let candidates = service.pending_memory_candidates(&project)?;

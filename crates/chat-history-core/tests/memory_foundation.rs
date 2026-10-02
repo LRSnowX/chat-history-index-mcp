@@ -687,6 +687,76 @@ fn memory_candidate_promotion_covers_lifecycle_operations_and_rejection() -> any
     Ok(())
 }
 
+#[tokio::test]
+async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() -> anyhow::Result<()>
+{
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let matching_id = "plan-lemonx";
+    let other_id = "plan-other";
+    service.import_normalized(
+        vec![
+            chatgpt_conversation(
+                matching_id,
+                20.0,
+                vec![
+                    message("u1", "user", "start", 1.0),
+                    message("a1", "assistant", "continue", 2.0),
+                    message("u2", "user", "next", 3.0),
+                    message("a2", "assistant", "done", 4.0),
+                ],
+            ),
+            {
+                let mut conversation = chatgpt_conversation(
+                    other_id,
+                    19.0,
+                    vec![
+                        message("ou1", "user", "other", 1.0),
+                        message("oa1", "assistant", "other", 2.0),
+                    ],
+                );
+                conversation.title = "Unrelated project".to_string();
+                conversation.source_path = Some("chatgpt-app-bridge".to_string());
+                conversation
+            },
+        ],
+        None,
+    )?;
+
+    let plan = service.plan_memory_project("LEMonX", 50, 2, 2).await?;
+    assert_eq!(plan.matched, 1);
+    assert_eq!(plan.caught_up, 0);
+    assert_eq!(plan.ready.len(), 1);
+    assert_eq!(plan.ready[0].conversation_id, matching_id);
+    assert_eq!(plan.ready[0].from_turn_index, 0);
+    assert_eq!(plan.ready[0].through_turn_index, 1);
+    assert_eq!(plan.ready[0].message_count, 2);
+    assert!(plan.failures.is_empty());
+    assert!(service.pending_memory_candidates("LEMonX")?.is_empty());
+
+    let input = service
+        .prepare_memory_compilation("LEMonX", matching_id, 16)?
+        .expect("matching conversation has work");
+    service.stage_memory_compilation(&MemoryCompilationBatch {
+        project: "LEMonX".to_string(),
+        conversation_id: matching_id.to_string(),
+        source_snapshot_id: input.source_snapshot_id,
+        through_turn_index: 3,
+        through_message_id: "a2".to_string(),
+        compiler_version: "plan-test".to_string(),
+        model_label: Some("none".to_string()),
+        created_at: 30.0,
+        candidates: Vec::new(),
+    })?;
+
+    let caught_up = service.plan_memory_project("LEMonX", 50, 2, 2).await?;
+    assert_eq!(caught_up.matched, 1);
+    assert_eq!(caught_up.caught_up, 1);
+    assert!(caught_up.ready.is_empty());
+    assert!(service.pending_memory_candidates("LEMonX")?.is_empty());
+    Ok(())
+}
+
 #[test]
 fn model_compiler_stages_only_valid_delta_evidence_and_keeps_ids_deterministic()
 -> anyhow::Result<()> {

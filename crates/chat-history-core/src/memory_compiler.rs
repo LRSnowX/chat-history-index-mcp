@@ -92,6 +92,26 @@ pub struct MemoryProjectCompilerFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryProjectCompilerPlanEntry {
+    pub conversation_id: String,
+    pub source_snapshot_id: String,
+    pub from_turn_index: i64,
+    pub through_turn_index: i64,
+    pub through_message_id: String,
+    pub message_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryProjectCompilerPlan {
+    pub project: String,
+    pub scanned: usize,
+    pub matched: usize,
+    pub caught_up: usize,
+    pub ready: Vec<MemoryProjectCompilerPlanEntry>,
+    pub failures: Vec<MemoryProjectCompilerFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryProjectCompilerResult {
     pub project: String,
     pub scanned: usize,
@@ -354,19 +374,7 @@ impl IndexService {
         max_conversations: usize,
         max_messages: usize,
     ) -> anyhow::Result<MemoryProjectCompilerResult> {
-        ensure!(!project.trim().is_empty(), "project cannot be empty");
-        ensure!(
-            (1..=1_000).contains(&scan_limit),
-            "scan_limit must be between 1 and 1000"
-        );
-        ensure!(
-            (1..=10).contains(&max_conversations),
-            "max_conversations must be between 1 and 10"
-        );
-        ensure!(
-            (1..=MAX_MEMORY_COMPILER_MESSAGES).contains(&max_messages),
-            "max_messages must be between 1 and {MAX_MEMORY_COMPILER_MESSAGES}"
-        );
+        validate_project_compiler_bounds(project, scan_limit, max_conversations, max_messages)?;
         let candidates = self
             .search(SearchOptions {
                 mode: Some(SearchMode::Metadata),
@@ -427,6 +435,59 @@ impl IndexService {
         Ok(result)
     }
 
+    pub async fn plan_memory_project(
+        &self,
+        project: &str,
+        scan_limit: usize,
+        max_conversations: usize,
+        max_messages: usize,
+    ) -> anyhow::Result<MemoryProjectCompilerPlan> {
+        validate_project_compiler_bounds(project, scan_limit, max_conversations, max_messages)?;
+        let candidates = self
+            .search(SearchOptions {
+                mode: Some(SearchMode::Metadata),
+                limit: Some(scan_limit),
+                ..SearchOptions::default()
+            })
+            .await?;
+        let mut plan = MemoryProjectCompilerPlan {
+            project: project.to_string(),
+            scanned: candidates.len(),
+            matched: 0,
+            caught_up: 0,
+            ready: Vec::new(),
+            failures: Vec::new(),
+        };
+        for candidate in candidates {
+            if !self.conversation_matches_project_strong(&candidate.conversation_id, project)? {
+                continue;
+            }
+            plan.matched += 1;
+            match self.prepare_memory_compilation(project, &candidate.conversation_id, max_messages)
+            {
+                Ok(Some(input)) => {
+                    plan.ready.push(MemoryProjectCompilerPlanEntry {
+                        conversation_id: input.conversation_id,
+                        source_snapshot_id: input.source_snapshot_id,
+                        from_turn_index: input.from_turn_index,
+                        through_turn_index: input.through_turn_index,
+                        through_message_id: input.through_message_id,
+                        message_count: input.messages.len(),
+                    });
+                    if plan.ready.len() >= max_conversations {
+                        break;
+                    }
+                }
+                Ok(None) => plan.caught_up += 1,
+                Err(error) => plan.failures.push(MemoryProjectCompilerFailure {
+                    conversation_id: candidate.conversation_id,
+                    error: format!("{error:#}"),
+                }),
+            }
+        }
+        Ok(plan)
+    }
+
     async fn compile_prepared_memory(
         &self,
         model: &MemoryModelClient,
@@ -444,6 +505,28 @@ impl IndexService {
             staged,
         })
     }
+}
+
+fn validate_project_compiler_bounds(
+    project: &str,
+    scan_limit: usize,
+    max_conversations: usize,
+    max_messages: usize,
+) -> anyhow::Result<()> {
+    ensure!(!project.trim().is_empty(), "project cannot be empty");
+    ensure!(
+        (1..=1_000).contains(&scan_limit),
+        "scan_limit must be between 1 and 1000"
+    );
+    ensure!(
+        (1..=10).contains(&max_conversations),
+        "max_conversations must be between 1 and 10"
+    );
+    ensure!(
+        (1..=MAX_MEMORY_COMPILER_MESSAGES).contains(&max_messages),
+        "max_messages must be between 1 and {MAX_MEMORY_COMPILER_MESSAGES}"
+    );
+    Ok(())
 }
 
 fn ensure_contiguous_delta(

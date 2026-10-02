@@ -184,10 +184,11 @@ The current implementation provides:
 - strong project/conversation matching before model invocation;
 - strict candidate JSON validation, delta-only evidence IDs, bounded values,
   authoritative active-memory revalidation, and duplicate/conflict rejection;
-- operator CLI commands to compile one conversation delta or a bounded recent
-  project batch, inspect pending candidates, inspect one candidate, explicitly
-  promote it, or explicitly reject it with a retained reason; compilation
-  itself never promotes;
+- operator CLI commands to plan a bounded project batch without model calls,
+  compile one conversation delta or a bounded recent project batch, inspect
+  pending candidates, inspect one candidate, explicitly promote it, or
+  explicitly reject it with a retained reason; planning never stages candidates
+  and compilation itself never promotes;
 - read-only project memory health inspection covering MemoryItem/candidate
   lifecycle counts, stale/unverified active state, checkpoint caught-up/behind
   turns, and canonical-prefix integrity;
@@ -239,8 +240,9 @@ memory.
 The remaining Phase 3 work is orchestration and review:
 
 - optionally trigger the now-bounded project compiler after accepted new
-  evidence without blocking ingestion; automatic triggering must remain
-  explicitly configurable so background model usage is not implicit;
+  evidence without blocking ingestion; scheduler logic can first consume the
+  zero-model-call project plan, and automatic execution must remain explicitly
+  configurable so background model usage is not implicit;
 - optionally add a richer review UI around the existing operator CLI;
 - define conservative promotion policy classes if any operation is ever made
   automatic;
