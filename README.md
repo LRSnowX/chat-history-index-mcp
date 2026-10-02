@@ -92,7 +92,10 @@ only; it never promotes them into durable Working Memory by itself:
 ./scripts/chat-history-cli memory-compile-project --project LEMonX
 ./scripts/chat-history-cli memory-candidates --project LEMonX
 ./scripts/chat-history-cli memory-candidate <candidate-id>
-./scripts/chat-history-cli memory-candidate-promote <candidate-id>
+./scripts/chat-history-cli memory-candidate-promote <candidate-id> \
+  --reason "verified against current repository state" \
+  --evidence git_commit:<sha> \
+  --evidence repository_state:<reference>
 ./scripts/chat-history-cli memory-candidate-reject <candidate-id> --reason "operator reason"
 ./scripts/chat-history-cli memory-health --project LEMonX
 ```
@@ -119,7 +122,12 @@ requires a strong project match, treats the entire supplied compiler context as
 untrusted data, validates strict bounded JSON output, and writes only pending
 candidate operations. Candidate promotion remains a separate state transition.
 Promotion and rejection are explicit operator CLI actions; they are not exposed
-as model-facing MCP tools.
+as model-facing MCP tools. Promotion can attach an operator review reason and
+zero or more `KIND:REFERENCE` evidence values. Supported evidence kinds are
+`user_statement`, `conversation_turn`, `document`, `git_commit`,
+`repository_state`, and `devspace_result`. Re-promoting an already promoted
+candidate with new review data reverifies the durable MemoryItem and appends a
+review-history record; an empty repeat remains idempotent.
 
 `memory-health` is read-only and does not invoke Codex. It reports project
 MemoryItem lifecycle counts, candidate lifecycle counts, pending age, and

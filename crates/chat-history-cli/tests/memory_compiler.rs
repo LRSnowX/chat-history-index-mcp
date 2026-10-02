@@ -192,11 +192,42 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
 
     let promoted = run_cli(
         &data_home,
-        &["memory-candidate-promote", candidate_ids[0].as_str()],
+        &[
+            "memory-candidate-promote",
+            candidate_ids[0].as_str(),
+            "--reason",
+            "verified against repository evidence",
+            "--evidence",
+            "git_commit:abc123",
+            "--evidence",
+            "document:docs/checkpoint-a.md",
+        ],
         &[],
     );
     assert_eq!(promoted["decision"]["status"], "promoted");
     assert_eq!(promoted["candidate"]["status"], "promoted");
+    assert_eq!(
+        promoted["candidate"]["decision_reason"],
+        "verified against repository evidence"
+    );
+    let promoted_memory_id = promoted["decision"]["memory_id"].as_str().unwrap();
+    let promoted_item = service
+        .get_memory_item(promoted_memory_id)
+        .unwrap()
+        .expect("promoted memory exists");
+    assert_eq!(promoted_item.evidence.len(), 3);
+    assert!(
+        promoted_item.evidence.iter().any(
+            |evidence| evidence.kind.as_str() == "git_commit" && evidence.reference == "abc123"
+        )
+    );
+    assert!(
+        promoted_item
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind.as_str() == "document"
+                && evidence.reference == "docs/checkpoint-a.md")
+    );
     assert_eq!(
         service
             .project_working_memory("LEMonX")
@@ -205,6 +236,49 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
             .len(),
         1
     );
+
+    let reverified = run_cli(
+        &data_home,
+        &[
+            "memory-candidate-promote",
+            candidate_ids[0].as_str(),
+            "--reason",
+            "reverified against current repository state",
+            "--evidence",
+            "repository_state:LEMonX@abc123:clean",
+        ],
+        &[],
+    );
+    assert_eq!(reverified["decision"]["status"], "promoted");
+    assert_eq!(
+        reverified["candidate"]["decision_reason"],
+        "reverified against current repository state"
+    );
+    let reverified_item = service
+        .get_memory_item(promoted_memory_id)
+        .unwrap()
+        .expect("reverified memory exists");
+    assert_eq!(reverified_item.evidence.len(), 4);
+    assert!(
+        reverified_item
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind.as_str() == "repository_state"
+                && evidence.reference == "LEMonX@abc123:clean")
+    );
+    let reviews = service
+        .memory_candidate_reviews(candidate_ids[0].as_str())
+        .unwrap();
+    assert_eq!(reviews.len(), 2);
+    assert_eq!(reviews[0].outcome, "promoted");
+    assert_eq!(reviews[0].reason, "verified against repository evidence");
+    assert_eq!(reviews[1].outcome, "reverified");
+    assert_eq!(
+        reviews[1].reason,
+        "reverified against current repository state"
+    );
+    assert_eq!(reviews[0].evidence.len(), 2);
+    assert_eq!(reviews[1].evidence.len(), 1);
 
     let rejected = run_cli(
         &data_home,

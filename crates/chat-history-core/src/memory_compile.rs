@@ -187,6 +187,23 @@ pub enum MemoryCandidateDecision {
     },
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryPromotionReview {
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub evidence: Vec<MemoryEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryCandidateReview {
+    pub review_id: i64,
+    pub candidate_id: String,
+    pub outcome: String,
+    pub reason: String,
+    pub evidence: Vec<MemoryEvidence>,
+    pub decided_at: f64,
+}
+
 impl IndexService {
     pub fn stage_memory_compilation(
         &self,
@@ -313,16 +330,38 @@ impl IndexService {
         load_candidate(&conn, candidate_id)
     }
 
+    pub fn memory_candidate_reviews(
+        &self,
+        candidate_id: &str,
+    ) -> anyhow::Result<Vec<MemoryCandidateReview>> {
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        load_candidate_reviews(&conn, candidate_id)
+    }
+
     pub fn promote_memory_candidate(
         &self,
         candidate_id: &str,
         decided_at: f64,
+    ) -> anyhow::Result<MemoryCandidateDecision> {
+        self.promote_memory_candidate_with_review(
+            candidate_id,
+            decided_at,
+            &MemoryPromotionReview::default(),
+        )
+    }
+
+    pub fn promote_memory_candidate_with_review(
+        &self,
+        candidate_id: &str,
+        decided_at: f64,
+        review: &MemoryPromotionReview,
     ) -> anyhow::Result<MemoryCandidateDecision> {
         ensure!(
             !candidate_id.trim().is_empty(),
             "candidate_id cannot be empty"
         );
         ensure!(decided_at.is_finite(), "decided_at must be finite");
+        validate_promotion_review(review)?;
         let conn = open_database(&self.data_home.paths().db_path)?;
         let tx = conn.unchecked_transaction()?;
         let candidate = load_candidate(&tx, candidate_id)?
@@ -331,6 +370,18 @@ impl IndexService {
             let memory_id = candidate
                 .promoted_memory_id
                 .ok_or_else(|| anyhow!("promoted candidate is missing promoted_memory_id"))?;
+            apply_review_to_promoted_candidate(&tx, candidate_id, &memory_id, decided_at, review)?;
+            if review.reason.is_some() || !review.evidence.is_empty() {
+                insert_candidate_review(
+                    &tx,
+                    candidate_id,
+                    "reverified",
+                    review.reason.as_deref().unwrap_or("reverified"),
+                    &review.evidence,
+                    decided_at,
+                )?;
+            }
+            tx.commit()?;
             return Ok(MemoryCandidateDecision::Promoted {
                 candidate_id: candidate_id.to_string(),
                 memory_id,
@@ -350,6 +401,14 @@ impl IndexService {
                 "#,
                 params![candidate_id, decided_at, reason],
             )?;
+            insert_candidate_review(
+                &tx,
+                candidate_id,
+                "stale",
+                review.reason.as_deref().unwrap_or(&reason),
+                &review.evidence,
+                decided_at,
+            )?;
             tx.commit()?;
             return Ok(MemoryCandidateDecision::Stale {
                 candidate_id: candidate_id.to_string(),
@@ -357,16 +416,25 @@ impl IndexService {
             });
         }
 
-        let memory_id = apply_candidate(&tx, &candidate, decided_at)?;
+        let memory_id = apply_candidate(&tx, &candidate, decided_at, &review.evidence)?;
+        let decision_reason = review.reason.as_deref().unwrap_or("validated and promoted");
         tx.execute(
             r#"
             UPDATE memory_candidates
             SET status = 'promoted', decided_at = ?2,
-                decision_reason = 'validated and promoted',
-                promoted_memory_id = ?3
+                decision_reason = ?3,
+                promoted_memory_id = ?4
             WHERE candidate_id = ?1 AND status = 'pending'
             "#,
-            params![candidate_id, decided_at, memory_id],
+            params![candidate_id, decided_at, decision_reason, memory_id],
+        )?;
+        insert_candidate_review(
+            &tx,
+            candidate_id,
+            "promoted",
+            decision_reason,
+            &review.evidence,
+            decided_at,
         )?;
         tx.commit()?;
         Ok(MemoryCandidateDecision::Promoted {
@@ -405,6 +473,124 @@ impl IndexService {
         );
         Ok(())
     }
+}
+
+fn validate_promotion_review(review: &MemoryPromotionReview) -> anyhow::Result<()> {
+    if let Some(reason) = review.reason.as_deref() {
+        ensure!(
+            !reason.trim().is_empty(),
+            "promotion review reason cannot be empty"
+        );
+    }
+    for evidence in &review.evidence {
+        ensure!(
+            !evidence.reference.trim().is_empty(),
+            "promotion evidence reference cannot be empty"
+        );
+        ensure!(
+            evidence.created_at.is_finite(),
+            "promotion evidence timestamp must be finite"
+        );
+    }
+    Ok(())
+}
+
+fn insert_candidate_review(
+    tx: &Transaction<'_>,
+    candidate_id: &str,
+    outcome: &str,
+    reason: &str,
+    evidence: &[MemoryEvidence],
+    decided_at: f64,
+) -> anyhow::Result<()> {
+    tx.execute(
+        r#"
+        INSERT INTO memory_candidate_reviews (
+          candidate_id, outcome, reason, evidence_json, decided_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![
+            candidate_id,
+            outcome,
+            reason,
+            serde_json::to_string(evidence)?,
+            decided_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_candidate_reviews(
+    conn: &rusqlite::Connection,
+    candidate_id: &str,
+) -> anyhow::Result<Vec<MemoryCandidateReview>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT review_id, outcome, reason, evidence_json, decided_at
+        FROM memory_candidate_reviews
+        WHERE candidate_id = ?1
+        ORDER BY decided_at ASC, review_id ASC
+        "#,
+    )?;
+    stmt.query_map(params![candidate_id], |row| {
+        let evidence_json: String = row.get(3)?;
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            evidence_json,
+            row.get::<_, f64>(4)?,
+        ))
+    })?
+    .map(|row| -> anyhow::Result<MemoryCandidateReview> {
+        let (review_id, outcome, reason, evidence_json, decided_at) = row?;
+        Ok(MemoryCandidateReview {
+            review_id,
+            candidate_id: candidate_id.to_string(),
+            outcome,
+            reason,
+            evidence: serde_json::from_str(&evidence_json)?,
+            decided_at,
+        })
+    })
+    .collect()
+}
+
+fn apply_review_to_promoted_candidate(
+    tx: &Transaction<'_>,
+    candidate_id: &str,
+    memory_id: &str,
+    decided_at: f64,
+    review: &MemoryPromotionReview,
+) -> anyhow::Result<()> {
+    let exists: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM memory_items WHERE memory_id = ?1",
+            params![memory_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    ensure!(
+        exists.is_some(),
+        "promoted memory item no longer exists: {memory_id}"
+    );
+    for evidence in &review.evidence {
+        insert_memory_evidence(tx, memory_id, evidence)?;
+    }
+    if !review.evidence.is_empty() {
+        tx.execute(
+            "UPDATE memory_items SET last_verified_at = ?2 WHERE memory_id = ?1",
+            params![memory_id, decided_at],
+        )?;
+    }
+    if let Some(reason) = review.reason.as_deref() {
+        tx.execute(
+            "UPDATE memory_candidates SET decision_reason = ?2 WHERE candidate_id = ?1 AND status = 'promoted'",
+            params![candidate_id, reason],
+        )?;
+    }
+    Ok(())
 }
 
 fn candidate_stale_reason(
@@ -531,7 +717,9 @@ fn apply_candidate(
     tx: &Transaction<'_>,
     candidate: &MemoryCandidate,
     decided_at: f64,
+    promotion_evidence: &[MemoryEvidence],
 ) -> anyhow::Result<String> {
+    let evidence = merged_memory_evidence(&candidate.evidence, promotion_evidence);
     match &candidate.payload {
         MemoryCandidatePayload::Add {
             memory_id,
@@ -561,7 +749,7 @@ fn apply_candidate(
                 created_at: decided_at,
                 updated_at: decided_at,
                 last_verified_at: Some(decided_at),
-                evidence: candidate.evidence.clone(),
+                evidence: evidence.clone(),
             };
             put_memory_item_tx(tx, &item)?;
             Ok(memory_id.clone())
@@ -595,7 +783,7 @@ fn apply_candidate(
                 created_at: decided_at,
                 updated_at: decided_at,
                 last_verified_at: Some(decided_at),
-                evidence: candidate.evidence.clone(),
+                evidence: evidence.clone(),
             };
             put_memory_item_tx(tx, &item)?;
             Ok(memory_id.clone())
@@ -606,7 +794,7 @@ fn apply_candidate(
                 target_memory_id,
                 MemoryStatus::Resolved,
                 decided_at,
-                &candidate.evidence,
+                &evidence,
             )?;
             Ok(target_memory_id.clone())
         }
@@ -616,7 +804,7 @@ fn apply_candidate(
                 target_memory_id,
                 MemoryStatus::Archived,
                 decided_at,
-                &candidate.evidence,
+                &evidence,
             )?;
             Ok(target_memory_id.clone())
         }
@@ -636,22 +824,49 @@ fn transition_target_memory(
     )?;
     ensure!(changed == 1, "target memory disappeared during promotion");
     for item in evidence {
-        tx.execute(
-            r#"
-            INSERT OR IGNORE INTO memory_evidence (
-              memory_id, evidence_kind, evidence_ref, detail_json, created_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            "#,
-            params![
-                memory_id,
-                item.kind.as_str(),
-                item.reference,
-                serde_json::to_string(&item.detail)?,
-                item.created_at,
-            ],
-        )?;
+        insert_memory_evidence(tx, memory_id, item)?;
     }
+    Ok(())
+}
+
+fn merged_memory_evidence(
+    primary: &[MemoryEvidence],
+    extra: &[MemoryEvidence],
+) -> Vec<MemoryEvidence> {
+    let mut seen = BTreeSet::new();
+    primary
+        .iter()
+        .chain(extra.iter())
+        .filter(|evidence| {
+            seen.insert((
+                evidence.kind.as_str().to_string(),
+                evidence.reference.clone(),
+            ))
+        })
+        .cloned()
+        .collect()
+}
+
+fn insert_memory_evidence(
+    tx: &Transaction<'_>,
+    memory_id: &str,
+    evidence: &MemoryEvidence,
+) -> anyhow::Result<()> {
+    tx.execute(
+        r#"
+        INSERT OR IGNORE INTO memory_evidence (
+          memory_id, evidence_kind, evidence_ref, detail_json, created_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![
+            memory_id,
+            evidence.kind.as_str(),
+            evidence.reference,
+            serde_json::to_string(&evidence.detail)?,
+            evidence.created_at,
+        ],
+    )?;
     Ok(())
 }
 

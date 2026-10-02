@@ -10,7 +10,8 @@ use chat_history_core::{
     ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot,
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
-    MemoryModelClient, NormalizedConversation, SearchMode, SearchOptions,
+    MemoryEvidence, MemoryEvidenceKind, MemoryModelClient, MemoryPromotionReview,
+    NormalizedConversation, SearchMode, SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
@@ -172,6 +173,10 @@ enum Command {
     /// Explicitly promote one pending candidate after revalidation.
     MemoryCandidatePromote {
         candidate_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long = "evidence")]
+        evidence: Vec<String>,
     },
     /// Explicitly reject one pending candidate with an operator reason.
     MemoryCandidateReject {
@@ -616,9 +621,18 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("memory candidate does not exist: {candidate_id}"))?;
             print_json(&candidate)?;
         }
-        Command::MemoryCandidatePromote { candidate_id } => {
+        Command::MemoryCandidatePromote {
+            candidate_id,
+            reason,
+            evidence,
+        } => {
             let decided_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
-            let decision = service.promote_memory_candidate(&candidate_id, decided_at)?;
+            let review = MemoryPromotionReview {
+                reason,
+                evidence: parse_promotion_evidence(&evidence, decided_at)?,
+            };
+            let decision =
+                service.promote_memory_candidate_with_review(&candidate_id, decided_at, &review)?;
             let candidate = service
                 .memory_candidate(&candidate_id)?
                 .with_context(|| format!("memory candidate disappeared: {candidate_id}"))?;
@@ -753,6 +767,30 @@ fn default_export_path() -> PathBuf {
 fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn parse_promotion_evidence(
+    values: &[String],
+    created_at: f64,
+) -> anyhow::Result<Vec<MemoryEvidence>> {
+    values
+        .iter()
+        .map(|value| {
+            let (kind, reference) = value.split_once(':').with_context(|| {
+                format!("invalid promotion evidence {value:?}; expected KIND:REFERENCE")
+            })?;
+            anyhow::ensure!(
+                !reference.trim().is_empty(),
+                "promotion evidence reference cannot be empty"
+            );
+            Ok(MemoryEvidence {
+                kind: MemoryEvidenceKind::parse(kind.trim())?,
+                reference: reference.trim().to_string(),
+                detail: serde_json::json!({ "source": "operator_promotion" }),
+                created_at,
+            })
+        })
+        .collect()
 }
 
 fn parse_since(value: &str) -> anyhow::Result<f64> {

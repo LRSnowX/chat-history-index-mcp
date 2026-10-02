@@ -31,8 +31,8 @@ pub use memory::{
 };
 pub use memory_compile::{
     MemoryCandidate, MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidateOperation,
-    MemoryCandidatePayload, MemoryCandidateStatus, MemoryCompilationBatch,
-    MemoryCompilationStageResult, MemoryCompileCheckpoint,
+    MemoryCandidatePayload, MemoryCandidateReview, MemoryCandidateStatus, MemoryCompilationBatch,
+    MemoryCompilationStageResult, MemoryCompileCheckpoint, MemoryPromotionReview,
 };
 pub use memory_compiler::{
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,

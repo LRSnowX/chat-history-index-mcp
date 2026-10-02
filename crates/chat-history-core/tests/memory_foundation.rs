@@ -2,7 +2,8 @@ use chat_history_core::{
     DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, IndexService, MemoryCandidateDecision,
     MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus,
     MemoryCheckpointPrefixStatus, MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind,
-    MemoryItem, MemoryKind, MemoryScope, MemoryStatus, NormalizedConversation, NormalizedMessage,
+    MemoryItem, MemoryKind, MemoryPromotionReview, MemoryScope, MemoryStatus,
+    NormalizedConversation, NormalizedMessage,
     db::{open_database, restore_database},
 };
 use rusqlite::params;
@@ -411,6 +412,10 @@ fn memory_compilation_stages_candidates_without_mutating_working_memory() -> any
         service.promote_memory_candidate("candidate-1", 23.0)?,
         promoted
     );
+    let initial_reviews = service.memory_candidate_reviews("candidate-1")?;
+    assert_eq!(initial_reviews.len(), 1);
+    assert_eq!(initial_reviews[0].outcome, "promoted");
+    assert_eq!(initial_reviews[0].reason, "validated and promoted");
     let promoted_candidate = service
         .memory_candidate("candidate-1")?
         .expect("candidate remains auditable");
@@ -551,7 +556,19 @@ fn memory_compilation_stages_candidates_without_mutating_working_memory() -> any
             .to_string()
             .contains("does not preserve the previously compiled prefix")
     );
-    let stale = service.promote_memory_candidate("candidate-2", 41.0)?;
+    let stale = service.promote_memory_candidate_with_review(
+        "candidate-2",
+        41.0,
+        &MemoryPromotionReview {
+            reason: Some("operator checked current repository state".to_string()),
+            evidence: vec![MemoryEvidence {
+                kind: MemoryEvidenceKind::RepositoryState,
+                reference: "LEMonX@branched".to_string(),
+                detail: json!({"clean": true}),
+                created_at: 41.0,
+            }],
+        },
+    )?;
     assert!(matches!(
         stale,
         MemoryCandidateDecision::Stale { ref candidate_id, .. }
@@ -567,6 +584,14 @@ fn memory_compilation_stages_candidates_without_mutating_working_memory() -> any
             .as_deref()
             .is_some_and(|reason| reason.contains("no longer preserves"))
     );
+    let stale_reviews = service.memory_candidate_reviews("candidate-2")?;
+    assert_eq!(stale_reviews.len(), 1);
+    assert_eq!(stale_reviews[0].outcome, "stale");
+    assert_eq!(
+        stale_reviews[0].reason,
+        "operator checked current repository state"
+    );
+    assert_eq!(stale_reviews[0].evidence.len(), 1);
     let working = service.project_working_memory("LEMonX")?;
     assert_eq!(working.items.len(), 1);
     assert_eq!(working.items[0].memory_id, "candidate-memory-1");
@@ -1149,11 +1174,67 @@ fn model_compiler_rejects_project_mismatch_and_revalidates_live_working_memory()
 }
 
 #[test]
+fn schema_five_backfills_legacy_promoted_candidate_review_once() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let conversation_id = "legacy-review-conversation";
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            10.0,
+            vec![
+                message("u1", "user", "start", 1.0),
+                message("a1", "assistant", "answer", 2.0),
+            ],
+        )],
+        None,
+    )?;
+    let snapshot_id = canonical_snapshot_id(&service, conversation_id)?;
+    let db_path = service.managed_db_path();
+    {
+        let conn = open_database(&db_path)?;
+        conn.execute(
+            r#"
+            INSERT INTO memory_candidates (
+              candidate_id, project, conversation_id, source_snapshot_id, operation,
+              payload_json, status, rationale, compiler_version, model_label,
+              through_turn_index, created_at, decided_at, decision_reason
+            )
+            VALUES (
+              'legacy-promoted', 'LEMonX', ?1, ?2, 'add',
+              '{}', 'promoted', 'legacy rationale', 'legacy-compiler', NULL,
+              1, 10.0, 11.0, 'legacy verified reason'
+            )
+            "#,
+            params![conversation_id, snapshot_id],
+        )?;
+        conn.execute("DROP TABLE memory_candidate_reviews", [])?;
+        conn.pragma_update(None, "user_version", 4)?;
+    }
+
+    drop(open_database(&db_path)?);
+    let reviews = service.memory_candidate_reviews("legacy-promoted")?;
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].outcome, "promoted");
+    assert_eq!(reviews[0].reason, "legacy verified reason");
+    assert!(reviews[0].evidence.is_empty());
+    assert_eq!(reviews[0].decided_at, 11.0);
+
+    drop(open_database(&db_path)?);
+    assert_eq!(
+        service.memory_candidate_reviews("legacy-promoted")?.len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn legacy_database_restores_and_upgrades_to_memory_schema() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let legacy = temp.path().join("legacy-v1.sqlite3");
     {
         let conn = open_database(&legacy)?;
+        conn.execute("DROP TABLE memory_candidate_reviews", [])?;
         conn.execute("DROP TABLE memory_candidate_evidence", [])?;
         conn.execute("DROP TABLE memory_candidates", [])?;
         conn.execute("DROP TABLE memory_compile_checkpoints", [])?;
@@ -1166,14 +1247,14 @@ fn legacy_database_restores_and_upgrades_to_memory_schema() -> anyhow::Result<()
 
     let destination = temp.path().join("restored").join("index.sqlite3");
     let report = restore_database(&legacy, &destination)?;
-    assert_eq!(report.health.schema_version, 4);
+    assert_eq!(report.health.schema_version, 5);
 
     let conn = open_database(&destination)?;
     let foundation_tables: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('memory_items', 'memory_evidence', 'conversation_snapshots', 'conversation_snapshot_messages', 'memory_compile_checkpoints', 'memory_candidates', 'memory_candidate_evidence')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('memory_items', 'memory_evidence', 'conversation_snapshots', 'conversation_snapshot_messages', 'memory_compile_checkpoints', 'memory_candidates', 'memory_candidate_evidence', 'memory_candidate_reviews')",
         params![],
         |row| row.get(0),
     )?;
-    assert_eq!(foundation_tables, 7);
+    assert_eq!(foundation_tables, 8);
     Ok(())
 }

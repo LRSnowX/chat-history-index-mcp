@@ -247,6 +247,15 @@ CREATE TABLE IF NOT EXISTS memory_candidate_evidence (
   PRIMARY KEY(candidate_id, evidence_kind, evidence_ref)
 );
 
+CREATE TABLE IF NOT EXISTS memory_candidate_reviews (
+  review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_id TEXT NOT NULL REFERENCES memory_candidates(candidate_id) ON DELETE CASCADE,
+  outcome TEXT NOT NULL CHECK(outcome IN ('promoted', 'reverified', 'stale')),
+  reason TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '[]',
+  decided_at REAL NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
   conversation_id UNINDEXED,
   title,
@@ -281,4 +290,6 @@ CREATE INDEX IF NOT EXISTS idx_memory_candidates_conversation
   ON memory_candidates(conversation_id, through_turn_index);
 CREATE INDEX IF NOT EXISTS idx_memory_candidate_evidence_candidate
   ON memory_candidate_evidence(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_memory_candidate_reviews_candidate
+  ON memory_candidate_reviews(candidate_id, decided_at, review_id);
 "#;

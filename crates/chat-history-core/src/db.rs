@@ -16,7 +16,7 @@ use crate::{
     sql::SCHEMA,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 const REQUIRED_TABLES: &[&str] = &[
     "conversations",
@@ -34,6 +34,7 @@ pub fn open_database(path: &Path) -> anyhow::Result<Connection> {
         .with_context(|| format!("opening database at {}", path.display()))?;
     conn.execute_batch(SCHEMA)?;
     migrate_conversation_sources(&conn)?;
+    migrate_memory_candidate_reviews(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     Ok(conn)
 }
@@ -276,6 +277,40 @@ fn migrate_conversation_sources(conn: &Connection) -> anyhow::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_conversations_parent ON conversations(parent_conversation_id);",
     )?;
     backfill_codex_review_parents(conn)?;
+    Ok(())
+}
+
+fn migrate_memory_candidate_reviews(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO memory_candidate_reviews (
+          candidate_id, outcome, reason, evidence_json, decided_at
+        )
+        SELECT
+          candidate_id,
+          CASE status
+            WHEN 'promoted' THEN 'promoted'
+            ELSE 'stale'
+          END,
+          COALESCE(
+            decision_reason,
+            CASE status
+              WHEN 'promoted' THEN 'legacy promoted decision'
+              ELSE 'legacy stale decision'
+            END
+          ),
+          '[]',
+          COALESCE(decided_at, created_at)
+        FROM memory_candidates AS candidate
+        WHERE candidate.status IN ('promoted', 'stale')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM memory_candidate_reviews AS review
+            WHERE review.candidate_id = candidate.candidate_id
+          )
+        "#,
+        [],
+    )?;
     Ok(())
 }
 

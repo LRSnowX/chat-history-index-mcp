@@ -46,7 +46,7 @@ macro_rules! string_enum {
                 }
             }
 
-            fn from_db(value: &str) -> anyhow::Result<Self> {
+            pub fn parse(value: &str) -> anyhow::Result<Self> {
                 match value {
                     $($value => Ok(Self::$variant),)+
                     other => Err(anyhow!(
@@ -462,7 +462,7 @@ fn load_memory_item(
         .map(|row| -> anyhow::Result<MemoryEvidence> {
             let (kind, reference, detail_json, created_at) = row?;
             Ok(MemoryEvidence {
-                kind: MemoryEvidenceKind::from_db(&kind)?,
+                kind: MemoryEvidenceKind::parse(&kind)?,
                 reference,
                 detail: serde_json::from_str(&detail_json)?,
                 created_at,
@@ -473,10 +473,10 @@ fn load_memory_item(
     Ok(Some(MemoryItem {
         memory_id: memory_id.to_string(),
         scope: MemoryScope::from_db(&scope_type, scope_id)?,
-        kind: MemoryKind::from_db(&kind)?,
+        kind: MemoryKind::parse(&kind)?,
         key,
         value: serde_json::from_str(&value_json)?,
-        status: MemoryStatus::from_db(&status)?,
+        status: MemoryStatus::parse(&status)?,
         importance: u8::try_from(importance)
             .map_err(|_| anyhow!("invalid memory importance: {importance}"))?,
         confidence,

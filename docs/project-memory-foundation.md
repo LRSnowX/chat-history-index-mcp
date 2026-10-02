@@ -142,12 +142,15 @@ canonical evidence is preserved before mutation.
 
 ## Schema lifecycle
 
-Project Memory Foundation uses schema version 4:
+Project Memory Foundation uses schema version 5:
 
 - version 2 introduced MemoryItem and MemoryEvidence;
 - version 3 introduced retained conversation/message evidence snapshots.
 - version 4 introduced incremental compiler checkpoints, staged memory
   candidates, candidate provenance, and auditable promotion decisions.
+- version 5 introduced immutable candidate promotion/reverification review
+  history while retaining the latest decision reason on the candidate row for
+  compatibility.
 
 The new tables are created by normal database opening. Legacy version-1
 databases and backups remain restorable: pre-migration health inspection keeps
@@ -179,6 +182,10 @@ The current implementation provides:
   ProjectWorkingMemory before promotion;
 - transactional candidate promotion, explicit rejection, stale-candidate
   detection, and retained decision reasons;
+- promotion/reverification review evidence from stronger operator-verified
+  sources such as Git commits, repository state, or documents, with append-only
+  review history so later reverification does not erase the original promotion
+  reason;
 - bounded model-driven incremental compilation through Codex in an ephemeral
   read-only sandbox with medium reasoning effort;
 - strong project/conversation matching before model invocation;
@@ -239,7 +246,11 @@ Compiler output preserves provenance and cannot write MemoryItems directly.
 Candidates become durable memory only through promotion. Promotion revalidates
 the candidate evidence prefix against the current canonical conversation
 snapshot; edited or branched evidence becomes stale instead of mutating current
-memory.
+memory. An operator may attach a review reason and additional evidence when
+promoting or reverifying a promoted candidate. The additional evidence is
+merged into the durable MemoryItem, while each non-empty review remains in an
+append-only candidate review history. Repeating promotion with no new review
+data remains idempotent.
 
 The bounded ChatGPT live-collector scheduler infrastructure is implemented but
 disabled by default. It can be explicitly configured with a project allow-list;
