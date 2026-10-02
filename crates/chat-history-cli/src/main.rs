@@ -162,6 +162,23 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
         max_messages: usize,
     },
+    /// List explicit strong-match aliases for one canonical project identity.
+    MemoryProjectAliases {
+        #[arg(long)]
+        project: String,
+    },
+    /// Add one explicit strong-match alias to a canonical project identity.
+    MemoryProjectAliasAdd {
+        #[arg(long)]
+        project: String,
+        alias: String,
+    },
+    /// Remove one explicit strong-match alias from a canonical project identity.
+    MemoryProjectAliasRemove {
+        #[arg(long)]
+        project: String,
+        alias: String,
+    },
     /// Inspect pending staged memory candidates for one project.
     MemoryCandidates {
         #[arg(long)]
@@ -652,6 +669,26 @@ async fn main() -> anyhow::Result<()> {
                 .plan_memory_project(&project, scan_limit, max_conversations, max_messages)
                 .await?;
             print_json(&plan)?;
+        }
+        Command::MemoryProjectAliases { project } => {
+            print_json(&serde_json::json!({
+                "project": project,
+                "aliases": service.project_aliases(&project)?,
+            }))?;
+        }
+        Command::MemoryProjectAliasAdd { project, alias } => {
+            print_json(&serde_json::json!({
+                "project": project,
+                "aliases": service.add_project_alias(&project, &alias)?,
+            }))?;
+        }
+        Command::MemoryProjectAliasRemove { project, alias } => {
+            let removed = service.remove_project_alias(&project, &alias)?;
+            print_json(&serde_json::json!({
+                "project": project,
+                "removed": removed,
+                "aliases": service.project_aliases(&project)?,
+            }))?;
         }
         Command::MemoryCandidates { project } => {
             let candidates = service.pending_memory_candidates(&project)?;

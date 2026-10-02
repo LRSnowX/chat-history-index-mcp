@@ -1332,6 +1332,102 @@ async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() 
     Ok(())
 }
 
+#[tokio::test]
+async fn explicit_project_aliases_extend_strong_matching_without_changing_canonical_identity()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let conversation_id = "devspace-chim-alias";
+    let mut conversation = chatgpt_conversation(
+        conversation_id,
+        25.0,
+        vec![
+            message("alias-u1", "user", "Continue the memory-system work.", 1.0),
+            message(
+                "alias-a1",
+                "assistant",
+                "Continuing the implementation.",
+                2.0,
+            ),
+        ],
+    );
+    conversation.title = "⭐DevSpace及CHIM开发使用辅助".to_string();
+    conversation.source_path = Some("chatgpt-app-bridge".to_string());
+    service.import_normalized(vec![conversation], None)?;
+
+    assert!(
+        !service.conversation_matches_project_strong(conversation_id, "devspace-memory-adapter",)?
+    );
+    assert!(
+        !service.conversation_matches_project_strong(conversation_id, "chat-history-index-mcp",)?
+    );
+
+    assert_eq!(
+        service.add_project_alias("devspace-memory-adapter", "DevSpace")?,
+        vec!["DevSpace"]
+    );
+    assert_eq!(
+        service.add_project_alias("devspace-memory-adapter", "Dev Space")?,
+        vec!["DevSpace"]
+    );
+    assert_eq!(
+        service.add_project_alias("chat-history-index-mcp", "CHIM")?,
+        vec!["CHIM"]
+    );
+    let too_short = service
+        .add_project_alias("another-project", "AI")
+        .expect_err("short aliases should be rejected to limit false-positive matching");
+    assert!(
+        too_short
+            .to_string()
+            .contains("at least three alphanumeric characters")
+    );
+    assert!(
+        service.conversation_matches_project_strong(conversation_id, "devspace-memory-adapter",)?
+    );
+    assert!(
+        service.conversation_matches_project_strong(conversation_id, "chat-history-index-mcp",)?
+    );
+    assert_eq!(
+        service
+            .strong_project_conversations("devspace-memory-adapter")?
+            .iter()
+            .map(|item| item.conversation_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![conversation_id]
+    );
+
+    let plan = service
+        .plan_memory_project("devspace-memory-adapter", 20, 2, 8)
+        .await?;
+    assert_eq!(plan.matched, 1);
+    assert_eq!(plan.ready.len(), 1);
+    assert_eq!(plan.ready[0].conversation_id, conversation_id);
+
+    let collision = service
+        .add_project_alias("another-project", "DEV-SPACE")
+        .expect_err("normalized aliases must not belong to multiple projects");
+    assert!(
+        collision
+            .to_string()
+            .contains("already assigned to another project")
+    );
+
+    assert!(service.remove_project_alias("devspace-memory-adapter", "dev space",)?);
+    assert!(
+        service
+            .project_aliases("devspace-memory-adapter")?
+            .is_empty()
+    );
+    assert!(
+        !service.conversation_matches_project_strong(conversation_id, "devspace-memory-adapter",)?
+    );
+    assert!(
+        service.conversation_matches_project_strong(conversation_id, "chat-history-index-mcp",)?
+    );
+    Ok(())
+}
+
 #[test]
 fn model_compiler_stages_only_valid_delta_evidence_and_keeps_ids_deterministic()
 -> anyhow::Result<()> {
@@ -2095,6 +2191,7 @@ fn legacy_database_restores_and_upgrades_to_memory_schema() -> anyhow::Result<()
     let legacy = temp.path().join("legacy-v1.sqlite3");
     {
         let conn = open_database(&legacy)?;
+        conn.execute("DROP TABLE project_aliases", [])?;
         conn.execute("DROP TABLE memory_candidate_reviews", [])?;
         conn.execute("DROP TABLE memory_candidate_evidence", [])?;
         conn.execute("DROP TABLE memory_candidates", [])?;
@@ -2108,14 +2205,14 @@ fn legacy_database_restores_and_upgrades_to_memory_schema() -> anyhow::Result<()
 
     let destination = temp.path().join("restored").join("index.sqlite3");
     let report = restore_database(&legacy, &destination)?;
-    assert_eq!(report.health.schema_version, 5);
+    assert_eq!(report.health.schema_version, 6);
 
     let conn = open_database(&destination)?;
     let foundation_tables: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('memory_items', 'memory_evidence', 'conversation_snapshots', 'conversation_snapshot_messages', 'memory_compile_checkpoints', 'memory_candidates', 'memory_candidate_evidence', 'memory_candidate_reviews')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('memory_items', 'memory_evidence', 'conversation_snapshots', 'conversation_snapshot_messages', 'memory_compile_checkpoints', 'memory_candidates', 'memory_candidate_evidence', 'memory_candidate_reviews', 'project_aliases')",
         params![],
         |row| row.get(0),
     )?;
-    assert_eq!(foundation_tables, 8);
+    assert_eq!(foundation_tables, 9);
     Ok(())
 }

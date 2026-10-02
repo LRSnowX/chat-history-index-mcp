@@ -256,6 +256,17 @@ CREATE TABLE IF NOT EXISTS memory_candidate_reviews (
   decided_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS project_aliases (
+  project TEXT NOT NULL,
+  alias TEXT NOT NULL,
+  alias_normalized TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(project, alias_normalized),
+  CHECK(length(trim(project)) > 0),
+  CHECK(length(trim(alias)) > 0),
+  CHECK(length(alias_normalized) > 0)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
   conversation_id UNINDEXED,
   title,
@@ -292,4 +303,6 @@ CREATE INDEX IF NOT EXISTS idx_memory_candidate_evidence_candidate
   ON memory_candidate_evidence(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_memory_candidate_reviews_candidate
   ON memory_candidate_reviews(candidate_id, decided_at, review_id);
+CREATE INDEX IF NOT EXISTS idx_project_aliases_project
+  ON project_aliases(project, alias);
 "#;

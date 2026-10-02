@@ -549,22 +549,24 @@ impl IndexService {
         let project = project.trim();
         ensure!(!project.is_empty(), "project cannot be empty");
         let conn = open_database(&self.managed_db_path())?;
+        let needles = project_match_needles(&conn, project)?;
         let Some(conversation) = load_conversation(&conn, conversation_id)? else {
             return Ok(false);
         };
-        conversation_record_matches_project_strong(&conversation, project)
+        Ok(conversation_record_matches_project_strong(
+            &conversation,
+            &needles,
+        ))
     }
 
     pub fn strong_project_conversations(
         &self,
         project: &str,
     ) -> anyhow::Result<Vec<ConversationRecord>> {
-        let needle = normalize_project_text(project);
-        ensure!(
-            !needle.is_empty(),
-            "project must contain at least one alphanumeric character"
-        );
+        let project = project.trim();
+        ensure!(!project.is_empty(), "project cannot be empty");
         let conn = open_database(&self.managed_db_path())?;
+        let needles = project_match_needles(&conn, project)?;
         let mut stmt = conn.prepare(
             r#"
             SELECT conversation_id
@@ -578,12 +580,89 @@ impl IndexService {
         let mut conversations = Vec::new();
         for conversation_id in ids {
             if let Some(conversation) = load_conversation(&conn, &conversation_id)?
-                && conversation_record_matches_project_strong(&conversation, project)?
+                && conversation_record_matches_project_strong(&conversation, &needles)
             {
                 conversations.push(conversation);
             }
         }
         Ok(conversations)
+    }
+
+    pub fn project_aliases(&self, project: &str) -> anyhow::Result<Vec<String>> {
+        let project = project.trim();
+        ensure!(!project.is_empty(), "project cannot be empty");
+        let conn = open_database(&self.managed_db_path())?;
+        load_project_aliases(&conn, project)
+    }
+
+    pub fn add_project_alias(&self, project: &str, alias: &str) -> anyhow::Result<Vec<String>> {
+        let project = project.trim();
+        let alias = alias.trim();
+        ensure!(!project.is_empty(), "project cannot be empty");
+        ensure!(!alias.is_empty(), "project alias cannot be empty");
+        ensure!(project.chars().count() <= 160, "project is too long");
+        ensure!(alias.chars().count() <= 160, "project alias is too long");
+        let project_normalized = normalize_project_text(project);
+        let alias_normalized = normalize_project_text(alias);
+        ensure!(
+            !project_normalized.is_empty(),
+            "project must contain at least one alphanumeric character"
+        );
+        ensure!(
+            !alias_normalized.is_empty(),
+            "project alias must contain at least one alphanumeric character"
+        );
+        ensure!(
+            alias_normalized.chars().count() >= 3,
+            "project alias must contain at least three alphanumeric characters"
+        );
+        ensure!(
+            alias_normalized != project_normalized,
+            "project alias is redundant with the canonical project name"
+        );
+        let conn = open_database(&self.managed_db_path())?;
+        if let Some(existing_project) = conn
+            .query_row(
+                "SELECT project FROM project_aliases WHERE alias_normalized = ?1",
+                params![alias_normalized],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            ensure!(
+                existing_project == project,
+                "project alias is already assigned to another project: {existing_project}"
+            );
+            return load_project_aliases(&conn, project);
+        }
+        let alias_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM project_aliases WHERE project = ?1",
+            params![project],
+            |row| row.get(0),
+        )?;
+        ensure!(alias_count < 16, "project alias limit reached");
+        conn.execute(
+            "INSERT INTO project_aliases (project, alias, alias_normalized) VALUES (?1, ?2, ?3)",
+            params![project, alias, alias_normalized],
+        )?;
+        load_project_aliases(&conn, project)
+    }
+
+    pub fn remove_project_alias(&self, project: &str, alias: &str) -> anyhow::Result<bool> {
+        let project = project.trim();
+        let alias = alias.trim();
+        ensure!(!project.is_empty(), "project cannot be empty");
+        ensure!(!alias.is_empty(), "project alias cannot be empty");
+        let alias_normalized = normalize_project_text(alias);
+        ensure!(
+            !alias_normalized.is_empty(),
+            "project alias must contain at least one alphanumeric character"
+        );
+        let conn = open_database(&self.managed_db_path())?;
+        Ok(conn.execute(
+            "DELETE FROM project_aliases WHERE project = ?1 AND alias_normalized = ?2",
+            params![project, alias_normalized],
+        )? > 0)
     }
 
     pub fn related_conversations(
@@ -672,25 +751,45 @@ impl IndexService {
 
 fn conversation_record_matches_project_strong(
     conversation: &ConversationRecord,
-    project: &str,
-) -> anyhow::Result<bool> {
-    let project = project.trim();
-    ensure!(!project.is_empty(), "project cannot be empty");
-    let needle = normalize_project_text(project);
+    needles: &[String],
+) -> bool {
+    let title = normalize_project_text(&conversation.title);
+    let title_matches = needles.iter().any(|needle| title.contains(needle));
+    let source_path_matches = conversation.source_path.as_deref().is_some_and(|path| {
+        let path = normalize_project_text(path);
+        needles.iter().any(|needle| path.contains(needle))
+    });
+    let source_url_matches = conversation.source_url.as_deref().is_some_and(|url| {
+        let url = normalize_project_text(url);
+        needles.iter().any(|needle| url.contains(needle))
+    });
+    title_matches || source_path_matches || source_url_matches
+}
+
+fn project_match_needles(conn: &Connection, project: &str) -> anyhow::Result<Vec<String>> {
+    let canonical = normalize_project_text(project);
     ensure!(
-        !needle.is_empty(),
+        !canonical.is_empty(),
         "project must contain at least one alphanumeric character"
     );
-    let title_matches = normalize_project_text(&conversation.title).contains(&needle);
-    let source_path_matches = conversation
-        .source_path
-        .as_deref()
-        .is_some_and(|path| normalize_project_text(path).contains(&needle));
-    let source_url_matches = conversation
-        .source_url
-        .as_deref()
-        .is_some_and(|url| normalize_project_text(url).contains(&needle));
-    Ok(title_matches || source_path_matches || source_url_matches)
+    let mut needles = vec![canonical];
+    let mut stmt = conn.prepare(
+        "SELECT alias_normalized FROM project_aliases WHERE project = ?1 ORDER BY alias_normalized",
+    )?;
+    needles.extend(
+        stmt.query_map(params![project], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(needles)
+}
+
+fn load_project_aliases(conn: &Connection, project: &str) -> anyhow::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT alias FROM project_aliases WHERE project = ?1 ORDER BY alias_normalized",
+    )?;
+    Ok(stmt
+        .query_map(params![project], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 fn normalize_project_text(value: &str) -> String {

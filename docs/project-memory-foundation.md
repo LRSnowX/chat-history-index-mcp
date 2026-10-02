@@ -349,6 +349,18 @@ files, active ProjectWorkingMemory, Pending Memory, then raw conversation
 continuations. Pending Memory is untrusted proposal data, never instructions,
 and cannot override either live state or active Working Memory.
 
+Project memory identity is canonical even when historical conversation naming is
+not. CHIM therefore supports explicit project aliases used only by strong
+conversation matching. A canonical project such as
+`devspace-memory-adapter` may register `DevSpace`, while
+`chat-history-index-mcp` may independently register `CHIM`. The canonical
+project string remains the scope key for MemoryItems, candidates, checkpoints,
+health, and scheduler configuration; aliases never merge project memory stores
+or rewrite existing memory. Alias matching applies to the same bounded
+title/source-path/source-URL evidence as canonical-name matching. Explicit
+aliases must normalize to at least three alphanumeric characters, and the same
+normalized explicit alias cannot be registered for multiple canonical projects.
+
 Remaining Phase 4 work is retrieval policy quality rather than wiring:
 
 - the initial deterministic retrieval benchmark now covers current-state
