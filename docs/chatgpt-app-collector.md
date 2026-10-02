@@ -114,9 +114,14 @@ Status lives at `cache/chatgpt-live-collector-status.json`. Logs are written und
 data home as `logs/chatgpt-live-collector.log` and `logs/chatgpt-live-collector.error.log`. A
 clean no-change cycle is intentionally quiet. When the optional memory compiler
 has run, its last worker status is stored separately at
-`cache/memory-auto-compiler-status.json`; the read-only collector status surface
-and service `status` command include that last worker status without triggering
-another run.
+`cache/memory-auto-compiler-status.json`. A bounded history of the most recent
+20 worker runs is stored at `cache/memory-auto-compiler-history.json`; it keeps
+total-run count, last success/failure timestamps, consecutive-failure count,
+and compact per-project run summaries rather than full compiler payloads. The
+read-only MCP status surface includes the last worker status plus a five-run
+history summary, while the service `status` command prints both bounded files
+without triggering another run. Telemetry-write failures are isolated from the
+compiler and collector.
 
 ## Local collector state machine
 

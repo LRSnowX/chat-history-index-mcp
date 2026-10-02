@@ -8,11 +8,14 @@ import test from "node:test";
 
 import {
   NativeAppToolsClient,
+  appendMemoryCompilerHistory,
   bridgeMessages,
   bridgeThread,
+  memoryCompilerHistorySummary,
   memoryAutoConfig,
   maybeScheduleMemoryCompiler,
   readCompleteThread,
+  readMemoryCompilerHistory,
   safeScheduleMemoryCompiler,
 } from "./chatgpt-live-collector.mjs";
 
@@ -163,6 +166,58 @@ test("memory auto compiler scheduling errors do not escape into ingestion", () =
   assert.equal(logged[0].event, "memory_auto_compile_schedule_error");
 });
 
+test("memory compiler history is bounded and retains success/failure telemetry", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-history-memory-history-"));
+  try {
+    const historyPath = path.join(root, "memory-auto-compiler-history.json");
+    for (let index = 0; index < 23; index += 1) {
+      appendMemoryCompilerHistory({
+        state: "completed",
+        started_at: `2026-10-02T00:${String(index).padStart(2, "0")}:00Z`,
+        completed_at: `2026-10-02T00:${String(index).padStart(2, "0")}:30Z`,
+        model: "gpt-5.6-sol",
+        results: [{
+          project: "LEMonX",
+          status: "ok",
+          result: {
+            model_attempts: 1,
+            staged: [{ staged: { candidate_ids: ["one", "two"] } }],
+            failures: [],
+          },
+        }],
+      }, historyPath);
+    }
+    appendMemoryCompilerHistory({
+      state: "degraded",
+      checked_at: "2026-10-02T01:00:00Z",
+      error: "compiler failed",
+      results: [{ project: "LEMonX", status: "error", error: "compiler failed" }],
+    }, historyPath);
+    appendMemoryCompilerHistory({
+      state: "degraded",
+      checked_at: "2026-10-02T01:01:00Z",
+      error: "compiler failed again",
+      results: [{ project: "LEMonX", status: "error", error: "compiler failed again" }],
+    }, historyPath);
+
+    const history = readMemoryCompilerHistory(historyPath);
+    assert.equal(history.total_runs, 25);
+    assert.equal(history.runs.length, 20);
+    assert.equal(history.last_success_at, "2026-10-02T00:22:30Z");
+    assert.equal(history.last_failure_at, "2026-10-02T01:01:00Z");
+    assert.equal(history.consecutive_failures, 2);
+    assert.equal(history.runs.at(-1).state, "degraded");
+    assert.equal(history.runs.at(-3).projects[0].staged_candidates, 2);
+
+    const summary = memoryCompilerHistorySummary(history);
+    assert.equal(summary.total_runs, 25);
+    assert.equal(summary.recent_runs.length, 5);
+    assert.equal(summary.consecutive_failures, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("memory compiler worker is isolated, bounded, and releases its pid lock", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-history-memory-worker-"));
   try {
@@ -213,6 +268,14 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
     assert.equal(status.model, "gpt-5.6-sol");
     assert.equal(status.results.length, 1);
     assert.equal(status.results[0].status, "ok");
+    const history = JSON.parse(
+      fs.readFileSync(path.join(cache, "memory-auto-compiler-history.json"), "utf8"),
+    );
+    assert.equal(history.total_runs, 1);
+    assert.equal(history.consecutive_failures, 0);
+    assert.equal(history.runs.length, 1);
+    assert.equal(history.runs[0].state, "completed");
+    assert.equal(history.runs[0].projects[0].project, "LEMonX");
     assert.equal(fs.existsSync(path.join(cache, "memory-auto-compiler.lock")), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

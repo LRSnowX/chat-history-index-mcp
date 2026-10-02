@@ -27,6 +27,9 @@ const ERROR_LOG_PATH = path.join(DATA_HOME, "logs/chatgpt-live-collector.error.l
 const DAEMON_LOCK = path.join(DATA_HOME, "cache/chatgpt-live-collector-daemon.lock");
 const MEMORY_COMPILER_LOCK = path.join(DATA_HOME, "cache/memory-auto-compiler.lock");
 const MEMORY_COMPILER_STATUS_PATH = path.join(DATA_HOME, "cache/memory-auto-compiler-status.json");
+const MEMORY_COMPILER_HISTORY_PATH = path.join(DATA_HOME, "cache/memory-auto-compiler-history.json");
+const MEMORY_COMPILER_HISTORY_LIMIT = 20;
+const MEMORY_COMPILER_STATUS_RECENT_RUNS = 5;
 const DEFAULT_MEMORY_AUTO_SCAN_LIMIT = 500;
 const DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS = 1;
 const DEFAULT_MEMORY_AUTO_MAX_MESSAGES = 8;
@@ -402,6 +405,107 @@ function writeJsonStatus(file, payload) {
   fs.renameSync(staged, file);
 }
 
+function readMemoryCompilerHistory(file = MEMORY_COMPILER_HISTORY_PATH) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (parsed == null || typeof parsed !== "object" || !Array.isArray(parsed.runs)) {
+      throw new Error("invalid memory compiler history");
+    }
+    return {
+      version: 1,
+      total_runs: Number.isInteger(parsed.total_runs) ? parsed.total_runs : parsed.runs.length,
+      last_success_at: typeof parsed.last_success_at === "string" ? parsed.last_success_at : null,
+      last_failure_at: typeof parsed.last_failure_at === "string" ? parsed.last_failure_at : null,
+      consecutive_failures: Number.isInteger(parsed.consecutive_failures)
+        ? parsed.consecutive_failures
+        : 0,
+      runs: parsed.runs.slice(-MEMORY_COMPILER_HISTORY_LIMIT),
+    };
+  } catch {
+    return {
+      version: 1,
+      total_runs: 0,
+      last_success_at: null,
+      last_failure_at: null,
+      consecutive_failures: 0,
+      runs: [],
+    };
+  }
+}
+
+function memoryCompilerRunSummary(payload) {
+  return {
+    state: payload.state ?? "unknown",
+    started_at: payload.started_at ?? null,
+    completed_at: payload.completed_at ?? payload.checked_at ?? null,
+    model: payload.model ?? null,
+    projects: Array.isArray(payload.results)
+      ? payload.results.map((entry) => ({
+        project: entry.project ?? null,
+        status: entry.status ?? "unknown",
+        ...(entry.status === "ok"
+          ? {
+            model_attempts: Number(entry.result?.model_attempts ?? 0),
+            staged_candidates: Array.isArray(entry.result?.staged)
+              ? entry.result.staged.reduce(
+                (sum, staged) => sum + Number(staged?.staged?.candidate_ids?.length ?? 0),
+                0,
+              )
+              : 0,
+            failures: Array.isArray(entry.result?.failures) ? entry.result.failures.length : 0,
+          }
+          : { error: String(entry.error ?? "").slice(0, 1_000) }),
+      }))
+      : [],
+    ...(payload.error == null ? {} : { error: String(payload.error).slice(0, 1_000) }),
+  };
+}
+
+function appendMemoryCompilerHistory(
+  payload,
+  file = MEMORY_COMPILER_HISTORY_PATH,
+) {
+  const history = readMemoryCompilerHistory(file);
+  const failed = payload.state !== "completed";
+  const eventAt = payload.completed_at ?? payload.checked_at ?? new Date().toISOString();
+  const next = {
+    version: 1,
+    total_runs: history.total_runs + 1,
+    last_success_at: failed ? history.last_success_at : eventAt,
+    last_failure_at: failed ? eventAt : history.last_failure_at,
+    consecutive_failures: failed ? history.consecutive_failures + 1 : 0,
+    runs: [...history.runs, memoryCompilerRunSummary(payload)].slice(-MEMORY_COMPILER_HISTORY_LIMIT),
+  };
+  writeJsonStatus(file, next);
+  return next;
+}
+
+function safeAppendMemoryCompilerHistory(
+  payload,
+  file = MEMORY_COMPILER_HISTORY_PATH,
+  onError = (error) => appendLog(ERROR_LOG_PATH, {
+    event: "memory_auto_compile_history_error",
+    error: String(error?.message ?? error),
+  }),
+) {
+  try {
+    return appendMemoryCompilerHistory(payload, file);
+  } catch (error) {
+    onError(error);
+    return null;
+  }
+}
+
+function memoryCompilerHistorySummary(history) {
+  return {
+    total_runs: history.total_runs,
+    last_success_at: history.last_success_at,
+    last_failure_at: history.last_failure_at,
+    consecutive_failures: history.consecutive_failures,
+    recent_runs: history.runs.slice(-MEMORY_COMPILER_STATUS_RECENT_RUNS),
+  };
+}
+
 function boundedInteger(value, fallback, min, max, name) {
   if (value == null || String(value).trim() === "") return fallback;
   const parsed = Number(value);
@@ -554,6 +658,7 @@ function runMemoryCompilerWorker() {
       results,
     };
     writeJsonStatus(MEMORY_COMPILER_STATUS_PATH, payload);
+    safeAppendMemoryCompilerHistory(payload);
     appendLog(failed ? ERROR_LOG_PATH : LOG_PATH, payload);
     return payload;
   } finally {
@@ -911,6 +1016,14 @@ function runMcpSidecar() {
           ),
         };
       } catch {}
+      try {
+        status = {
+          ...status,
+          memory_compiler_history: memoryCompilerHistorySummary(
+            readMemoryCompilerHistory(),
+          ),
+        };
+      } catch {}
       respond({
         content: [{ type: "text", text: JSON.stringify(status) }],
         structuredContent: status,
@@ -937,6 +1050,12 @@ if (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]
     } catch (error) {
       const detail = String(error?.stack ?? error);
       writeJsonStatus(MEMORY_COMPILER_STATUS_PATH, {
+        state: "degraded",
+        pid: process.pid,
+        checked_at: new Date().toISOString(),
+        error: detail,
+      });
+      safeAppendMemoryCompilerHistory({
         state: "degraded",
         pid: process.pid,
         checked_at: new Date().toISOString(),
@@ -974,9 +1093,12 @@ export {
   bridgeThread,
   ensureDaemonReady,
   memoryAutoConfig,
+  appendMemoryCompilerHistory,
+  memoryCompilerHistorySummary,
   messageText,
   maybeScheduleMemoryCompiler,
   safeScheduleMemoryCompiler,
+  readMemoryCompilerHistory,
   readCompleteThread,
   runMemoryCompilerWorker,
   syncWithClient,

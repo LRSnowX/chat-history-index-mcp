@@ -207,7 +207,6 @@ It does not yet provide:
 - automatic candidate promotion;
 - a richer operator review UI;
 - a default policy for which projects should opt into automatic compilation;
-- scheduler retry/history telemetry beyond the last worker status;
 - query-aware ranking among large active Working Memory sets;
 - automatic global CollaborationMemory authoring.
 
@@ -258,7 +257,10 @@ disabled by default. It can be explicitly configured with a project allow-list;
 after accepted new evidence it launches a detached, lock-protected compiler
 worker so ingestion/cursor advancement completes independently. Scheduler and
 model failures are isolated from collection, and compilation still only stages
-candidates.
+candidates. Scheduler telemetry retains the most recent 20 worker runs with
+total-run, last-success/last-failure, and consecutive-failure counters; the MCP
+status surface exposes a compact five-run summary. Telemetry failures do not
+fail collection or compilation.
 
 The remaining Phase 3 work is orchestration and review:
 
@@ -266,8 +268,6 @@ The remaining Phase 3 work is orchestration and review:
 - optionally add a richer review UI around the existing operator CLI;
 - define conservative promotion policy classes if any operation is ever made
   automatic;
-- add richer scheduler retry history beyond the current last-run worker status
-  and read-only checkpoint health.
 
 No MCP model-facing memory write surface exists.
 
@@ -338,6 +338,6 @@ The read-only `memory-health` CLI now exposes:
 - canonical-prefix changed/missing detection;
 - tracked rejected-lower-quality evidence counts.
 
-Future health work should add scheduler retry/error history, handoff byte-budget
-telemetry, richer unresolved-conflict reporting, and broader incomplete
-conversation evidence diagnostics.
+Future health work should add handoff byte-budget telemetry, richer
+unresolved-conflict reporting, and broader incomplete conversation evidence
+diagnostics.
