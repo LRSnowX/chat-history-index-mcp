@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::anyhow;
+use anyhow::{anyhow, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::de::{DeserializeSeed, SeqAccess, Visitor};
@@ -505,6 +505,70 @@ impl IndexService {
         }))
     }
 
+    pub fn ensure_canonical_snapshot(
+        &self,
+        conversation_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let conn = open_database(&self.managed_db_path())?;
+        let tx = conn.unchecked_transaction()?;
+        if let Some(snapshot_id) = tx
+            .query_row(
+                "SELECT snapshot_id FROM conversation_snapshots WHERE conversation_id = ?1 AND selection_status = 'canonical'",
+                params![conversation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(Some(snapshot_id));
+        }
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE conversation_id = ?1)",
+            params![conversation_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        persist_legacy_canonical_snapshot(&tx, conversation_id)?;
+        let snapshot_id = tx
+            .query_row(
+                "SELECT snapshot_id FROM conversation_snapshots WHERE conversation_id = ?1 AND selection_status = 'canonical'",
+                params![conversation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        tx.commit()?;
+        Ok(snapshot_id)
+    }
+
+    pub fn conversation_matches_project_strong(
+        &self,
+        conversation_id: &str,
+        project: &str,
+    ) -> anyhow::Result<bool> {
+        let project = project.trim();
+        ensure!(!project.is_empty(), "project cannot be empty");
+        let conn = open_database(&self.managed_db_path())?;
+        let Some(conversation) = load_conversation(&conn, conversation_id)? else {
+            return Ok(false);
+        };
+        let needle = normalize_project_text(project);
+        ensure!(
+            !needle.is_empty(),
+            "project must contain at least one alphanumeric character"
+        );
+        let title_matches = normalize_project_text(&conversation.title).contains(&needle);
+        let source_path_matches = conversation
+            .source_path
+            .as_deref()
+            .is_some_and(|path| normalize_project_text(path).contains(&needle));
+        let source_url_matches = conversation
+            .source_url
+            .as_deref()
+            .is_some_and(|url| normalize_project_text(url).contains(&needle));
+        Ok(title_matches || source_path_matches || source_url_matches)
+    }
+
     pub fn related_conversations(
         &self,
         conversation_id: &str,
@@ -587,6 +651,14 @@ impl IndexService {
         stream_json_array(member, &mut processor)?;
         Ok(())
     }
+}
+
+fn normalize_project_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }
 
 #[derive(Debug, Clone)]

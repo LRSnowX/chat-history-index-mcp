@@ -7,8 +7,9 @@ use std::{
 
 use anyhow::Context;
 use chat_history_core::{
-    ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot, DataHome, ImportMode,
-    ImportOptions, IndexService, NormalizedConversation, SearchMode, SearchOptions,
+    ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot,
+    DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, ImportMode, ImportOptions, IndexService,
+    MemoryModelClient, NormalizedConversation, SearchMode, SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
@@ -127,6 +128,19 @@ enum Command {
         archive: PathBuf,
         #[arg(long, default_value_t = true, action = ArgAction::Set)]
         embed: bool,
+    },
+    /// Compile one bounded conversation delta into pending memory candidates. Does not promote.
+    MemoryCompileConversation {
+        #[arg(long)]
+        project: String,
+        conversation_id: String,
+        #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
+        max_messages: usize,
+    },
+    /// Inspect pending staged memory candidates for one project.
+    MemoryCandidates {
+        #[arg(long)]
+        project: String,
     },
     Resume,
     Stats,
@@ -500,6 +514,27 @@ async fn main() -> anyhow::Result<()> {
                 "chatgpt_source": chatgpt,
                 "state_path": state_path,
                 "state": state,
+            }))?;
+        }
+        Command::MemoryCompileConversation {
+            project,
+            conversation_id,
+            max_messages,
+        } => {
+            let model = MemoryModelClient::from_env()?;
+            let result = service
+                .compile_memory_conversation(&model, &project, &conversation_id, max_messages)
+                .await?;
+            print_json(&serde_json::json!({
+                "status": if result.is_some() { "staged" } else { "caught_up" },
+                "result": result,
+            }))?;
+        }
+        Command::MemoryCandidates { project } => {
+            let candidates = service.pending_memory_candidates(&project)?;
+            print_json(&serde_json::json!({
+                "project": project,
+                "pending": candidates,
             }))?;
         }
         Command::Resume => {

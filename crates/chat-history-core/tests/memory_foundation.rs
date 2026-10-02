@@ -1,7 +1,8 @@
 use chat_history_core::{
-    DataHome, IndexService, MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidatePayload,
-    MemoryCandidateStatus, MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind, MemoryItem,
-    MemoryKind, MemoryScope, MemoryStatus, NormalizedConversation, NormalizedMessage,
+    DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, IndexService, MemoryCandidateDecision,
+    MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus, MemoryCompilationBatch,
+    MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope, MemoryStatus,
+    NormalizedConversation, NormalizedMessage,
     db::{open_database, restore_database},
 };
 use rusqlite::params;
@@ -664,6 +665,319 @@ fn memory_candidate_promotion_covers_lifecycle_operations_and_rejection() -> any
         Some("insufficient evidence")
     );
     assert!(service.get_memory_item("life-memory-rejected")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn model_compiler_stages_only_valid_delta_evidence_and_keeps_ids_deterministic()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let conversation_id = "model-compiler-conversation";
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            10.0,
+            vec![
+                message("u1", "user", "Start checkpoint A.", 1.0),
+                message("a1", "assistant", "Checkpoint A is active.", 2.0),
+                message("u2", "user", "Do not use subagents.", 3.0),
+                message(
+                    "a2",
+                    "assistant",
+                    "Subagents require explicit approval.",
+                    4.0,
+                ),
+            ],
+        )],
+        None,
+    )?;
+
+    let input = service
+        .prepare_memory_compilation("LEMonX", conversation_id, 2)?
+        .expect("compiler has an initial delta");
+    assert_eq!(input.from_turn_index, 0);
+    assert_eq!(input.through_turn_index, 1);
+    assert_eq!(
+        input
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["u1", "a1"]
+    );
+    assert!(input.working_memory.items.is_empty());
+
+    let invalid = json!({
+        "proposals": [{
+            "operation": "add",
+            "kind": "state",
+            "key": "checkpoint",
+            "value": {"name": "A"},
+            "importance": 90,
+            "confidence": 0.9,
+            "rationale": "Current checkpoint.",
+            "evidence_message_ids": ["outside-delta"]
+        }]
+    })
+    .to_string();
+    let error = service
+        .stage_memory_compiler_output(&input, "test-model", &invalid, 20.0)
+        .expect_err("evidence outside the supplied delta must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("outside the supplied compiler delta")
+    );
+    assert!(
+        service
+            .memory_compile_checkpoint("LEMonX", conversation_id)?
+            .is_none()
+    );
+
+    let missing_proposals = json!({}).to_string();
+    let error = service
+        .stage_memory_compiler_output(&input, "test-model", &missing_proposals, 20.0)
+        .expect_err("proposals must be an explicit top-level key");
+    assert!(format!("{error:#}").contains("missing field `proposals`"));
+    assert!(
+        service
+            .memory_compile_checkpoint("LEMonX", conversation_id)?
+            .is_none()
+    );
+
+    let unknown_field = json!({
+        "proposals": [],
+        "unexpected": true
+    })
+    .to_string();
+    let error = service
+        .stage_memory_compiler_output(&input, "test-model", &unknown_field, 20.0)
+        .expect_err("unknown compiler fields must be rejected");
+    assert!(format!("{error:#}").contains("unknown field"));
+    assert!(
+        service
+            .memory_compile_checkpoint("LEMonX", conversation_id)?
+            .is_none()
+    );
+
+    let duplicate_key = json!({
+        "proposals": [
+            {
+                "operation": "add",
+                "kind": "state",
+                "key": "checkpoint",
+                "value": {"name": "A"},
+                "importance": 90,
+                "confidence": 0.9,
+                "rationale": "First duplicate.",
+                "evidence_message_ids": ["a1"]
+            },
+            {
+                "operation": "add",
+                "kind": "state",
+                "key": "checkpoint",
+                "value": {"name": "A again"},
+                "importance": 80,
+                "confidence": 0.8,
+                "rationale": "Second duplicate.",
+                "evidence_message_ids": ["a1"]
+            }
+        ]
+    })
+    .to_string();
+    let error = service
+        .stage_memory_compiler_output(&input, "test-model", &duplicate_key, 20.0)
+        .expect_err("one compiler batch must not propose the same key twice");
+    assert!(
+        error
+            .to_string()
+            .contains("multiple proposals for key checkpoint")
+    );
+    assert!(
+        service
+            .memory_compile_checkpoint("LEMonX", conversation_id)?
+            .is_none()
+    );
+
+    let valid = json!({
+        "proposals": [{
+            "operation": "add",
+            "kind": "state",
+            "key": "checkpoint",
+            "value": {"name": "A"},
+            "importance": 90,
+            "confidence": 0.9,
+            "rationale": "The supplied dialogue establishes checkpoint A.",
+            "evidence_message_ids": ["a1"]
+        }]
+    })
+    .to_string();
+    let staged_one = service.stage_memory_compiler_output(&input, "test-model", &valid, 20.0)?;
+    let staged_two = service.stage_memory_compiler_output(&input, "test-model", &valid, 20.0)?;
+    assert_eq!(staged_one.candidate_ids, staged_two.candidate_ids);
+    assert_eq!(staged_one.candidate_ids.len(), 1);
+    let candidate = service
+        .memory_candidate(&staged_one.candidate_ids[0])?
+        .expect("candidate staged");
+    assert!(candidate.candidate_id.starts_with("memory-candidate-v1:"));
+    match candidate.payload {
+        MemoryCandidatePayload::Add { memory_id, .. } => {
+            assert!(memory_id.starts_with("memory-item-v1:"));
+        }
+        _ => panic!("expected add candidate"),
+    }
+    assert_eq!(candidate.evidence.len(), 1);
+    assert_eq!(
+        candidate.evidence[0].reference,
+        "conversation:model-compiler-conversation:message:a1"
+    );
+    assert!(service.project_working_memory("LEMonX")?.items.is_empty());
+
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            11.0,
+            vec![
+                message("u1", "user", "Start checkpoint A.", 1.0),
+                message("a1", "assistant", "Checkpoint A is active.", 2.0),
+                message("u2", "user", "Do not use subagents.", 3.0),
+                message(
+                    "a2",
+                    "assistant",
+                    "Subagents require explicit approval.",
+                    4.0,
+                ),
+                message("u3", "user", "Continue implementation.", 5.0),
+                message("a3", "assistant", "Continuing the bounded slice.", 6.0),
+            ],
+        )],
+        None,
+    )?;
+    let next = service
+        .prepare_memory_compilation("LEMonX", conversation_id, DEFAULT_MEMORY_COMPILER_MESSAGES)?
+        .expect("new delta exists");
+    assert_eq!(next.from_turn_index, 2);
+    assert_eq!(next.messages[0].message_id, "u2");
+    assert_eq!(next.pending_candidates.len(), 1);
+    assert_eq!(
+        next.pending_candidates[0].candidate_id,
+        staged_one.candidate_ids[0]
+    );
+
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            12.0,
+            vec![
+                message("u1-branch", "user", "Changed earlier history.", 1.0),
+                message("a1", "assistant", "Checkpoint A is active.", 2.0),
+                message("u2", "user", "Do not use subagents.", 3.0),
+                message(
+                    "a2",
+                    "assistant",
+                    "Subagents require explicit approval.",
+                    4.0,
+                ),
+                message("u3", "user", "Continue implementation.", 5.0),
+                message("a3", "assistant", "Continuing the bounded slice.", 6.0),
+            ],
+        )],
+        None,
+    )?;
+    let error = service
+        .prepare_memory_compilation("LEMonX", conversation_id, 2)
+        .expect_err("edited compiled prefix must fail before model invocation");
+    assert!(
+        error
+            .to_string()
+            .contains("no longer preserves the compiled prefix")
+    );
+    Ok(())
+}
+
+#[test]
+fn model_compiler_rejects_project_mismatch_and_revalidates_live_working_memory()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    service.import_normalized(
+        vec![NormalizedConversation {
+            source: "chatgpt".to_string(),
+            source_instance: None,
+            source_conversation_id: "other-project-conversation".to_string(),
+            title: "OtherProject development".to_string(),
+            create_time: Some(1.0),
+            update_time: Some(2.0),
+            model: None,
+            source_url: None,
+            source_path: Some("chatgpt-app-bridge".to_string()),
+            messages: vec![
+                message("u1", "user", "Start unrelated work.", 1.0),
+                message("a1", "assistant", "Unrelated work active.", 2.0),
+            ],
+            raw: json!({"collector": "test"}),
+        }],
+        None,
+    )?;
+    let error = service
+        .prepare_memory_compilation("LEMonX", "other-project-conversation", 2)
+        .expect_err("compiler must not relabel an unrelated conversation");
+    assert!(
+        error
+            .to_string()
+            .contains("does not strongly match project LEMonX")
+    );
+
+    let conversation_id = "live-memory-revalidation";
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            10.0,
+            vec![
+                message("u1", "user", "Start checkpoint A.", 1.0),
+                message("a1", "assistant", "Checkpoint A is active.", 2.0),
+            ],
+        )],
+        None,
+    )?;
+    let input = service
+        .prepare_memory_compilation("LEMonX", conversation_id, 2)?
+        .expect("compiler delta exists");
+    assert!(input.working_memory.items.is_empty());
+
+    service.put_memory_item(&project_memory(
+        "live-checkpoint",
+        "already active",
+        None,
+        15.0,
+    ))?;
+    let add_conflict = json!({
+        "proposals": [{
+            "operation": "add",
+            "kind": "state",
+            "key": "current_goal",
+            "value": {"text": "stale compiler view"},
+            "importance": 90,
+            "confidence": 0.9,
+            "rationale": "The earlier compiler input did not contain the new live memory.",
+            "evidence_message_ids": ["a1"]
+        }]
+    })
+    .to_string();
+    let error = service
+        .stage_memory_compiler_output(&input, "test-model", &add_conflict, 20.0)
+        .expect_err("stage must revalidate against current active memory");
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with active memory key")
+    );
+    assert!(
+        service
+            .memory_compile_checkpoint("LEMonX", conversation_id)?
+            .is_none()
+    );
     Ok(())
 }
 

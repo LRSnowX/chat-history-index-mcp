@@ -968,7 +968,7 @@ fn validate_checkpoint_progression(
     Ok(())
 }
 
-fn snapshot_prefix_sha256_hex(
+pub(crate) fn snapshot_prefix_sha256_hex(
     tx: &Transaction<'_>,
     snapshot_id: &str,
     through_turn_index: i64,

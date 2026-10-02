@@ -179,14 +179,21 @@ The current implementation provides:
   ProjectWorkingMemory before promotion;
 - transactional candidate promotion, explicit rejection, stale-candidate
   detection, and retained decision reasons;
+- bounded model-driven incremental compilation through Codex in an ephemeral
+  read-only sandbox with medium reasoning effort;
+- strong project/conversation matching before model invocation;
+- strict candidate JSON validation, delta-only evidence IDs, bounded values,
+  authoritative active-memory revalidation, and duplicate/conflict rejection;
+- operator CLI commands to compile one conversation delta and inspect pending
+  candidates; compilation stages only and never promotes automatically;
 - schema-v1 restore compatibility.
 
 It does not yet provide:
 
-- the model-driven Memory Compiler that generates staged candidates;
-- automatic extraction from new conversation turns;
+- automatic compiler scheduling after new conversation evidence arrives;
+- an operator promotion/rejection CLI or review UI;
+- automatic candidate promotion;
 - memory-first semantic search;
-- automatic resolution/supersession policies;
 - memory health/inspection CLI.
 
 This boundary prevents an LLM from writing long-term state before provenance,
@@ -204,11 +211,11 @@ The initial evidence snapshot layer is implemented. Follow-up work should add:
 - snapshot inspection/health APIs;
 - optional historical backfill when complete snapshot coverage is useful.
 
-### Phase 3 follow-up — Model-driven Incremental Memory Compiler
+### Phase 3 follow-up — Compiler orchestration and review
 
-The durable staging/promotion state machine is implemented. The next compiler
-slice should process only new evidence since the last compiled snapshot prefix
-and emit staged candidate operations:
+The durable state machine and model-driven incremental compiler are implemented.
+The compiler processes only new evidence since the last compiled snapshot
+prefix and can emit staged candidate operations:
 
 - add
 - supersede
@@ -218,14 +225,22 @@ and emit staged candidate operations:
 An ordinary update is represented as an explicit supersession so the previous
 memory remains auditable.
 
-Compiler output must preserve provenance and cannot write MemoryItems directly.
+Compiler output preserves provenance and cannot write MemoryItems directly.
 Candidates become durable memory only through promotion. Promotion revalidates
 the candidate evidence prefix against the current canonical conversation
 snapshot; edited or branched evidence becomes stale instead of mutating current
 memory.
 
-The model/compiler process itself is not implemented yet. No MCP model-facing
-memory write surface exists.
+The remaining Phase 3 work is orchestration and review:
+
+- trigger bounded compilation after accepted new evidence without blocking
+  ingestion;
+- expose operator review/promotion/rejection outside model-facing MCP tools;
+- define conservative promotion policy classes if any operation is ever made
+  automatic;
+- add retry/health visibility for compiler failures and caught-up state.
+
+No MCP model-facing memory write surface exists.
 
 ### Phase 4 — Memory-first retrieval
 

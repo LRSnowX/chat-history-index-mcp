@@ -838,29 +838,9 @@ impl ChatHistoryMcp {
         conversation_id: &str,
         project: &str,
     ) -> Result<bool, String> {
-        let detail = self
-            .service
-            .get_conversation(conversation_id, false)
-            .map_err(|error| error.to_string())?;
-        let Some(detail) = detail else {
-            return Ok(false);
-        };
-        let needle = normalize_project_text(project);
-        if needle.is_empty() {
-            return Ok(true);
-        }
-        let title_matches = normalize_project_text(&detail.conversation.title).contains(&needle);
-        let source_path_matches = detail
-            .conversation
-            .source_path
-            .as_deref()
-            .is_some_and(|path| normalize_project_text(path).contains(&needle));
-        let source_url_matches = detail
-            .conversation
-            .source_url
-            .as_deref()
-            .is_some_and(|url| normalize_project_text(url).contains(&needle));
-        Ok(title_matches || source_path_matches || source_url_matches)
+        self.service
+            .conversation_matches_project_strong(conversation_id, project)
+            .map_err(|error| error.to_string())
     }
 
     fn memory_continuations_from_recent(

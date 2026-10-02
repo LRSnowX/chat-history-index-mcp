@@ -20,6 +20,7 @@ const CHUNK_SUMMARY_MAX_CHARS: usize = 12_000;
 const CODEX_SUMMARY_TIMEOUT: Duration = Duration::from_secs(150);
 const CODEX_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(120);
 const CODEX_FALLBACK_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_MEMORY_TIMEOUT: Duration = Duration::from_secs(150);
 
 #[derive(Debug, Clone)]
 pub struct OpenAiClient {
@@ -79,10 +80,58 @@ impl OpenAiClient {
     }
 }
 
-fn normalize_summary_model(value: Option<OsString>) -> Option<String> {
+#[derive(Debug, Clone)]
+pub struct MemoryModelClient {
+    codex_bin: PathBuf,
+    model: Option<String>,
+}
+
+impl MemoryModelClient {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let codex_bin = std::env::var_os("CODEX_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/codex"));
+        if !codex_bin.exists() {
+            bail!("Codex CLI not found at {}", codex_bin.display());
+        }
+        Ok(Self {
+            codex_bin,
+            model: normalize_optional_model(std::env::var_os("CHAT_HISTORY_MEMORY_MODEL")),
+        })
+    }
+
+    pub fn model_label(&self) -> String {
+        match self.model.as_deref() {
+            Some(model) => format!("{model} via codex exec"),
+            None => "codex-default via codex exec".to_string(),
+        }
+    }
+
+    pub async fn generate_json(&self, prompt: &str) -> anyhow::Result<String> {
+        let codex_bin = self.codex_bin.clone();
+        let model = self.model.clone();
+        let prompt = prompt.to_string();
+        tokio::task::spawn_blocking(move || {
+            run_codex_json(
+                &codex_bin,
+                model.as_deref(),
+                &prompt,
+                CODEX_MEMORY_TIMEOUT,
+                "medium",
+            )
+        })
+        .await?
+    }
+}
+
+fn normalize_optional_model(value: Option<OsString>) -> Option<String> {
     value
         .map(|value| value.to_string_lossy().trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_summary_model(value: Option<OsString>) -> Option<String> {
+    normalize_optional_model(value)
 }
 
 fn summarize_with_codex(

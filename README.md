@@ -83,6 +83,21 @@ opening environment or agent-instruction boilerplate.
 Set `CHAT_HISTORY_EMBEDDING_PROVIDER=hashed-v1` only when the explicit legacy
 lexical-vector fallback is desired; it is not a multilingual semantic model.
 
+Project-memory compilation is an explicit operator action and stages candidates
+only; it never promotes them into durable Working Memory by itself:
+
+```bash
+./scripts/chat-history-cli memory-compile-conversation --project LEMonX <conversation-id>
+./scripts/chat-history-cli memory-candidates --project LEMonX
+```
+
+The compiler uses the current Codex CLI account default model unless
+`CHAT_HISTORY_MEMORY_MODEL` is set to a non-empty model name. It invokes Codex
+ephemerally with a read-only sandbox and medium reasoning effort. The compiler
+requires a strong project match, treats the entire supplied compiler context as
+untrusted data, validates strict bounded JSON output, and writes only pending
+candidate operations. Candidate promotion remains a separate state transition.
+
 The MCP server also exposes read-oriented project memory tools:
 `memory_search`, `memory_recent`, `memory_get_thread`, and
 `memory_project_context`. Project context uses a ChatGPT-first source policy by

@@ -10,6 +10,7 @@ pub mod gemini;
 pub mod ingest;
 pub mod memory;
 pub mod memory_compile;
+pub mod memory_compiler;
 pub mod models;
 pub mod openai;
 pub mod ranking;
@@ -32,8 +33,14 @@ pub use memory_compile::{
     MemoryCandidatePayload, MemoryCandidateStatus, MemoryCompilationBatch,
     MemoryCompilationStageResult, MemoryCompileCheckpoint,
 };
+pub use memory_compiler::{
+    DEFAULT_MEMORY_COMPILER_MESSAGES, MAX_MEMORY_COMPILER_MESSAGES, MEMORY_COMPILER_VERSION,
+    MemoryCompilerInput, MemoryCompilerMessage, MemoryCompilerPendingCandidate,
+    MemoryCompilerRunResult,
+};
 pub use models::{
     ConversationDetail, ConversationRecord, DatabaseHealth, IndexStats, JobKind, JobStatus,
     NormalizedConversation, NormalizedMessage, RestoreReport, SearchMode, SearchOptions,
     SearchResult, SourceHealth, SummaryRecord,
 };
+pub use openai::MemoryModelClient;
