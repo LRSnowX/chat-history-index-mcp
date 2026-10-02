@@ -196,11 +196,12 @@ The current implementation provides:
 
 It does not yet provide:
 
-- automatic compiler scheduling after new conversation evidence arrives;
 - automatic candidate promotion;
 - a richer operator review UI;
-- memory-first semantic search;
-- automatic scheduler/retry telemetry beyond the read-only health snapshot.
+- a default policy for which projects should opt into automatic compilation;
+- scheduler retry/history telemetry beyond the last worker status;
+- query-aware ranking among large active Working Memory sets;
+- automatic global CollaborationMemory authoring.
 
 This boundary prevents an LLM from writing long-term state before provenance,
 conflict handling, and compiler rules are implemented and tested.

@@ -152,13 +152,17 @@ for example:
 ```bash
 "$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service" install \
   --memory-projects LEMonX,Arcos \
+  --memory-model gpt-5.6-sol \
   --memory-max-conversations 1
 ```
 
 When enabled, the collector schedules a detached bounded compiler worker only
 after new ChatGPT evidence was successfully imported. The worker stages
 candidates only; promotion remains an explicit operator action. Memory compiler
-failures do not roll back or block ChatGPT collection.
+failures do not roll back or block ChatGPT collection. `--memory-model` is
+optional and writes `CHAT_HISTORY_MEMORY_MODEL` into the collector sidecar
+environment, so scheduler compilation can use a model compatible with its Codex
+account without changing the user's global Codex model.
 
 The service adds a small MCP bootstrap entry to `~/.codex/config.toml`. The
 official ChatGPT app-server starts that bootstrap with ChatGPT.app's bundled

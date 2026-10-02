@@ -28,9 +28,16 @@ collector configuration explicitly:
 SERVICE="$HOME/Library/Application Support/chat-history-index-mcp/bin/chatgpt-live-collector-service"
 "$SERVICE" install \
   --memory-projects LEMonX,Arcos \
+  --memory-model gpt-5.6-sol \
   --memory-max-conversations 1 \
   --memory-max-messages 8
 ```
+
+`--memory-model` is optional. When supplied it writes
+`CHAT_HISTORY_MEMORY_MODEL` into the collector sidecar environment, so the
+detached compiler worker can use a scheduler-specific Codex model without
+changing the global Codex configuration. The configured model is included in
+memory compiler scheduler status.
 
 The optional scheduler runs only after a polling cycle imports at least one new
 conversation snapshot. It starts a detached worker after ingestion has already

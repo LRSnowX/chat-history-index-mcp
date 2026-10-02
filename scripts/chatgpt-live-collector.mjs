@@ -412,6 +412,7 @@ function boundedInteger(value, fallback, min, max, name) {
 }
 
 function memoryAutoConfig(env = process.env) {
+  const model = String(env.CHAT_HISTORY_MEMORY_MODEL ?? "").trim() || null;
   const projects = [...new Set(
     String(env.CHAT_HISTORY_MEMORY_AUTO_PROJECTS ?? "")
       .split(",")
@@ -425,6 +426,7 @@ function memoryAutoConfig(env = process.env) {
       scanLimit: DEFAULT_MEMORY_AUTO_SCAN_LIMIT,
       maxConversations: DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS,
       maxMessages: DEFAULT_MEMORY_AUTO_MAX_MESSAGES,
+      model,
     };
   }
   if (projects.length > 10) {
@@ -454,6 +456,7 @@ function memoryAutoConfig(env = process.env) {
       16,
       "CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES",
     ),
+    model,
   };
 }
 
@@ -473,6 +476,7 @@ function maybeScheduleMemoryCompiler(syncResult, spawnImpl = spawn, env = proces
     scheduled: true,
     pid: child.pid ?? null,
     projects: config.projects,
+    model: config.model,
     max_conversations: config.maxConversations,
     max_messages: config.maxMessages,
   };
@@ -512,6 +516,7 @@ function runMemoryCompilerWorker() {
     pid: process.pid,
     started_at: startedAt,
     projects: config.projects,
+    model: config.model,
     scan_limit: config.scanLimit,
     max_conversations: config.maxConversations,
     max_messages: config.maxMessages,
@@ -545,6 +550,7 @@ function runMemoryCompilerWorker() {
       started_at: startedAt,
       completed_at: new Date().toISOString(),
       projects: config.projects,
+      model: config.model,
       results,
     };
     writeJsonStatus(MEMORY_COMPILER_STATUS_PATH, payload);

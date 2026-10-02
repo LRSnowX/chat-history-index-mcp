@@ -88,6 +88,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
     scanLimit: 500,
     maxConversations: 1,
     maxMessages: 8,
+    model: null,
   });
   assert.deepEqual(
     memoryAutoConfig({
@@ -95,6 +96,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
       CHAT_HISTORY_MEMORY_AUTO_SCAN_LIMIT: "250",
       CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS: "2",
       CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES: "6",
+      CHAT_HISTORY_MEMORY_MODEL: " gpt-5.6-sol ",
     }),
     {
       enabled: true,
@@ -102,6 +104,7 @@ test("memory auto compiler is disabled by default and validates explicit bounds"
       scanLimit: 250,
       maxConversations: 2,
       maxMessages: 6,
+      model: "gpt-5.6-sol",
     },
   );
   assert.throws(
@@ -121,6 +124,7 @@ test("memory auto compiler schedules only after a successful import and explicit
   };
   const enabledEnv = {
     CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
+    CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
   };
   assert.deepEqual(
     maybeScheduleMemoryCompiler({ imported: 1 }, fakeSpawn, {}),
@@ -135,6 +139,7 @@ test("memory auto compiler schedules only after a successful import and explicit
   assert.equal(scheduled.scheduled, true);
   assert.equal(scheduled.pid, 12345);
   assert.deepEqual(scheduled.projects, ["LEMonX"]);
+  assert.equal(scheduled.model, "gpt-5.6-sol");
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args.slice(-1), ["--memory-compiler-worker"]);
   assert.equal(calls[0].options.detached, true);
@@ -192,6 +197,7 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
         CHAT_HISTORY_MEMORY_AUTO_SCAN_LIMIT: "250",
         CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS: "1",
         CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES: "6",
+        CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
       },
     });
     assert.equal(run.status, 0, run.stderr);
@@ -204,6 +210,7 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
     );
     assert.equal(status.state, "completed");
     assert.deepEqual(status.projects, ["LEMonX"]);
+    assert.equal(status.model, "gpt-5.6-sol");
     assert.equal(status.results.length, 1);
     assert.equal(status.results[0].status, "ok");
     assert.equal(fs.existsSync(path.join(cache, "memory-auto-compiler.lock")), false);
