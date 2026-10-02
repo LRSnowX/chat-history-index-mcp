@@ -1398,6 +1398,119 @@ fn model_compiler_rejects_project_mismatch_and_revalidates_live_working_memory()
 }
 
 #[test]
+fn memory_health_surfaces_incomplete_project_evidence_and_pending_revalidation_problems()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+
+    service.import_normalized(
+        vec![
+            chatgpt_conversation(
+                "health-complete",
+                10.0,
+                vec![
+                    message("u1", "user", "Start LEMonX work.", 1.0),
+                    message("a1", "assistant", "LEMonX work active.", 2.0),
+                ],
+            ),
+            chatgpt_conversation(
+                "health-incomplete",
+                11.0,
+                vec![
+                    message("u1", "user", "continue", 1.0),
+                    message("u2", "user", "continue again", 2.0),
+                    message("u3", "user", "still waiting", 3.0),
+                ],
+            ),
+            {
+                let mut unrelated = chatgpt_conversation(
+                    "health-unrelated",
+                    12.0,
+                    vec![
+                        message("u1", "user", "other project", 1.0),
+                        message("u2", "user", "still other project", 2.0),
+                    ],
+                );
+                unrelated.title = "OtherProject development".to_string();
+                unrelated
+            },
+        ],
+        None,
+    )?;
+
+    service.put_memory_item(&project_memory(
+        "health-existing-goal",
+        "already active",
+        None,
+        15.0,
+    ))?;
+    let snapshot = canonical_snapshot_id(&service, "health-complete")?;
+    service.stage_memory_compilation(&MemoryCompilationBatch {
+        project: "LEMonX".to_string(),
+        conversation_id: "health-complete".to_string(),
+        source_snapshot_id: snapshot,
+        through_turn_index: 1,
+        through_message_id: "a1".to_string(),
+        compiler_version: "memory-compiler-v1".to_string(),
+        model_label: Some("test-model".to_string()),
+        created_at: 20.0,
+        candidates: vec![MemoryCandidateInput {
+            candidate_id: "health-conflicting-candidate".to_string(),
+            payload: MemoryCandidatePayload::Add {
+                memory_id: "health-conflicting-memory".to_string(),
+                kind: MemoryKind::State,
+                key: "current_goal".to_string(),
+                value: json!({"text": "conflicting goal"}),
+                importance: 80,
+                confidence: 0.9,
+                valid_from: Some(20.0),
+                valid_until: None,
+                last_verified_at: Some(20.0),
+            },
+            rationale: "Candidate predates current active-memory revalidation.".to_string(),
+            evidence: vec![MemoryEvidence {
+                kind: MemoryEvidenceKind::ConversationTurn,
+                reference: "conversation:health-complete:message:a1".to_string(),
+                detail: json!({"turn_index": 1}),
+                created_at: 20.0,
+            }],
+        }],
+    })?;
+
+    let health = service.memory_health("LEMonX", 30)?;
+    assert_eq!(health.strong_project_conversation_count, 2);
+    assert_eq!(health.incomplete_canonical_conversation_count, 1);
+    assert_eq!(health.incomplete_canonical_conversations.len(), 1);
+    assert_eq!(
+        health.incomplete_canonical_conversations[0].conversation_id,
+        "health-incomplete"
+    );
+    assert_eq!(
+        health.incomplete_canonical_conversations[0].assistant_message_count,
+        0
+    );
+    assert_eq!(health.pending_revalidation_problem_count, 1);
+    assert_eq!(health.pending_revalidation_problems.len(), 1);
+    assert_eq!(
+        health.pending_revalidation_problems[0].candidate_id,
+        "health-conflicting-candidate"
+    );
+    assert!(
+        health.pending_revalidation_problems[0]
+            .reason
+            .contains("active memory already exists")
+    );
+    assert_eq!(
+        service
+            .memory_candidate("health-conflicting-candidate")?
+            .unwrap()
+            .status,
+        MemoryCandidateStatus::Pending
+    );
+    Ok(())
+}
+
+#[test]
 fn schema_five_backfills_legacy_promoted_candidate_review_once() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let service = service(&temp);

@@ -32,8 +32,9 @@ pub use memory::{
 };
 pub use memory_compile::{
     MemoryCandidate, MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidateOperation,
-    MemoryCandidatePayload, MemoryCandidateReview, MemoryCandidateStatus, MemoryCompilationBatch,
-    MemoryCompilationStageResult, MemoryCompileCheckpoint, MemoryPromotionReview,
+    MemoryCandidatePayload, MemoryCandidateRevalidationProblem, MemoryCandidateReview,
+    MemoryCandidateStatus, MemoryCompilationBatch, MemoryCompilationStageResult,
+    MemoryCompileCheckpoint, MemoryPromotionReview,
 };
 pub use memory_compiler::{
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
@@ -43,8 +44,8 @@ pub use memory_compiler::{
     MemoryProjectCompilerPlanEntry, MemoryProjectCompilerResult, MemoryProjectCompilerStaged,
 };
 pub use memory_health::{
-    MemoryCandidateStatusCounts, MemoryCheckpointHealth, MemoryCheckpointPrefixStatus,
-    MemoryHealthReport, MemoryStatusCounts,
+    IncompleteCanonicalConversationHealth, MemoryCandidateStatusCounts, MemoryCheckpointHealth,
+    MemoryCheckpointPrefixStatus, MemoryHealthReport, MemoryStatusCounts,
 };
 pub use models::{
     ConversationDetail, ConversationRecord, DatabaseHealth, IndexStats, JobKind, JobStatus,

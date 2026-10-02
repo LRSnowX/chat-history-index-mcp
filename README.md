@@ -145,7 +145,11 @@ promotion/reverification/stale-review history for one candidate.
 `memory-health` is read-only and does not invoke Codex. It reports project
 MemoryItem lifecycle counts, candidate lifecycle counts, pending age, and
 per-conversation compiler checkpoints including caught-up/behind turns and
-whether the current canonical snapshot still preserves the compiled prefix.
+whether the current canonical snapshot still preserves the compiled prefix. It
+also scans strong-match project conversations for incomplete canonical ChatGPT
+evidence (multi-message transcripts with no assistant messages) and reports
+pending candidates that would currently fail promotion revalidation, without
+changing their status.
 
 Collaboration Memory authoring is also operator-only. `memory-collaboration-author`
 accepts only the stable global kinds `invariant`, `preference`, and `decision`;

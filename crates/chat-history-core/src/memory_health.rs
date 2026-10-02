@@ -4,7 +4,13 @@ use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{db::open_database, ingest::IndexService, memory_compile::snapshot_prefix_sha256_hex};
+use crate::{
+    db::open_database,
+    ingest::IndexService,
+    memory_compile::{MemoryCandidateRevalidationProblem, snapshot_prefix_sha256_hex},
+};
+
+const MAX_HEALTH_DETAIL_ITEMS: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct MemoryStatusCounts {
@@ -46,6 +52,17 @@ pub struct MemoryCheckpointHealth {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct IncompleteCanonicalConversationHealth {
+    pub conversation_id: String,
+    pub source: String,
+    pub title: String,
+    pub update_time: Option<f64>,
+    pub message_count: i64,
+    pub user_message_count: i64,
+    pub assistant_message_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryHealthReport {
     pub project: String,
     pub generated_at: f64,
@@ -63,6 +80,13 @@ pub struct MemoryHealthReport {
     pub checkpoint_prefix_problem: usize,
     pub tracked_canonical_snapshots: usize,
     pub tracked_rejected_lower_quality_snapshots: usize,
+    pub strong_project_conversation_count: usize,
+    pub incomplete_canonical_conversation_count: usize,
+    pub incomplete_canonical_conversations_truncated: bool,
+    pub incomplete_canonical_conversations: Vec<IncompleteCanonicalConversationHealth>,
+    pub pending_revalidation_problem_count: usize,
+    pub pending_revalidation_problems_truncated: bool,
+    pub pending_revalidation_problems: Vec<MemoryCandidateRevalidationProblem>,
 }
 
 impl IndexService {
@@ -294,6 +318,32 @@ impl IndexService {
             params![project],
             |row| row.get(0),
         )?;
+        let strong_project_conversations = self.strong_project_conversations(project)?;
+        let strong_project_conversation_count = strong_project_conversations.len();
+        let mut incomplete_canonical_conversations = strong_project_conversations
+            .into_iter()
+            .filter(|conversation| {
+                conversation.source == "chatgpt"
+                    && conversation.message_count >= 2
+                    && conversation.assistant_message_count == 0
+            })
+            .map(|conversation| IncompleteCanonicalConversationHealth {
+                conversation_id: conversation.conversation_id,
+                source: conversation.source,
+                title: conversation.title,
+                update_time: conversation.update_time,
+                message_count: conversation.message_count,
+                user_message_count: conversation.user_message_count,
+                assistant_message_count: conversation.assistant_message_count,
+            })
+            .collect::<Vec<_>>();
+        let incomplete_canonical_conversation_count = incomplete_canonical_conversations.len();
+        incomplete_canonical_conversations.truncate(MAX_HEALTH_DETAIL_ITEMS);
+
+        let mut pending_revalidation_problems =
+            self.pending_memory_candidate_revalidation_problems(project)?;
+        let pending_revalidation_problem_count = pending_revalidation_problems.len();
+        pending_revalidation_problems.truncate(MAX_HEALTH_DETAIL_ITEMS);
 
         Ok(MemoryHealthReport {
             project: project.to_string(),
@@ -314,6 +364,15 @@ impl IndexService {
             tracked_rejected_lower_quality_snapshots: usize::try_from(
                 tracked_rejected_lower_quality_snapshots,
             )?,
+            strong_project_conversation_count,
+            incomplete_canonical_conversation_count,
+            incomplete_canonical_conversations_truncated: incomplete_canonical_conversation_count
+                > MAX_HEALTH_DETAIL_ITEMS,
+            incomplete_canonical_conversations,
+            pending_revalidation_problem_count,
+            pending_revalidation_problems_truncated: pending_revalidation_problem_count
+                > MAX_HEALTH_DETAIL_ITEMS,
+            pending_revalidation_problems,
         })
     }
 }

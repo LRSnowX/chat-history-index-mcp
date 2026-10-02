@@ -552,21 +552,38 @@ impl IndexService {
         let Some(conversation) = load_conversation(&conn, conversation_id)? else {
             return Ok(false);
         };
+        conversation_record_matches_project_strong(&conversation, project)
+    }
+
+    pub fn strong_project_conversations(
+        &self,
+        project: &str,
+    ) -> anyhow::Result<Vec<ConversationRecord>> {
         let needle = normalize_project_text(project);
         ensure!(
             !needle.is_empty(),
             "project must contain at least one alphanumeric character"
         );
-        let title_matches = normalize_project_text(&conversation.title).contains(&needle);
-        let source_path_matches = conversation
-            .source_path
-            .as_deref()
-            .is_some_and(|path| normalize_project_text(path).contains(&needle));
-        let source_url_matches = conversation
-            .source_url
-            .as_deref()
-            .is_some_and(|url| normalize_project_text(url).contains(&needle));
-        Ok(title_matches || source_path_matches || source_url_matches)
+        let conn = open_database(&self.managed_db_path())?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT conversation_id
+            FROM conversations
+            ORDER BY COALESCE(update_time, create_time, 0) DESC, conversation_id ASC
+            "#,
+        )?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut conversations = Vec::new();
+        for conversation_id in ids {
+            if let Some(conversation) = load_conversation(&conn, &conversation_id)?
+                && conversation_record_matches_project_strong(&conversation, project)?
+            {
+                conversations.push(conversation);
+            }
+        }
+        Ok(conversations)
     }
 
     pub fn related_conversations(
@@ -651,6 +668,29 @@ impl IndexService {
         stream_json_array(member, &mut processor)?;
         Ok(())
     }
+}
+
+fn conversation_record_matches_project_strong(
+    conversation: &ConversationRecord,
+    project: &str,
+) -> anyhow::Result<bool> {
+    let project = project.trim();
+    ensure!(!project.is_empty(), "project cannot be empty");
+    let needle = normalize_project_text(project);
+    ensure!(
+        !needle.is_empty(),
+        "project must contain at least one alphanumeric character"
+    );
+    let title_matches = normalize_project_text(&conversation.title).contains(&needle);
+    let source_path_matches = conversation
+        .source_path
+        .as_deref()
+        .is_some_and(|path| normalize_project_text(path).contains(&needle));
+    let source_url_matches = conversation
+        .source_url
+        .as_deref()
+        .is_some_and(|url| normalize_project_text(url).contains(&needle));
+    Ok(title_matches || source_path_matches || source_url_matches)
 }
 
 fn normalize_project_text(value: &str) -> String {

@@ -356,10 +356,14 @@ The read-only `memory-health` CLI now exposes:
 - candidate lifecycle counts and oldest pending age;
 - per-checkpoint caught-up/behind turns;
 - canonical-prefix changed/missing detection;
-- tracked rejected-lower-quality evidence counts.
+- tracked rejected-lower-quality evidence counts;
+- strong-project canonical ChatGPT transcripts that are multi-message but have
+  no assistant messages;
+- pending candidates whose current evidence/memory revalidation would already
+  fail, reported read-only without marking them stale.
 
 DevSpace already exposes per-handoff byte-budget telemetry (`bytes_used`,
 `byte_budget`, and per-section truncation). Future health work should connect
-that host telemetry with CHIM diagnostics where useful, and add richer
-unresolved-conflict reporting plus broader incomplete-conversation evidence
-diagnostics.
+that host telemetry with CHIM diagnostics where useful, and expand incomplete
+evidence diagnostics beyond the known ChatGPT user-only transcript failure
+class when new concrete failure modes are observed.

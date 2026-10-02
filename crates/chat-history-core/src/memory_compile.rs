@@ -175,6 +175,13 @@ pub struct MemoryCompilationStageResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryCandidateRevalidationProblem {
+    pub candidate_id: String,
+    pub operation: MemoryCandidateOperation,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum MemoryCandidateDecision {
     Promoted {
@@ -323,6 +330,39 @@ impl IndexService {
         ids.into_iter()
             .map(|id| load_candidate(&conn, &id)?.ok_or_else(|| anyhow!("missing candidate {id}")))
             .collect()
+    }
+
+    pub fn pending_memory_candidate_revalidation_problems(
+        &self,
+        project: &str,
+    ) -> anyhow::Result<Vec<MemoryCandidateRevalidationProblem>> {
+        ensure!(!project.trim().is_empty(), "project cannot be empty");
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let tx = conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare(
+            r#"
+            SELECT candidate_id
+            FROM memory_candidates
+            WHERE project = ?1 AND status = 'pending'
+            ORDER BY created_at ASC, candidate_id ASC
+            "#,
+        )?;
+        let ids = stmt
+            .query_map(params![project], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut problems = Vec::new();
+        for id in ids {
+            let candidate =
+                load_candidate(&tx, &id)?.ok_or_else(|| anyhow!("missing candidate {id}"))?;
+            if let Some(reason) = candidate_stale_reason(&tx, &candidate)? {
+                problems.push(MemoryCandidateRevalidationProblem {
+                    candidate_id: candidate.candidate_id,
+                    operation: candidate.operation,
+                    reason,
+                });
+            }
+        }
+        Ok(problems)
     }
 
     pub fn memory_candidate(&self, candidate_id: &str) -> anyhow::Result<Option<MemoryCandidate>> {
