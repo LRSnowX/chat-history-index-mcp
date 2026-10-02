@@ -89,6 +89,9 @@ only; it never promotes them into durable Working Memory by itself:
 ```bash
 ./scripts/chat-history-cli memory-compile-conversation --project LEMonX <conversation-id>
 ./scripts/chat-history-cli memory-candidates --project LEMonX
+./scripts/chat-history-cli memory-candidate <candidate-id>
+./scripts/chat-history-cli memory-candidate-promote <candidate-id>
+./scripts/chat-history-cli memory-candidate-reject <candidate-id> --reason "operator reason"
 ```
 
 The compiler uses the current Codex CLI account default model unless
@@ -97,6 +100,8 @@ ephemerally with a read-only sandbox and medium reasoning effort. The compiler
 requires a strong project match, treats the entire supplied compiler context as
 untrusted data, validates strict bounded JSON output, and writes only pending
 candidate operations. Candidate promotion remains a separate state transition.
+Promotion and rejection are explicit operator CLI actions; they are not exposed
+as model-facing MCP tools.
 
 The MCP server also exposes read-oriented project memory tools:
 `memory_search`, `memory_recent`, `memory_get_thread`, and

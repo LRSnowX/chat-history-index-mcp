@@ -142,6 +142,20 @@ enum Command {
         #[arg(long)]
         project: String,
     },
+    /// Inspect one staged memory candidate by id.
+    MemoryCandidate {
+        candidate_id: String,
+    },
+    /// Explicitly promote one pending candidate after revalidation.
+    MemoryCandidatePromote {
+        candidate_id: String,
+    },
+    /// Explicitly reject one pending candidate with an operator reason.
+    MemoryCandidateReject {
+        candidate_id: String,
+        #[arg(long)]
+        reason: String,
+    },
     Resume,
     Stats,
     Search {
@@ -536,6 +550,34 @@ async fn main() -> anyhow::Result<()> {
                 "project": project,
                 "pending": candidates,
             }))?;
+        }
+        Command::MemoryCandidate { candidate_id } => {
+            let candidate = service
+                .memory_candidate(&candidate_id)?
+                .with_context(|| format!("memory candidate does not exist: {candidate_id}"))?;
+            print_json(&candidate)?;
+        }
+        Command::MemoryCandidatePromote { candidate_id } => {
+            let decided_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let decision = service.promote_memory_candidate(&candidate_id, decided_at)?;
+            let candidate = service
+                .memory_candidate(&candidate_id)?
+                .with_context(|| format!("memory candidate disappeared: {candidate_id}"))?;
+            print_json(&serde_json::json!({
+                "decision": decision,
+                "candidate": candidate,
+            }))?;
+        }
+        Command::MemoryCandidateReject {
+            candidate_id,
+            reason,
+        } => {
+            let decided_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            service.reject_memory_candidate(&candidate_id, &reason, decided_at)?;
+            let candidate = service
+                .memory_candidate(&candidate_id)?
+                .with_context(|| format!("memory candidate disappeared: {candidate_id}"))?;
+            print_json(&candidate)?;
         }
         Command::Resume => {
             let report = service.resume().await?;

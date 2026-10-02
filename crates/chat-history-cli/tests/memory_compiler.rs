@@ -89,16 +89,28 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
     fs::set_permissions(&fake_codex, permissions).unwrap();
 
     let response = json!({
-        "proposals": [{
-            "operation": "add",
-            "kind": "state",
-            "key": "checkpoint",
-            "value": {"name": "A"},
-            "importance": 90,
-            "confidence": 0.95,
-            "rationale": "The supplied dialogue explicitly establishes checkpoint A.",
-            "evidence_message_ids": ["a1"]
-        }]
+        "proposals": [
+            {
+                "operation": "add",
+                "kind": "state",
+                "key": "checkpoint",
+                "value": {"name": "A"},
+                "importance": 90,
+                "confidence": 0.95,
+                "rationale": "The supplied dialogue explicitly establishes checkpoint A.",
+                "evidence_message_ids": ["a1"]
+            },
+            {
+                "operation": "add",
+                "kind": "decision",
+                "key": "compiler_review_mode",
+                "value": {"mode": "operator_review"},
+                "importance": 80,
+                "confidence": 0.9,
+                "rationale": "The compiler run is intentionally staged for operator review.",
+                "evidence_message_ids": ["a1"]
+            }
+        ]
     })
     .to_string();
     let result = run_cli(
@@ -124,13 +136,13 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
         result["result"]["model_label"],
         "fake-memory-model via codex exec"
     );
-    assert_eq!(
-        result["result"]["staged"]["candidate_ids"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    let candidate_ids = result["result"]["staged"]["candidate_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(candidate_ids.len(), 2);
 
     let args = fs::read_to_string(&args_log).unwrap();
     assert!(args.lines().any(|arg| arg == "--ephemeral"));
@@ -151,7 +163,7 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
     assert!(prompt.contains("Never invent candidate IDs"));
 
     let pending = service.pending_memory_candidates("LEMonX").unwrap();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 2);
     assert!(
         service
             .project_working_memory("LEMonX")
@@ -165,5 +177,51 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
         &["memory-candidates", "--project", "LEMonX"],
         &[],
     );
-    assert_eq!(candidates["pending"].as_array().unwrap().len(), 1);
+    assert_eq!(candidates["pending"].as_array().unwrap().len(), 2);
+
+    let inspected = run_cli(
+        &data_home,
+        &["memory-candidate", candidate_ids[0].as_str()],
+        &[],
+    );
+    assert_eq!(inspected["status"], "pending");
+    assert_eq!(inspected["candidate_id"], candidate_ids[0]);
+
+    let promoted = run_cli(
+        &data_home,
+        &["memory-candidate-promote", candidate_ids[0].as_str()],
+        &[],
+    );
+    assert_eq!(promoted["decision"]["status"], "promoted");
+    assert_eq!(promoted["candidate"]["status"], "promoted");
+    assert_eq!(
+        service
+            .project_working_memory("LEMonX")
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+
+    let rejected = run_cli(
+        &data_home,
+        &[
+            "memory-candidate-reject",
+            candidate_ids[1].as_str(),
+            "--reason",
+            "operator rejected test candidate",
+        ],
+        &[],
+    );
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(
+        rejected["decision_reason"],
+        "operator rejected test candidate"
+    );
+    assert!(
+        service
+            .pending_memory_candidates("LEMonX")
+            .unwrap()
+            .is_empty()
+    );
 }

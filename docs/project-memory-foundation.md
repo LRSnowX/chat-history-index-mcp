@@ -184,15 +184,16 @@ The current implementation provides:
 - strong project/conversation matching before model invocation;
 - strict candidate JSON validation, delta-only evidence IDs, bounded values,
   authoritative active-memory revalidation, and duplicate/conflict rejection;
-- operator CLI commands to compile one conversation delta and inspect pending
-  candidates; compilation stages only and never promotes automatically;
+- operator CLI commands to compile one conversation delta, inspect pending
+  candidates, inspect one candidate, explicitly promote it, or explicitly
+  reject it with a retained reason; compilation itself never promotes;
 - schema-v1 restore compatibility.
 
 It does not yet provide:
 
 - automatic compiler scheduling after new conversation evidence arrives;
-- an operator promotion/rejection CLI or review UI;
 - automatic candidate promotion;
+- a richer operator review UI;
 - memory-first semantic search;
 - memory health/inspection CLI.
 
@@ -235,7 +236,7 @@ The remaining Phase 3 work is orchestration and review:
 
 - trigger bounded compilation after accepted new evidence without blocking
   ingestion;
-- expose operator review/promotion/rejection outside model-facing MCP tools;
+- optionally add a richer review UI around the existing operator CLI;
 - define conservative promotion policy classes if any operation is ever made
   automatic;
 - add retry/health visibility for compiler failures and caught-up state.
