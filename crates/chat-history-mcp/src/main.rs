@@ -877,7 +877,16 @@ impl ChatHistoryMcp {
                     continue;
                 };
                 let total_messages = detail.messages.len();
-                if total_messages == 0 {
+                let assistant_messages = detail
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == "assistant")
+                    .count();
+                if !continuation_has_sufficient_dialogue(
+                    &detail.conversation.source,
+                    total_messages,
+                    assistant_messages,
+                ) {
                     continue;
                 }
                 let offset = total_messages.saturating_sub(limit);
@@ -908,6 +917,31 @@ impl ChatHistoryMcp {
             }
         }
         Ok(continuations)
+    }
+}
+
+fn continuation_has_sufficient_dialogue(
+    source: &str,
+    total_messages: usize,
+    assistant_messages: usize,
+) -> bool {
+    if total_messages == 0 {
+        return false;
+    }
+    !(source == "chatgpt" && total_messages >= 2 && assistant_messages == 0)
+}
+
+#[cfg(test)]
+mod continuation_quality_tests {
+    use super::continuation_has_sufficient_dialogue;
+
+    #[test]
+    fn skips_multi_message_chatgpt_threads_without_assistant_output() {
+        assert!(!continuation_has_sufficient_dialogue("chatgpt", 7, 0));
+        assert!(continuation_has_sufficient_dialogue("chatgpt", 1, 0));
+        assert!(continuation_has_sufficient_dialogue("chatgpt", 7, 1));
+        assert!(continuation_has_sufficient_dialogue("codex", 7, 0));
+        assert!(!continuation_has_sufficient_dialogue("chatgpt", 0, 0));
     }
 }
 
