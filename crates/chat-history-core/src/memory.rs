@@ -4,6 +4,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{db::open_database, ingest::IndexService};
 
@@ -129,6 +130,31 @@ pub struct CollaborationMemory {
     pub items: Vec<MemoryItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CollaborationMemoryAuthoringInput {
+    pub kind: MemoryKind,
+    pub key: String,
+    pub value: Value,
+    pub importance: u8,
+    pub confidence: f64,
+    pub valid_from: Option<f64>,
+    pub valid_until: Option<f64>,
+    pub supersedes_memory_id: Option<String>,
+    pub review_reason: String,
+    #[serde(default)]
+    pub evidence: Vec<MemoryEvidence>,
+    pub authored_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CollaborationMemoryRetirementInput {
+    pub memory_id: String,
+    pub review_reason: String,
+    #[serde(default)]
+    pub evidence: Vec<MemoryEvidence>,
+    pub retired_at: f64,
+}
+
 impl IndexService {
     pub fn put_memory_item(&self, item: &MemoryItem) -> anyhow::Result<()> {
         let conn = open_database(&self.data_home.paths().db_path)?;
@@ -229,6 +255,253 @@ impl IndexService {
             generated_at: now_epoch(),
             items,
         })
+    }
+
+    pub fn author_collaboration_memory(
+        &self,
+        input: &CollaborationMemoryAuthoringInput,
+    ) -> anyhow::Result<MemoryItem> {
+        validate_collaboration_authoring(input)?;
+        let canonical_value = canonical_json_string(&input.value)?;
+        let key = input.key.trim().to_string();
+        let memory_id = deterministic_collaboration_memory_id(
+            input.kind,
+            &key,
+            &canonical_value,
+            input.supersedes_memory_id.as_deref(),
+        );
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let tx = conn.unchecked_transaction()?;
+
+        if let Some(existing) = load_memory_item(&tx, &memory_id)? {
+            ensure!(
+                existing.scope == MemoryScope::Global
+                    && existing.kind == input.kind
+                    && existing.key == key
+                    && existing.value == input.value
+                    && existing.supersedes_memory_id == input.supersedes_memory_id,
+                "existing collaboration memory identity does not match authoring request"
+            );
+            return Ok(existing);
+        }
+
+        if input.supersedes_memory_id.is_none() {
+            let active: Option<String> = tx
+                .query_row(
+                    "SELECT memory_id FROM memory_items WHERE scope_type = 'global' AND scope_id = '' AND memory_key = ?1 AND status = 'active'",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            ensure!(
+                active.is_none(),
+                "active collaboration memory already exists for key {}; explicitly supersede it",
+                key
+            );
+        }
+
+        let item = MemoryItem {
+            memory_id,
+            scope: MemoryScope::Global,
+            kind: input.kind,
+            key,
+            value: input.value.clone(),
+            status: MemoryStatus::Active,
+            importance: input.importance,
+            confidence: input.confidence,
+            valid_from: input.valid_from.or(Some(input.authored_at)),
+            valid_until: input.valid_until,
+            supersedes_memory_id: input.supersedes_memory_id.clone(),
+            created_at: input.authored_at,
+            updated_at: input.authored_at,
+            last_verified_at: Some(input.authored_at),
+            evidence: annotate_operator_evidence(&input.evidence, &input.review_reason, "author"),
+        };
+        put_memory_item_tx(&tx, &item)?;
+        tx.commit()?;
+        Ok(item)
+    }
+
+    pub fn retire_collaboration_memory(
+        &self,
+        input: &CollaborationMemoryRetirementInput,
+    ) -> anyhow::Result<MemoryItem> {
+        validate_collaboration_retirement(input)?;
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let tx = conn.unchecked_transaction()?;
+        let mut item = load_memory_item(&tx, &input.memory_id)?
+            .ok_or_else(|| anyhow!("collaboration memory does not exist: {}", input.memory_id))?;
+        ensure!(
+            item.scope == MemoryScope::Global && collaboration_kind_allowed(item.kind),
+            "only global collaboration-rule memory can be retired"
+        );
+        if item.status == MemoryStatus::Archived {
+            return Ok(item);
+        }
+        ensure!(
+            item.status == MemoryStatus::Active,
+            "only active collaboration memory can be retired"
+        );
+        item.status = MemoryStatus::Archived;
+        item.updated_at = input.retired_at;
+        item.last_verified_at = Some(input.retired_at);
+        item.evidence.extend(annotate_operator_evidence(
+            &input.evidence,
+            &input.review_reason,
+            "retire",
+        ));
+        put_memory_item_tx(&tx, &item)?;
+        tx.commit()?;
+        Ok(item)
+    }
+}
+
+fn validate_collaboration_authoring(
+    input: &CollaborationMemoryAuthoringInput,
+) -> anyhow::Result<()> {
+    ensure!(
+        collaboration_kind_allowed(input.kind),
+        "collaboration memory kind must be invariant, preference, or decision"
+    );
+    ensure!(
+        !input.key.trim().is_empty(),
+        "collaboration memory key cannot be empty"
+    );
+    ensure!(
+        !input.value.is_null(),
+        "collaboration memory value cannot be null"
+    );
+    ensure!(
+        input.confidence.is_finite() && (0.0..=1.0).contains(&input.confidence),
+        "collaboration memory confidence must be between 0 and 1"
+    );
+    ensure!(
+        input.importance <= 100,
+        "collaboration memory importance must be <= 100"
+    );
+    ensure!(
+        !input.review_reason.trim().is_empty(),
+        "collaboration memory review reason cannot be empty"
+    );
+    ensure!(
+        !input.evidence.is_empty(),
+        "collaboration memory authoring requires at least one evidence reference"
+    );
+    ensure!(
+        input.authored_at.is_finite(),
+        "collaboration memory authored_at must be finite"
+    );
+    if let (Some(from), Some(until)) = (input.valid_from, input.valid_until) {
+        ensure!(
+            until >= from,
+            "collaboration memory validity interval is inverted"
+        );
+    }
+    validate_operator_evidence(&input.evidence)
+}
+
+fn validate_collaboration_retirement(
+    input: &CollaborationMemoryRetirementInput,
+) -> anyhow::Result<()> {
+    ensure!(
+        !input.memory_id.trim().is_empty(),
+        "collaboration memory id cannot be empty"
+    );
+    ensure!(
+        !input.review_reason.trim().is_empty(),
+        "collaboration memory retirement reason cannot be empty"
+    );
+    ensure!(
+        !input.evidence.is_empty(),
+        "collaboration memory retirement requires at least one evidence reference"
+    );
+    ensure!(
+        input.retired_at.is_finite(),
+        "collaboration memory retired_at must be finite"
+    );
+    validate_operator_evidence(&input.evidence)
+}
+
+fn validate_operator_evidence(evidence: &[MemoryEvidence]) -> anyhow::Result<()> {
+    for item in evidence {
+        ensure!(
+            !item.reference.trim().is_empty(),
+            "collaboration memory evidence reference cannot be empty"
+        );
+        ensure!(
+            item.created_at.is_finite(),
+            "collaboration memory evidence timestamp must be finite"
+        );
+    }
+    Ok(())
+}
+
+fn collaboration_kind_allowed(kind: MemoryKind) -> bool {
+    matches!(
+        kind,
+        MemoryKind::Invariant | MemoryKind::Preference | MemoryKind::Decision
+    )
+}
+
+fn annotate_operator_evidence(
+    evidence: &[MemoryEvidence],
+    review_reason: &str,
+    action: &str,
+) -> Vec<MemoryEvidence> {
+    evidence
+        .iter()
+        .map(|item| MemoryEvidence {
+            kind: item.kind,
+            reference: item.reference.clone(),
+            detail: serde_json::json!({
+                "source": "operator_collaboration_authoring",
+                "action": action,
+                "review_reason": review_reason,
+                "original_detail": item.detail.clone(),
+            }),
+            created_at: item.created_at,
+        })
+        .collect()
+}
+
+fn deterministic_collaboration_memory_id(
+    kind: MemoryKind,
+    key: &str,
+    canonical_value: &str,
+    supersedes_memory_id: Option<&str>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"collaboration-memory-v1");
+    for part in [
+        kind.as_str(),
+        key.trim(),
+        canonical_value,
+        supersedes_memory_id.unwrap_or(""),
+    ] {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    format!("collaboration-memory-v1:{}", hex::encode(digest.finalize()))
+}
+
+fn canonical_json_string(value: &Value) -> anyhow::Result<String> {
+    serde_json::to_string(&canonical_json_value(value))
+        .context("serializing canonical collaboration memory value")
+}
+
+fn canonical_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json_value).collect()),
+        Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut canonical = serde_json::Map::new();
+            for key in keys {
+                canonical.insert(key.clone(), canonical_json_value(&map[key]));
+            }
+            Value::Object(canonical)
+        }
+        _ => value.clone(),
     }
 }
 

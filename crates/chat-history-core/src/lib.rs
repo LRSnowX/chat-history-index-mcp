@@ -26,8 +26,9 @@ pub use chatgpt::{
 pub use data_home::{DataHome, ImportMode, ManagedPaths};
 pub use ingest::{ImportOptions, ImportReport, IndexService, decode_embedding, encode_embedding};
 pub use memory::{
-    CollaborationMemory, MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope,
-    MemoryStatus, ProjectWorkingMemory,
+    CollaborationMemory, CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
+    MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope, MemoryStatus,
+    ProjectWorkingMemory,
 };
 pub use memory_compile::{
     MemoryCandidate, MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidateOperation,

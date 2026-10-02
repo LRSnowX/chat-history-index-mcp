@@ -99,6 +99,16 @@ only; it never promotes them into durable Working Memory by itself:
   --evidence repository_state:<reference>
 ./scripts/chat-history-cli memory-candidate-reject <candidate-id> --reason "operator reason"
 ./scripts/chat-history-cli memory-health --project LEMonX
+./scripts/chat-history-cli memory-collaboration-list
+./scripts/chat-history-cli memory-collaboration-author \
+  --kind preference \
+  --key upstream_compatibility \
+  --value "Preserve upstream compatibility where practical." \
+  --reason "explicitly reviewed cross-project rule" \
+  --evidence user_statement:<conversation-reference>
+./scripts/chat-history-cli memory-collaboration-retire <memory-id> \
+  --reason "explicitly retired cross-project rule" \
+  --evidence user_statement:<conversation-reference>
 ```
 
 `memory-compile-plan` performs the same recent strong-match scan and bounded
@@ -136,6 +146,17 @@ promotion/reverification/stale-review history for one candidate.
 MemoryItem lifecycle counts, candidate lifecycle counts, pending age, and
 per-conversation compiler checkpoints including caught-up/behind turns and
 whether the current canonical snapshot still preserves the compiled prefix.
+
+Collaboration Memory authoring is also operator-only. `memory-collaboration-author`
+accepts only the stable global kinds `invariant`, `preference`, and `decision`;
+requires a non-empty review reason plus at least one `KIND:REFERENCE` evidence;
+and refuses to replace an active key unless `--supersedes <memory-id>` is
+provided explicitly. `--value` stores a string, while `--value-json` accepts a
+structured JSON value. Equivalent authoring retries are idempotent because the
+core generates a stable content-derived memory ID. `memory-collaboration-retire`
+archives an active global rule while retaining its prior evidence and the
+retirement review evidence. None of these authoring operations are exposed as
+model-facing MCP tools or invoked by the project memory compiler.
 
 The MCP server also exposes read-oriented project memory tools:
 `memory_search`, `memory_recent`, `memory_get_thread`, and

@@ -8,9 +8,10 @@ use std::{
 use anyhow::Context;
 use chat_history_core::{
     ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot,
+    CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
-    MemoryEvidence, MemoryEvidenceKind, MemoryModelClient, MemoryPromotionReview,
+    MemoryEvidence, MemoryEvidenceKind, MemoryKind, MemoryModelClient, MemoryPromotionReview,
     NormalizedConversation, SearchMode, SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -194,6 +195,41 @@ enum Command {
         project: String,
         #[arg(long, default_value_t = 30)]
         stale_after_days: u32,
+    },
+    /// List active stable cross-project collaboration rules.
+    MemoryCollaborationList,
+    /// Explicitly author or supersede one stable global collaboration rule.
+    MemoryCollaborationAuthor {
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        key: String,
+        #[arg(
+            long,
+            conflicts_with = "value_json",
+            required_unless_present = "value_json"
+        )]
+        value: Option<String>,
+        #[arg(long, conflicts_with = "value", required_unless_present = "value")]
+        value_json: Option<String>,
+        #[arg(long, default_value_t = 90)]
+        importance: u8,
+        #[arg(long, default_value_t = 1.0)]
+        confidence: f64,
+        #[arg(long)]
+        supersedes: Option<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "evidence", required = true)]
+        evidence: Vec<String>,
+    },
+    /// Explicitly retire one active global collaboration rule.
+    MemoryCollaborationRetire {
+        memory_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "evidence", required = true)]
+        evidence: Vec<String>,
     },
     Resume,
     Stats,
@@ -673,6 +709,60 @@ async fn main() -> anyhow::Result<()> {
             let report = service.memory_health(&project, stale_after_days)?;
             print_json(&report)?;
         }
+        Command::MemoryCollaborationList => {
+            print_json(&service.collaboration_memory()?)?;
+        }
+        Command::MemoryCollaborationAuthor {
+            kind,
+            key,
+            value,
+            value_json,
+            importance,
+            confidence,
+            supersedes,
+            reason,
+            evidence,
+        } => {
+            let authored_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let value = parse_collaboration_value(value, value_json)?;
+            let item = service.author_collaboration_memory(&CollaborationMemoryAuthoringInput {
+                kind: MemoryKind::parse(kind.trim())?,
+                key,
+                value,
+                importance,
+                confidence,
+                valid_from: None,
+                valid_until: None,
+                supersedes_memory_id: supersedes,
+                review_reason: reason,
+                evidence: parse_memory_evidence(
+                    &evidence,
+                    authored_at,
+                    "operator_collaboration_authoring_cli",
+                )?,
+                authored_at,
+            })?;
+            print_json(&item)?;
+        }
+        Command::MemoryCollaborationRetire {
+            memory_id,
+            reason,
+            evidence,
+        } => {
+            let retired_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let item =
+                service.retire_collaboration_memory(&CollaborationMemoryRetirementInput {
+                    memory_id,
+                    review_reason: reason,
+                    evidence: parse_memory_evidence(
+                        &evidence,
+                        retired_at,
+                        "operator_collaboration_retirement_cli",
+                    )?,
+                    retired_at,
+                })?;
+            print_json(&item)?;
+        }
         Command::Resume => {
             let report = service.resume().await?;
             print_json(&report)?;
@@ -787,24 +877,45 @@ fn parse_promotion_evidence(
     values: &[String],
     created_at: f64,
 ) -> anyhow::Result<Vec<MemoryEvidence>> {
+    parse_memory_evidence(values, created_at, "operator_promotion")
+}
+
+fn parse_memory_evidence(
+    values: &[String],
+    created_at: f64,
+    source: &str,
+) -> anyhow::Result<Vec<MemoryEvidence>> {
     values
         .iter()
         .map(|value| {
             let (kind, reference) = value.split_once(':').with_context(|| {
-                format!("invalid promotion evidence {value:?}; expected KIND:REFERENCE")
+                format!("invalid memory evidence {value:?}; expected KIND:REFERENCE")
             })?;
             anyhow::ensure!(
                 !reference.trim().is_empty(),
-                "promotion evidence reference cannot be empty"
+                "memory evidence reference cannot be empty"
             );
             Ok(MemoryEvidence {
                 kind: MemoryEvidenceKind::parse(kind.trim())?,
                 reference: reference.trim().to_string(),
-                detail: serde_json::json!({ "source": "operator_promotion" }),
+                detail: serde_json::json!({ "source": source }),
                 created_at,
             })
         })
         .collect()
+}
+
+fn parse_collaboration_value(
+    value: Option<String>,
+    value_json: Option<String>,
+) -> anyhow::Result<serde_json::Value> {
+    match (value, value_json) {
+        (Some(value), None) => Ok(serde_json::Value::String(value)),
+        (None, Some(value_json)) => {
+            serde_json::from_str(&value_json).context("parsing --value-json")
+        }
+        _ => anyhow::bail!("exactly one of --value or --value-json is required"),
+    }
 }
 
 fn parse_since(value: &str) -> anyhow::Result<f64> {

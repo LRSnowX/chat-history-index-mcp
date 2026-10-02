@@ -1,4 +1,5 @@
 use chat_history_core::{
+    CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
     DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, IndexService, MemoryCandidateDecision,
     MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus,
     MemoryCheckpointPrefixStatus, MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind,
@@ -404,6 +405,152 @@ fn collaboration_memory_includes_only_active_global_rules() -> anyhow::Result<()
         .map(|item| item.memory_id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, vec!["decision", "invariant", "preference"]);
+    Ok(())
+}
+
+#[test]
+fn collaboration_memory_operator_authoring_requires_review_and_explicit_supersession()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let evidence = |reference: &str, at: f64| MemoryEvidence {
+        kind: MemoryEvidenceKind::UserStatement,
+        reference: reference.to_string(),
+        detail: json!({"turn": 1}),
+        created_at: at,
+    };
+    let author = |kind: MemoryKind,
+                  value: serde_json::Value,
+                  supersedes_memory_id: Option<String>,
+                  reason: &str,
+                  at: f64|
+     -> CollaborationMemoryAuthoringInput {
+        CollaborationMemoryAuthoringInput {
+            kind,
+            key: "subagent_policy".to_string(),
+            value,
+            importance: 100,
+            confidence: 1.0,
+            valid_from: None,
+            valid_until: None,
+            supersedes_memory_id,
+            review_reason: reason.to_string(),
+            evidence: vec![evidence("conversation:user-policy", at)],
+            authored_at: at,
+        }
+    };
+
+    let invalid = author(
+        MemoryKind::State,
+        json!({"text": "transient state"}),
+        None,
+        "not a global stable rule",
+        10.0,
+    );
+    let error = service
+        .author_collaboration_memory(&invalid)
+        .expect_err("transient kinds must not become collaboration memory");
+    assert!(
+        error
+            .to_string()
+            .contains("invariant, preference, or decision")
+    );
+
+    let mut missing_review = author(
+        MemoryKind::Preference,
+        json!({"text": "Do not use subagents without explicit approval."}),
+        None,
+        "",
+        11.0,
+    );
+    missing_review.evidence.clear();
+    assert!(
+        service
+            .author_collaboration_memory(&missing_review)
+            .is_err()
+    );
+
+    let first_request = author(
+        MemoryKind::Preference,
+        json!({
+            "text": "Do not use subagents without explicit approval.",
+            "scope": "all development projects"
+        }),
+        None,
+        "User explicitly established this as a cross-project collaboration rule.",
+        20.0,
+    );
+    let first = service.author_collaboration_memory(&first_request)?;
+    assert_eq!(first.scope, MemoryScope::Global);
+    assert_eq!(first.status, MemoryStatus::Active);
+    assert_eq!(first.evidence.len(), 1);
+    assert_eq!(
+        first.evidence[0].detail["review_reason"],
+        "User explicitly established this as a cross-project collaboration rule."
+    );
+
+    let mut reordered_value = serde_json::Map::new();
+    reordered_value.insert("scope".to_string(), json!("all development projects"));
+    reordered_value.insert(
+        "text".to_string(),
+        json!("Do not use subagents without explicit approval."),
+    );
+    let replay = service.author_collaboration_memory(&CollaborationMemoryAuthoringInput {
+        key: "  subagent_policy  ".to_string(),
+        value: serde_json::Value::Object(reordered_value),
+        authored_at: 99.0,
+        ..first_request.clone()
+    })?;
+    assert_eq!(replay.memory_id, first.memory_id);
+    assert_eq!(replay.created_at, first.created_at);
+    assert_eq!(replay.evidence, first.evidence);
+
+    let conflicting = author(
+        MemoryKind::Preference,
+        json!({"text": "Subagents may be used automatically."}),
+        None,
+        "Attempted silent replacement.",
+        30.0,
+    );
+    let error = service
+        .author_collaboration_memory(&conflicting)
+        .expect_err("same active key requires explicit supersession");
+    assert!(error.to_string().contains("explicitly supersede"));
+
+    let replacement_request = author(
+        MemoryKind::Decision,
+        json!({"text": "Subagents remain explicit-approval only unless policy is changed by the user."}),
+        Some(first.memory_id.clone()),
+        "Operator reviewed the clarified global decision.",
+        40.0,
+    );
+    let replacement = service.author_collaboration_memory(&replacement_request)?;
+    assert_eq!(
+        service.get_memory_item(&first.memory_id)?.unwrap().status,
+        MemoryStatus::Superseded
+    );
+    let collaboration = service.collaboration_memory()?;
+    assert_eq!(collaboration.items.len(), 1);
+    assert_eq!(collaboration.items[0].memory_id, replacement.memory_id);
+
+    let retired = service.retire_collaboration_memory(&CollaborationMemoryRetirementInput {
+        memory_id: replacement.memory_id.clone(),
+        review_reason: "The global rule was explicitly retired by the operator.".to_string(),
+        evidence: vec![evidence("conversation:user-retirement", 50.0)],
+        retired_at: 50.0,
+    })?;
+    assert_eq!(retired.status, MemoryStatus::Archived);
+    assert_eq!(retired.evidence.len(), 2);
+    assert!(service.collaboration_memory()?.items.is_empty());
+    let replay_retire =
+        service.retire_collaboration_memory(&CollaborationMemoryRetirementInput {
+            memory_id: replacement.memory_id,
+            review_reason: "Repeated retirement command.".to_string(),
+            evidence: vec![evidence("conversation:user-retirement", 60.0)],
+            retired_at: 60.0,
+        })?;
+    assert_eq!(replay_retire.status, MemoryStatus::Archived);
+    assert_eq!(replay_retire.evidence.len(), 2);
     Ok(())
 }
 

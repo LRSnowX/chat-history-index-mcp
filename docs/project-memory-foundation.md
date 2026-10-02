@@ -332,11 +332,19 @@ dynamic-memory budget before ProjectWorkingMemory and recent continuation.
 Provenance references inside CollaborationMemory do not grant conversation
 thread access.
 
-The remaining Phase 5 work is authoring policy: the current read/handoff path is
-complete, but ordinary project conversation compilation does not automatically
-promote statements into global CollaborationMemory. Cross-project rules should
-remain explicit/operator-reviewed until a conservative global-memory policy is
-defined.
+The read/handoff path and explicit authoring policy are implemented.
+Cross-project rules are authored only through operator CLI commands. Authoring
+accepts only `invariant`, `preference`, or `decision`, requires a review reason
+and provenance evidence, generates a deterministic content-derived ID, and
+requires explicit supersession when an active global key already exists.
+Retirement is also explicit/operator-reviewed and archives the rule without
+discarding its prior evidence. Ordinary project compilation still cannot create
+or promote global CollaborationMemory, and no model-facing global-memory write
+surface exists.
+
+Future Phase 5 work should remain conservative: only add automatic global
+authoring if a policy can distinguish explicit cross-project user rules from
+project-local decisions with high confidence and preserve operator review.
 
 ### Phase 6 follow-up — Memory health
 
@@ -350,6 +358,8 @@ The read-only `memory-health` CLI now exposes:
 - canonical-prefix changed/missing detection;
 - tracked rejected-lower-quality evidence counts.
 
-Future health work should add handoff byte-budget telemetry, richer
-unresolved-conflict reporting, and broader incomplete conversation evidence
+DevSpace already exposes per-handoff byte-budget telemetry (`bytes_used`,
+`byte_budget`, and per-section truncation). Future health work should connect
+that host telemetry with CHIM diagnostics where useful, and add richer
+unresolved-conflict reporting plus broader incomplete-conversation evidence
 diagnostics.
