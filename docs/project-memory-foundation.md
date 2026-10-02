@@ -297,8 +297,13 @@ incompatible claims.
 
 Remaining Phase 4 work is retrieval policy quality rather than wiring:
 
-- retrieval/answer evaluation benchmarks for current-state, decision-history,
-  blocker, and task questions;
+- the initial deterministic retrieval benchmark now covers current-state
+  (English and Chinese), blocker, task, decision-policy, and no-match fallback
+  cases while asserting that ranking reorders rather than filters active
+  Working Memory;
+- future evaluation should expand from retrieval-only checks into answer
+  synthesis against conflicting historical evidence and live authoritative
+  state;
 - optional stronger lexical/semantic memory-item ranking when deterministic
   key/kind/value matching is insufficient.
 
