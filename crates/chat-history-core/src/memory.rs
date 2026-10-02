@@ -1,6 +1,6 @@
 use anyhow::{Context, anyhow, ensure};
 use chrono::Utc;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -125,134 +125,9 @@ pub struct ProjectWorkingMemory {
 
 impl IndexService {
     pub fn put_memory_item(&self, item: &MemoryItem) -> anyhow::Result<()> {
-        validate_memory_item(item)?;
         let conn = open_database(&self.data_home.paths().db_path)?;
         let tx = conn.unchecked_transaction()?;
-        let (scope_type, scope_id) = item.scope.db_parts();
-
-        let existing_identity: Option<(String, String, String, Option<String>)> = tx
-            .query_row(
-                "SELECT scope_type, scope_id, memory_key, supersedes_memory_id FROM memory_items WHERE memory_id = ?1",
-                params![item.memory_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        if let Some((
-            existing_scope_type,
-            existing_scope_id,
-            existing_key,
-            existing_supersedes_memory_id,
-        )) = existing_identity.as_ref()
-        {
-            ensure!(
-                existing_scope_type == scope_type
-                    && existing_scope_id == scope_id
-                    && existing_key == &item.key,
-                "memory identity is immutable for {}",
-                item.memory_id
-            );
-            ensure!(
-                existing_supersedes_memory_id.as_deref() == item.supersedes_memory_id.as_deref(),
-                "memory supersession identity is immutable for {}",
-                item.memory_id
-            );
-        }
-
-        if let Some(supersedes) = item.supersedes_memory_id.as_deref() {
-            ensure!(
-                supersedes != item.memory_id,
-                "memory item cannot supersede itself"
-            );
-            let old: Option<(String, String, String, String)> = tx
-                .query_row(
-                    "SELECT scope_type, scope_id, memory_key, status FROM memory_items WHERE memory_id = ?1",
-                    params![supersedes],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .optional()?;
-            let Some((old_scope_type, old_scope_id, old_key, old_status)) = old else {
-                return Err(anyhow!(
-                    "superseded memory item does not exist: {supersedes}"
-                ));
-            };
-            ensure!(
-                old_scope_type == scope_type && old_scope_id == scope_id && old_key == item.key,
-                "superseded memory item must have the same scope and key"
-            );
-            if old_status == MemoryStatus::Active.as_str() {
-                tx.execute(
-                    "UPDATE memory_items SET status = 'superseded', updated_at = ?2 WHERE memory_id = ?1",
-                    params![supersedes, item.updated_at],
-                )?;
-            } else {
-                ensure!(
-                    old_status == MemoryStatus::Superseded.as_str() && existing_identity.is_some(),
-                    "only an active memory item can be superseded"
-                );
-            }
-        }
-
-        tx.execute(
-            r#"
-            INSERT INTO memory_items (
-              memory_id, scope_type, scope_id, kind, memory_key, value_json, status,
-              importance, confidence, valid_from, valid_until, supersedes_memory_id,
-              created_at, updated_at, last_verified_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-            ON CONFLICT(memory_id) DO UPDATE SET
-              kind = excluded.kind,
-              value_json = excluded.value_json,
-              status = excluded.status,
-              importance = excluded.importance,
-              confidence = excluded.confidence,
-              valid_from = excluded.valid_from,
-              valid_until = excluded.valid_until,
-              supersedes_memory_id = excluded.supersedes_memory_id,
-              updated_at = excluded.updated_at,
-              last_verified_at = excluded.last_verified_at
-            "#,
-            params![
-                item.memory_id,
-                scope_type,
-                scope_id,
-                item.kind.as_str(),
-                item.key,
-                serde_json::to_string(&item.value)?,
-                item.status.as_str(),
-                i64::from(item.importance),
-                item.confidence,
-                item.valid_from,
-                item.valid_until,
-                item.supersedes_memory_id,
-                item.created_at,
-                item.updated_at,
-                item.last_verified_at,
-            ],
-        )
-        .with_context(|| format!("writing memory item {}", item.memory_id))?;
-
-        tx.execute(
-            "DELETE FROM memory_evidence WHERE memory_id = ?1",
-            params![item.memory_id],
-        )?;
-        for evidence in &item.evidence {
-            tx.execute(
-                r#"
-                INSERT INTO memory_evidence (
-                  memory_id, evidence_kind, evidence_ref, detail_json, created_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                "#,
-                params![
-                    item.memory_id,
-                    evidence.kind.as_str(),
-                    evidence.reference,
-                    serde_json::to_string(&evidence.detail)?,
-                    evidence.created_at,
-                ],
-            )?;
-        }
+        put_memory_item_tx(&tx, item)?;
         tx.commit()?;
         Ok(())
     }
@@ -291,6 +166,136 @@ impl IndexService {
             items,
         })
     }
+}
+
+pub(crate) fn put_memory_item_tx(tx: &Transaction<'_>, item: &MemoryItem) -> anyhow::Result<()> {
+    validate_memory_item(item)?;
+    let (scope_type, scope_id) = item.scope.db_parts();
+
+    let existing_identity: Option<(String, String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT scope_type, scope_id, memory_key, supersedes_memory_id FROM memory_items WHERE memory_id = ?1",
+            params![item.memory_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    if let Some((
+        existing_scope_type,
+        existing_scope_id,
+        existing_key,
+        existing_supersedes_memory_id,
+    )) = existing_identity.as_ref()
+    {
+        ensure!(
+            existing_scope_type == scope_type
+                && existing_scope_id == scope_id
+                && existing_key == &item.key,
+            "memory identity is immutable for {}",
+            item.memory_id
+        );
+        ensure!(
+            existing_supersedes_memory_id.as_deref() == item.supersedes_memory_id.as_deref(),
+            "memory supersession identity is immutable for {}",
+            item.memory_id
+        );
+    }
+
+    if let Some(supersedes) = item.supersedes_memory_id.as_deref() {
+        ensure!(
+            supersedes != item.memory_id,
+            "memory item cannot supersede itself"
+        );
+        let old: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT scope_type, scope_id, memory_key, status FROM memory_items WHERE memory_id = ?1",
+                params![supersedes],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((old_scope_type, old_scope_id, old_key, old_status)) = old else {
+            return Err(anyhow!(
+                "superseded memory item does not exist: {supersedes}"
+            ));
+        };
+        ensure!(
+            old_scope_type == scope_type && old_scope_id == scope_id && old_key == item.key,
+            "superseded memory item must have the same scope and key"
+        );
+        if old_status == MemoryStatus::Active.as_str() {
+            tx.execute(
+                "UPDATE memory_items SET status = 'superseded', updated_at = ?2 WHERE memory_id = ?1",
+                params![supersedes, item.updated_at],
+            )?;
+        } else {
+            ensure!(
+                old_status == MemoryStatus::Superseded.as_str() && existing_identity.is_some(),
+                "only an active memory item can be superseded"
+            );
+        }
+    }
+
+    tx.execute(
+        r#"
+        INSERT INTO memory_items (
+          memory_id, scope_type, scope_id, kind, memory_key, value_json, status,
+          importance, confidence, valid_from, valid_until, supersedes_memory_id,
+          created_at, updated_at, last_verified_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        ON CONFLICT(memory_id) DO UPDATE SET
+          kind = excluded.kind,
+          value_json = excluded.value_json,
+          status = excluded.status,
+          importance = excluded.importance,
+          confidence = excluded.confidence,
+          valid_from = excluded.valid_from,
+          valid_until = excluded.valid_until,
+          supersedes_memory_id = excluded.supersedes_memory_id,
+          updated_at = excluded.updated_at,
+          last_verified_at = excluded.last_verified_at
+        "#,
+        params![
+            item.memory_id,
+            scope_type,
+            scope_id,
+            item.kind.as_str(),
+            item.key,
+            serde_json::to_string(&item.value)?,
+            item.status.as_str(),
+            i64::from(item.importance),
+            item.confidence,
+            item.valid_from,
+            item.valid_until,
+            item.supersedes_memory_id,
+            item.created_at,
+            item.updated_at,
+            item.last_verified_at,
+        ],
+    )
+    .with_context(|| format!("writing memory item {}", item.memory_id))?;
+
+    tx.execute(
+        "DELETE FROM memory_evidence WHERE memory_id = ?1",
+        params![item.memory_id],
+    )?;
+    for evidence in &item.evidence {
+        tx.execute(
+            r#"
+            INSERT INTO memory_evidence (
+              memory_id, evidence_kind, evidence_ref, detail_json, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                item.memory_id,
+                evidence.kind.as_str(),
+                evidence.reference,
+                serde_json::to_string(&evidence.detail)?,
+                evidence.created_at,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_memory_item(item: &MemoryItem) -> anyhow::Result<()> {

@@ -200,6 +200,53 @@ CREATE TABLE IF NOT EXISTS memory_evidence (
   PRIMARY KEY(memory_id, evidence_kind, evidence_ref)
 );
 
+CREATE TABLE IF NOT EXISTS memory_compile_checkpoints (
+  project TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  source_snapshot_id TEXT NOT NULL REFERENCES conversation_snapshots(snapshot_id),
+  through_turn_index INTEGER NOT NULL,
+  through_message_id TEXT NOT NULL,
+  prefix_sha256_hex TEXT NOT NULL,
+  compiler_version TEXT NOT NULL,
+  model_label TEXT,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY(project, conversation_id)
+);
+
+CREATE TABLE IF NOT EXISTS memory_candidates (
+  candidate_id TEXT PRIMARY KEY,
+  project TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  source_snapshot_id TEXT NOT NULL REFERENCES conversation_snapshots(snapshot_id),
+  operation TEXT NOT NULL CHECK(operation IN ('add', 'supersede', 'resolve', 'archive')),
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'promoted', 'rejected', 'stale')),
+  rationale TEXT NOT NULL,
+  compiler_version TEXT NOT NULL,
+  model_label TEXT,
+  through_turn_index INTEGER NOT NULL,
+  created_at REAL NOT NULL,
+  decided_at REAL,
+  decision_reason TEXT,
+  promoted_memory_id TEXT REFERENCES memory_items(memory_id)
+);
+
+CREATE TABLE IF NOT EXISTS memory_candidate_evidence (
+  candidate_id TEXT NOT NULL REFERENCES memory_candidates(candidate_id) ON DELETE CASCADE,
+  evidence_kind TEXT NOT NULL CHECK(evidence_kind IN (
+    'user_statement',
+    'conversation_turn',
+    'document',
+    'git_commit',
+    'repository_state',
+    'devspace_result'
+  )),
+  evidence_ref TEXT NOT NULL,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at REAL NOT NULL,
+  PRIMARY KEY(candidate_id, evidence_kind, evidence_ref)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
   conversation_id UNINDEXED,
   title,
@@ -228,4 +275,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_active_key
   ON memory_items(scope_type, scope_id, memory_key)
   WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_memory_evidence_memory_id ON memory_evidence(memory_id);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_project_status
+  ON memory_candidates(project, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_conversation
+  ON memory_candidates(conversation_id, through_turn_index);
+CREATE INDEX IF NOT EXISTS idx_memory_candidate_evidence_candidate
+  ON memory_candidate_evidence(candidate_id);
 "#;

@@ -9,6 +9,7 @@ pub mod error;
 pub mod gemini;
 pub mod ingest;
 pub mod memory;
+pub mod memory_compile;
 pub mod models;
 pub mod openai;
 pub mod ranking;
@@ -25,6 +26,11 @@ pub use ingest::{ImportOptions, ImportReport, IndexService, decode_embedding, en
 pub use memory::{
     MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope, MemoryStatus,
     ProjectWorkingMemory,
+};
+pub use memory_compile::{
+    MemoryCandidate, MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidateOperation,
+    MemoryCandidatePayload, MemoryCandidateStatus, MemoryCompilationBatch,
+    MemoryCompilationStageResult, MemoryCompileCheckpoint,
 };
 pub use models::{
     ConversationDetail, ConversationRecord, DatabaseHealth, IndexStats, JobKind, JobStatus,

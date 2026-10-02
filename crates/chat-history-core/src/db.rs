@@ -16,7 +16,7 @@ use crate::{
     sql::SCHEMA,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 const REQUIRED_TABLES: &[&str] = &[
     "conversations",

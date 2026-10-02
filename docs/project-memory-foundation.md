@@ -142,10 +142,12 @@ canonical evidence is preserved before mutation.
 
 ## Schema lifecycle
 
-Project Memory Foundation uses schema version 3:
+Project Memory Foundation uses schema version 4:
 
 - version 2 introduced MemoryItem and MemoryEvidence;
 - version 3 introduced retained conversation/message evidence snapshots.
+- version 4 introduced incremental compiler checkpoints, staged memory
+  candidates, candidate provenance, and auditable promotion decisions.
 
 The new tables are created by normal database opening. Legacy version-1
 databases and backups remain restorable: pre-migration health inspection keeps
@@ -169,11 +171,19 @@ The current implementation provides:
 - read-only ProjectWorkingMemory delivery through `memory_project_context`;
 - DevSpace handoff integration that prioritizes bounded working memory before
   recent conversation continuation within one shared bootstrap budget;
+- transactional memory compilation staging against canonical conversation
+  snapshots;
+- per-project/conversation compile checkpoints with immutable evidence-prefix
+  hashes so edited history cannot silently advance an old compile cursor;
+- staged add/supersede/resolve/archive candidates that do not mutate
+  ProjectWorkingMemory before promotion;
+- transactional candidate promotion, explicit rejection, stale-candidate
+  detection, and retained decision reasons;
 - schema-v1 restore compatibility.
 
 It does not yet provide:
 
-- a Memory Compiler;
+- the model-driven Memory Compiler that generates staged candidates;
 - automatic extraction from new conversation turns;
 - memory-first semantic search;
 - automatic resolution/supersession policies;
@@ -194,19 +204,28 @@ The initial evidence snapshot layer is implemented. Follow-up work should add:
 - snapshot inspection/health APIs;
 - optional historical backfill when complete snapshot coverage is useful.
 
-### Phase 3 — Incremental Memory Compiler
+### Phase 3 follow-up — Model-driven Incremental Memory Compiler
 
-Process only new evidence since the last compiled turn/snapshot and emit
-candidate operations:
+The durable staging/promotion state machine is implemented. The next compiler
+slice should process only new evidence since the last compiled snapshot prefix
+and emit staged candidate operations:
 
 - add
-- update
-- resolve
 - supersede
+- resolve
 - archive
 
-Compiler output must preserve provenance and must not silently override stronger
-evidence.
+An ordinary update is represented as an explicit supersession so the previous
+memory remains auditable.
+
+Compiler output must preserve provenance and cannot write MemoryItems directly.
+Candidates become durable memory only through promotion. Promotion revalidates
+the candidate evidence prefix against the current canonical conversation
+snapshot; edited or branched evidence becomes stale instead of mutating current
+memory.
+
+The model/compiler process itself is not implemented yet. No MCP model-facing
+memory write surface exists.
 
 ### Phase 4 — Memory-first retrieval
 
