@@ -122,6 +122,45 @@ pub struct ProjectWorkingMemory {
     pub project: String,
     pub generated_at: f64,
     pub items: Vec<MemoryItem>,
+    #[serde(default)]
+    pub verification: Vec<ProjectWorkingMemoryVerification>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkingMemoryClass {
+    Stable,
+    Operational,
+    Tentative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkingMemoryEvidenceStrength {
+    StrongIndependent,
+    UserAsserted,
+    ConversationOnly,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkingMemoryVerificationState {
+    StronglyVerified,
+    CurrentByEvidence,
+    NeedsRevalidation,
+    Tentative,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectWorkingMemoryVerification {
+    pub memory_id: String,
+    pub class: WorkingMemoryClass,
+    pub evidence_strength: WorkingMemoryEvidenceStrength,
+    pub state: WorkingMemoryVerificationState,
+    pub reason: Option<String>,
+    pub latest_project_evidence_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -190,6 +229,13 @@ impl IndexService {
             !project.trim().is_empty(),
             "project memory scope cannot be empty"
         );
+        let generated_at = now_epoch();
+        let latest_project_evidence_at = self
+            .strong_project_conversations(project)?
+            .into_iter()
+            .filter_map(|conversation| conversation.update_time.or(conversation.create_time))
+            .filter(|timestamp| timestamp.is_finite())
+            .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         let conn = open_database(&self.data_home.paths().db_path)?;
         let mut stmt = conn.prepare(
             r#"
@@ -222,10 +268,15 @@ impl IndexService {
                     .then_with(|| left.memory_id.cmp(&right.memory_id))
             });
         }
+        let verification = items
+            .iter()
+            .map(|item| working_memory_verification(item, generated_at, latest_project_evidence_at))
+            .collect();
         Ok(ProjectWorkingMemory {
             project: project.to_string(),
-            generated_at: now_epoch(),
+            generated_at,
             items,
+            verification,
         })
     }
 
@@ -503,6 +554,95 @@ fn canonical_json_value(value: &Value) -> Value {
         }
         _ => value.clone(),
     }
+}
+
+fn working_memory_verification(
+    item: &MemoryItem,
+    generated_at: f64,
+    latest_project_evidence_at: Option<f64>,
+) -> ProjectWorkingMemoryVerification {
+    let class = working_memory_class(item.kind);
+    let evidence_strength = working_memory_evidence_strength(&item.evidence);
+    let verified_at = item.last_verified_at.unwrap_or(item.updated_at);
+
+    let (state, reason) = if item
+        .valid_until
+        .is_some_and(|valid_until| valid_until <= generated_at)
+    {
+        (
+            WorkingMemoryVerificationState::Expired,
+            Some("memory validity window has ended".to_string()),
+        )
+    } else if class == WorkingMemoryClass::Tentative {
+        (
+            WorkingMemoryVerificationState::Tentative,
+            Some("hypothesis memory remains tentative until independently verified".to_string()),
+        )
+    } else if evidence_strength == WorkingMemoryEvidenceStrength::StrongIndependent {
+        (WorkingMemoryVerificationState::StronglyVerified, None)
+    } else if class == WorkingMemoryClass::Operational
+        && latest_project_evidence_at.is_some_and(|latest| latest > verified_at)
+    {
+        (
+            WorkingMemoryVerificationState::NeedsRevalidation,
+            Some(
+                "newer strongly matched project conversation evidence exists after this operational memory was last verified"
+                    .to_string(),
+            ),
+        )
+    } else {
+        (WorkingMemoryVerificationState::CurrentByEvidence, None)
+    };
+
+    ProjectWorkingMemoryVerification {
+        memory_id: item.memory_id.clone(),
+        class,
+        evidence_strength,
+        state,
+        reason,
+        latest_project_evidence_at,
+    }
+}
+
+fn working_memory_class(kind: MemoryKind) -> WorkingMemoryClass {
+    match kind {
+        MemoryKind::State | MemoryKind::Blocker | MemoryKind::Task => {
+            WorkingMemoryClass::Operational
+        }
+        MemoryKind::Hypothesis => WorkingMemoryClass::Tentative,
+        MemoryKind::Invariant
+        | MemoryKind::Preference
+        | MemoryKind::Decision
+        | MemoryKind::Result
+        | MemoryKind::ArtifactReference => WorkingMemoryClass::Stable,
+    }
+}
+
+fn working_memory_evidence_strength(evidence: &[MemoryEvidence]) -> WorkingMemoryEvidenceStrength {
+    if evidence.iter().any(|item| {
+        matches!(
+            item.kind,
+            MemoryEvidenceKind::Document
+                | MemoryEvidenceKind::GitCommit
+                | MemoryEvidenceKind::RepositoryState
+                | MemoryEvidenceKind::DevspaceResult
+        )
+    }) {
+        return WorkingMemoryEvidenceStrength::StrongIndependent;
+    }
+    if evidence
+        .iter()
+        .any(|item| item.kind == MemoryEvidenceKind::UserStatement)
+    {
+        return WorkingMemoryEvidenceStrength::UserAsserted;
+    }
+    if evidence
+        .iter()
+        .any(|item| item.kind == MemoryEvidenceKind::ConversationTurn)
+    {
+        return WorkingMemoryEvidenceStrength::ConversationOnly;
+    }
+    WorkingMemoryEvidenceStrength::None
 }
 
 fn memory_query_score(item: &MemoryItem, query: &str) -> u32 {

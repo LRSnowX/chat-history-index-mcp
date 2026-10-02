@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     db::open_database,
     ingest::IndexService,
+    memory::{ProjectWorkingMemoryVerification, WorkingMemoryVerificationState},
     memory_compile::{MemoryCandidateRevalidationProblem, snapshot_prefix_sha256_hex},
 };
 
@@ -26,6 +27,15 @@ pub struct MemoryCandidateStatusCounts {
     pub promoted: usize,
     pub rejected: usize,
     pub stale: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct WorkingMemoryVerificationCounts {
+    pub strongly_verified: usize,
+    pub current_by_evidence: usize,
+    pub needs_revalidation: usize,
+    pub tentative: usize,
+    pub expired: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -71,6 +81,10 @@ pub struct MemoryHealthReport {
     pub active_unverified: usize,
     pub active_stale_or_unverified: usize,
     pub oldest_active_updated_at: Option<f64>,
+    pub working_memory_verification: WorkingMemoryVerificationCounts,
+    pub working_memory_flagged_count: usize,
+    pub working_memory_flagged_truncated: bool,
+    pub working_memory_flagged: Vec<ProjectWorkingMemoryVerification>,
     pub candidates: MemoryCandidateStatusCounts,
     pub oldest_pending_created_at: Option<f64>,
     pub checkpoints: Vec<MemoryCheckpointHealth>,
@@ -147,6 +161,41 @@ impl IndexService {
             params![project, stale_before],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
+        let working_memory = self.project_working_memory(project)?;
+        let mut working_memory_verification = WorkingMemoryVerificationCounts::default();
+        for verification in &working_memory.verification {
+            match verification.state {
+                WorkingMemoryVerificationState::StronglyVerified => {
+                    working_memory_verification.strongly_verified += 1;
+                }
+                WorkingMemoryVerificationState::CurrentByEvidence => {
+                    working_memory_verification.current_by_evidence += 1;
+                }
+                WorkingMemoryVerificationState::NeedsRevalidation => {
+                    working_memory_verification.needs_revalidation += 1;
+                }
+                WorkingMemoryVerificationState::Tentative => {
+                    working_memory_verification.tentative += 1;
+                }
+                WorkingMemoryVerificationState::Expired => {
+                    working_memory_verification.expired += 1;
+                }
+            }
+        }
+        let mut working_memory_flagged = working_memory
+            .verification
+            .into_iter()
+            .filter(|verification| {
+                matches!(
+                    verification.state,
+                    WorkingMemoryVerificationState::NeedsRevalidation
+                        | WorkingMemoryVerificationState::Tentative
+                        | WorkingMemoryVerificationState::Expired
+                )
+            })
+            .collect::<Vec<_>>();
+        let working_memory_flagged_count = working_memory_flagged.len();
+        working_memory_flagged.truncate(MAX_HEALTH_DETAIL_ITEMS);
 
         let mut candidates = MemoryCandidateStatusCounts::default();
         {
@@ -353,6 +402,11 @@ impl IndexService {
             active_unverified: usize::try_from(active_unverified)?,
             active_stale_or_unverified: usize::try_from(active_stale_or_unverified)?,
             oldest_active_updated_at,
+            working_memory_verification,
+            working_memory_flagged_count,
+            working_memory_flagged_truncated: working_memory_flagged_count
+                > MAX_HEALTH_DETAIL_ITEMS,
+            working_memory_flagged,
             candidates,
             oldest_pending_created_at,
             checkpoints,

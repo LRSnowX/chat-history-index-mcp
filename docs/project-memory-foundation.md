@@ -305,6 +305,20 @@ importance/recency policy. Query ranking never filters active memories; it only
 promotes relevant items before the bounded response is truncated. Unscoped
 search remains the original hybrid evidence search.
 
+ProjectWorkingMemory also carries a read-only `verification` sidecar keyed by
+`memory_id`. It does not change or delete MemoryItems. The sidecar classifies
+stable, operational, and tentative memories; summarizes provenance strength;
+and marks operational state/task/blocker memories as `needs_revalidation` when
+newer strongly matched project conversation evidence exists after the memory
+was last verified. Validity-window expiry and hypothesis/tentative state are
+reported explicitly.
+
+This CHIM-side signal is intentionally conservative and incomplete. It can
+detect evidence-stream drift but cannot prove that the live repository has
+changed because CHIM does not own project-to-repository path resolution. Live
+Git state remains DevSpace authority and must be combined with this sidecar for
+host-side operational-memory revalidation.
+
 DevSpace passes the response through unchanged and continues to authorize
 `memory_get_thread` only from returned conversation/evidence hits; provenance
 references inside Working Memory do not expand thread authorization.
@@ -343,7 +357,10 @@ The DevSpace HandoffPacket now combines:
 The repository snapshot includes branch/HEAD, optional upstream divergence,
 dirty-state counters, and a bounded changed-path sample. DevSpace exposes these
 live/authoritative sections explicitly and instructs the host to prefer them
-over stale stored memory when they conflict.
+over stale stored memory when they conflict. A repository HEAD commit timestamp
+is the next host-side freshness anchor so conversation-only operational memories
+can be demoted for revalidation when Git has advanced beyond their verification
+time without requiring CHIM to know local repository paths.
 
 CollaborationMemory is materialized from active global MemoryItems, but only
 the stable rule-like kinds `invariant`, `preference`, and `decision` enter
@@ -376,6 +393,9 @@ The read-only `memory-health` CLI now exposes:
 - working-memory age;
 - active/resolved/superseded item counts;
 - stale/unverified memory;
+- ProjectWorkingMemory verification counts for strongly verified,
+  current-by-evidence, needs-revalidation, tentative, and expired active
+  memories, plus a bounded flagged-item list;
 - candidate lifecycle counts and oldest pending age;
 - per-checkpoint caught-up/behind turns;
 - canonical-prefix changed/missing detection;

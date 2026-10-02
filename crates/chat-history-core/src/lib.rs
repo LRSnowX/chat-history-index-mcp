@@ -29,7 +29,8 @@ pub use ingest::{ImportOptions, ImportReport, IndexService, decode_embedding, en
 pub use memory::{
     CollaborationMemory, CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
     MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope, MemoryStatus,
-    ProjectWorkingMemory,
+    ProjectWorkingMemory, ProjectWorkingMemoryVerification, WorkingMemoryClass,
+    WorkingMemoryEvidenceStrength, WorkingMemoryVerificationState,
 };
 pub use memory_compile::{
     MemoryCandidate, MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidateOperation,
@@ -47,6 +48,7 @@ pub use memory_compiler::{
 pub use memory_health::{
     IncompleteCanonicalConversationHealth, MemoryCandidateStatusCounts, MemoryCheckpointHealth,
     MemoryCheckpointPrefixStatus, MemoryHealthReport, MemoryStatusCounts,
+    WorkingMemoryVerificationCounts,
 };
 pub use memory_promotion_policy::{
     AUTO_PROMOTION_POLICY_VERSION, MemoryAutoPromotionClass, MemoryAutoPromotionEvaluation,

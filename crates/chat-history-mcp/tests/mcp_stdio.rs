@@ -287,6 +287,18 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         "preserve migration history"
     );
     assert_eq!(
+        project_context_json["working_memory"]["verification"][0]["memory_id"],
+        "rust-current-goal"
+    );
+    assert_eq!(
+        project_context_json["working_memory"]["verification"][0]["state"],
+        "current_by_evidence"
+    );
+    assert_eq!(
+        project_context_json["working_memory"]["verification"][0]["evidence_strength"],
+        "none"
+    );
+    assert_eq!(
         project_context_json["collaboration_memory"]["items"][0]["memory_id"],
         "global-collaboration-preference"
     );

@@ -4,7 +4,8 @@ use chat_history_core::{
     MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus,
     MemoryCheckpointPrefixStatus, MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind,
     MemoryItem, MemoryKind, MemoryPromotionReview, MemoryScope, MemoryStatus,
-    NormalizedConversation, NormalizedMessage,
+    NormalizedConversation, NormalizedMessage, WorkingMemoryEvidenceStrength,
+    WorkingMemoryVerificationState,
     db::{open_database, restore_database},
 };
 use rusqlite::params;
@@ -351,6 +352,146 @@ fn project_working_memory_query_ranking_promotes_relevant_items_without_filterin
             .map(|item| item.memory_id.as_str())
             .collect::<Vec<_>>(),
         vec!["high-decision", "medium-state", "low-blocker"]
+    );
+    Ok(())
+}
+
+#[test]
+fn project_working_memory_marks_operational_memory_for_revalidation_after_new_project_evidence()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let make = |id: &str,
+                kind: MemoryKind,
+                evidence_kind: MemoryEvidenceKind,
+                valid_until: Option<f64>|
+     -> MemoryItem {
+        MemoryItem {
+            memory_id: id.to_string(),
+            scope: MemoryScope::Project {
+                project: "LEMonX".to_string(),
+            },
+            kind,
+            key: id.to_string(),
+            value: json!({"text": id}),
+            status: MemoryStatus::Active,
+            importance: 90,
+            confidence: 1.0,
+            valid_from: Some(if valid_until.is_some() { 1.0 } else { 10.0 }),
+            valid_until,
+            supersedes_memory_id: None,
+            created_at: 10.0,
+            updated_at: 10.0,
+            last_verified_at: Some(10.0),
+            evidence: vec![MemoryEvidence {
+                kind: evidence_kind,
+                reference: format!("evidence:{id}"),
+                detail: json!({}),
+                created_at: 10.0,
+            }],
+        }
+    };
+
+    service.put_memory_item(&make(
+        "conversation-state",
+        MemoryKind::State,
+        MemoryEvidenceKind::ConversationTurn,
+        None,
+    ))?;
+    service.put_memory_item(&make(
+        "conversation-task",
+        MemoryKind::Task,
+        MemoryEvidenceKind::UserStatement,
+        None,
+    ))?;
+    service.put_memory_item(&make(
+        "repo-blocker",
+        MemoryKind::Blocker,
+        MemoryEvidenceKind::RepositoryState,
+        None,
+    ))?;
+    service.put_memory_item(&make(
+        "stable-result",
+        MemoryKind::Result,
+        MemoryEvidenceKind::ConversationTurn,
+        None,
+    ))?;
+    service.put_memory_item(&make(
+        "tentative-hypothesis",
+        MemoryKind::Hypothesis,
+        MemoryEvidenceKind::ConversationTurn,
+        None,
+    ))?;
+    service.put_memory_item(&make(
+        "expired-task",
+        MemoryKind::Task,
+        MemoryEvidenceKind::RepositoryState,
+        Some(5.0),
+    ))?;
+
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            "newer-project-evidence",
+            20.0,
+            vec![
+                message("u-new", "user", "continue LEMonX", 19.0),
+                message("a-new", "assistant", "newer project state", 20.0),
+            ],
+        )],
+        None,
+    )?;
+
+    let working = service.project_working_memory("LEMonX")?;
+    let verification = |memory_id: &str| {
+        working
+            .verification
+            .iter()
+            .find(|item| item.memory_id == memory_id)
+            .expect("verification exists")
+    };
+
+    let state = verification("conversation-state");
+    assert_eq!(
+        state.evidence_strength,
+        WorkingMemoryEvidenceStrength::ConversationOnly
+    );
+    assert_eq!(
+        state.state,
+        WorkingMemoryVerificationState::NeedsRevalidation
+    );
+    assert_eq!(state.latest_project_evidence_at, Some(20.0));
+
+    let task = verification("conversation-task");
+    assert_eq!(
+        task.evidence_strength,
+        WorkingMemoryEvidenceStrength::UserAsserted
+    );
+    assert_eq!(
+        task.state,
+        WorkingMemoryVerificationState::NeedsRevalidation
+    );
+
+    let strong = verification("repo-blocker");
+    assert_eq!(
+        strong.evidence_strength,
+        WorkingMemoryEvidenceStrength::StrongIndependent
+    );
+    assert_eq!(
+        strong.state,
+        WorkingMemoryVerificationState::StronglyVerified
+    );
+
+    assert_eq!(
+        verification("stable-result").state,
+        WorkingMemoryVerificationState::CurrentByEvidence
+    );
+    assert_eq!(
+        verification("tentative-hypothesis").state,
+        WorkingMemoryVerificationState::Tentative
+    );
+    assert_eq!(
+        verification("expired-task").state,
+        WorkingMemoryVerificationState::Expired
     );
     Ok(())
 }
@@ -1444,6 +1585,30 @@ fn memory_health_surfaces_incomplete_project_evidence_and_pending_revalidation_p
         None,
         15.0,
     ))?;
+    service.put_memory_item(&MemoryItem {
+        memory_id: "health-old-task".to_string(),
+        scope: MemoryScope::Project {
+            project: "LEMonX".to_string(),
+        },
+        kind: MemoryKind::Task,
+        key: "older_operational_task".to_string(),
+        value: json!({"text": "continue the older task"}),
+        status: MemoryStatus::Active,
+        importance: 70,
+        confidence: 0.9,
+        valid_from: Some(5.0),
+        valid_until: None,
+        supersedes_memory_id: None,
+        created_at: 5.0,
+        updated_at: 5.0,
+        last_verified_at: Some(5.0),
+        evidence: vec![MemoryEvidence {
+            kind: MemoryEvidenceKind::ConversationTurn,
+            reference: "conversation:older:message:a1".to_string(),
+            detail: json!({"turn_index": 1}),
+            created_at: 5.0,
+        }],
+    })?;
     let snapshot = canonical_snapshot_id(&service, "health-complete")?;
     service.stage_memory_compilation(&MemoryCompilationBatch {
         project: "LEMonX".to_string(),
@@ -1479,6 +1644,18 @@ fn memory_health_surfaces_incomplete_project_evidence_and_pending_revalidation_p
 
     let health = service.memory_health("LEMonX", 30)?;
     assert_eq!(health.strong_project_conversation_count, 2);
+    assert_eq!(health.working_memory_verification.needs_revalidation, 1);
+    assert_eq!(health.working_memory_verification.current_by_evidence, 1);
+    assert_eq!(health.working_memory_flagged_count, 1);
+    assert_eq!(health.working_memory_flagged.len(), 1);
+    assert_eq!(
+        health.working_memory_flagged[0].memory_id,
+        "health-old-task"
+    );
+    assert_eq!(
+        health.working_memory_flagged[0].state,
+        WorkingMemoryVerificationState::NeedsRevalidation
+    );
     assert_eq!(health.incomplete_canonical_conversation_count, 1);
     assert_eq!(health.incomplete_canonical_conversations.len(), 1);
     assert_eq!(
