@@ -10,7 +10,8 @@ use axum::{
 use chat_history_core::{
     ChatGptBlockedThread, ChatGptBridgeTranscript, ChatGptDiscoveryPlan, ChatGptSyncState,
     ChatGptThreadListSnapshot, ConversationRecord, DataHome, ImportMode, ImportOptions,
-    IndexService, NormalizedConversation, SearchMode, SearchOptions, SearchResult, SummaryRecord,
+    IndexService, NormalizedConversation, ProjectWorkingMemory, SearchMode, SearchOptions,
+    SearchResult, SummaryRecord,
 };
 use clap::{Parser, ValueEnum};
 use rmcp::Json;
@@ -675,10 +676,15 @@ impl ChatHistoryMcp {
         let continuations =
             self.memory_continuations_from_recent(&recent, continuation_message_limit, 2)?;
         let continuation = continuations.first().cloned();
+        let working_memory = self
+            .service
+            .project_working_memory(&request.project)
+            .map_err(|error| error.to_string())?;
         Ok(Json(MemoryProjectContextResponse {
             project: request.project,
             query,
             source_policy,
+            working_memory,
             continuation,
             continuations,
             relevant: relevant.into_iter().map(memory_hit).collect(),
@@ -1020,6 +1026,7 @@ struct MemoryProjectContextResponse {
     project: String,
     query: String,
     source_policy: String,
+    working_memory: ProjectWorkingMemory,
     continuation: Option<MemoryContinuation>,
     continuations: Vec<MemoryContinuation>,
     relevant: Vec<MemoryHit>,

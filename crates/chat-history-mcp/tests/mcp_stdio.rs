@@ -1,6 +1,9 @@
 use std::{fs, io::Write, process::Stdio};
 
-use chat_history_core::{DataHome, ImportMode, ImportOptions, IndexService};
+use chat_history_core::{
+    DataHome, ImportMode, ImportOptions, IndexService, MemoryItem, MemoryKind, MemoryScope,
+    MemoryStatus,
+};
 use rmcp::{
     ServiceExt,
     model::CallToolRequestParams,
@@ -62,6 +65,25 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
             force_embeddings: false,
         })
         .await?;
+    service.put_memory_item(&MemoryItem {
+        memory_id: "rust-current-goal".to_string(),
+        scope: MemoryScope::Project {
+            project: "Rust".to_string(),
+        },
+        kind: MemoryKind::State,
+        key: "current_goal".to_string(),
+        value: serde_json::json!({"text": "preserve migration history"}),
+        status: MemoryStatus::Active,
+        importance: 95,
+        confidence: 1.0,
+        valid_from: Some(1_800_000_000.0),
+        valid_until: None,
+        supersedes_memory_id: None,
+        created_at: 1_800_000_000.0,
+        updated_at: 1_800_000_000.0,
+        last_verified_at: Some(1_800_000_000.0),
+        evidence: Vec::new(),
+    })?;
 
     let transport = TokioChildProcess::builder(
         tokio::process::Command::new(env!("CARGO_BIN_EXE_chat-history-mcp")).configure(|cmd| {
@@ -161,6 +183,15 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     assert_eq!(
         project_context_json["relevant"].as_array().map(Vec::len),
         Some(0)
+    );
+    assert_eq!(project_context_json["working_memory"]["project"], "Rust");
+    assert_eq!(
+        project_context_json["working_memory"]["items"][0]["memory_id"],
+        "rust-current-goal"
+    );
+    assert_eq!(
+        project_context_json["working_memory"]["items"][0]["value"]["text"],
+        "preserve migration history"
     );
 
     let collector_state = client

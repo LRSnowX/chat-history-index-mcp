@@ -166,6 +166,9 @@ The current implementation provides:
 - retained conversation/message evidence snapshots with canonical,
   superseded, and rejected-lower-quality states;
 - lazy capture of pre-snapshot canonical conversations before replacement;
+- read-only ProjectWorkingMemory delivery through `memory_project_context`;
+- DevSpace handoff integration that prioritizes bounded working memory before
+  recent conversation continuation within one shared bootstrap budget;
 - schema-v1 restore compatibility.
 
 It does not yet provide:
@@ -173,7 +176,6 @@ It does not yet provide:
 - a Memory Compiler;
 - automatic extraction from new conversation turns;
 - memory-first semantic search;
-- a DevSpace HandoffPacket containing working memory;
 - automatic resolution/supersession policies;
 - memory health/inspection CLI.
 
@@ -212,18 +214,20 @@ Answer ordinary project-state/history questions from MemoryItems first.
 Conversation search becomes a deeper evidence lookup rather than the default
 knowledge surface.
 
-### Phase 5 — DevSpace HandoffPacket
+### Phase 5 follow-up — Complete DevSpace HandoffPacket
 
-DevSpace should combine:
+The read path now combines ProjectWorkingMemory with bounded recent episodic
+continuation under one shared dynamic-memory budget. The remaining HandoffPacket
+work should add and normalize:
 
 - collaboration memory;
-- ProjectWorkingMemory;
-- bounded recent episodic continuation;
 - live repository snapshot;
 - authoritative project references.
 
-The dynamic memory portion should remain bounded. Repository state and
-authoritative project files outrank stale historical memory.
+Repository state and authoritative project files already outrank stored memory
+in the host instruction contract. The remaining work is to expose those stronger
+sources as explicit structured packet sections rather than only as host
+instructions and separately loaded project files.
 
 ### Phase 6 — Memory health
 
