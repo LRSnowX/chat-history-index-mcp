@@ -8,7 +8,8 @@ use std::{
 use anyhow::Context;
 use chat_history_core::{
     ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot,
-    DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, ImportMode, ImportOptions, IndexService,
+    DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
+    DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
     MemoryModelClient, NormalizedConversation, SearchMode, SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -134,6 +135,17 @@ enum Command {
         #[arg(long)]
         project: String,
         conversation_id: String,
+        #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
+        max_messages: usize,
+    },
+    /// Compile recent strong-match conversations for one project, bounded by model-call count.
+    MemoryCompileProject {
+        #[arg(long)]
+        project: String,
+        #[arg(long, default_value_t = DEFAULT_MEMORY_PROJECT_SCAN_LIMIT)]
+        scan_limit: usize,
+        #[arg(long, default_value_t = DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS)]
+        max_conversations: usize,
         #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
         max_messages: usize,
     },
@@ -543,6 +555,24 @@ async fn main() -> anyhow::Result<()> {
                 "status": if result.is_some() { "staged" } else { "caught_up" },
                 "result": result,
             }))?;
+        }
+        Command::MemoryCompileProject {
+            project,
+            scan_limit,
+            max_conversations,
+            max_messages,
+        } => {
+            let model = MemoryModelClient::from_env()?;
+            let result = service
+                .compile_memory_project(
+                    &model,
+                    &project,
+                    scan_limit,
+                    max_conversations,
+                    max_messages,
+                )
+                .await?;
+            print_json(&result)?;
         }
         Command::MemoryCandidates { project } => {
             let candidates = service.pending_memory_candidates(&project)?;

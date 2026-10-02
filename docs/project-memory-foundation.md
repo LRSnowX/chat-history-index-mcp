@@ -184,9 +184,10 @@ The current implementation provides:
 - strong project/conversation matching before model invocation;
 - strict candidate JSON validation, delta-only evidence IDs, bounded values,
   authoritative active-memory revalidation, and duplicate/conflict rejection;
-- operator CLI commands to compile one conversation delta, inspect pending
-  candidates, inspect one candidate, explicitly promote it, or explicitly
-  reject it with a retained reason; compilation itself never promotes;
+- operator CLI commands to compile one conversation delta or a bounded recent
+  project batch, inspect pending candidates, inspect one candidate, explicitly
+  promote it, or explicitly reject it with a retained reason; compilation
+  itself never promotes;
 - schema-v1 restore compatibility.
 
 It does not yet provide:
@@ -234,8 +235,9 @@ memory.
 
 The remaining Phase 3 work is orchestration and review:
 
-- trigger bounded compilation after accepted new evidence without blocking
-  ingestion;
+- optionally trigger the now-bounded project compiler after accepted new
+  evidence without blocking ingestion; automatic triggering must remain
+  explicitly configurable so background model usage is not implicit;
 - optionally add a richer review UI around the existing operator CLI;
 - define conservative promotion policy classes if any operation is ever made
   automatic;

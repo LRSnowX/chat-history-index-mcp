@@ -16,12 +16,15 @@ use crate::{
         MemoryCandidateInput, MemoryCandidatePayload, MemoryCompilationBatch,
         MemoryCompilationStageResult, snapshot_prefix_sha256_hex,
     },
+    models::{SearchMode, SearchOptions},
     openai::MemoryModelClient,
 };
 
 pub const MEMORY_COMPILER_VERSION: &str = "project-memory-compiler-v1";
 pub const DEFAULT_MEMORY_COMPILER_MESSAGES: usize = 8;
 pub const MAX_MEMORY_COMPILER_MESSAGES: usize = 16;
+pub const DEFAULT_MEMORY_PROJECT_SCAN_LIMIT: usize = 500;
+pub const DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS: usize = 2;
 const MAX_MESSAGE_TEXT_CHARS: usize = 4_000;
 const MAX_MODEL_PROPOSALS: usize = 8;
 const MAX_MODEL_OUTPUT_BYTES: usize = 48_000;
@@ -72,6 +75,31 @@ pub struct MemoryCompilerRunResult {
     pub input: MemoryCompilerInput,
     pub model_label: String,
     pub staged: MemoryCompilationStageResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryProjectCompilerStaged {
+    pub conversation_id: String,
+    pub source_snapshot_id: String,
+    pub through_turn_index: i64,
+    pub candidate_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryProjectCompilerFailure {
+    pub conversation_id: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryProjectCompilerResult {
+    pub project: String,
+    pub scanned: usize,
+    pub matched: usize,
+    pub caught_up: usize,
+    pub model_attempts: usize,
+    pub staged: Vec<MemoryProjectCompilerStaged>,
+    pub failures: Vec<MemoryProjectCompilerFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -315,17 +343,106 @@ impl IndexService {
         else {
             return Ok(None);
         };
+        self.compile_prepared_memory(model, input).await.map(Some)
+    }
+
+    pub async fn compile_memory_project(
+        &self,
+        model: &MemoryModelClient,
+        project: &str,
+        scan_limit: usize,
+        max_conversations: usize,
+        max_messages: usize,
+    ) -> anyhow::Result<MemoryProjectCompilerResult> {
+        ensure!(!project.trim().is_empty(), "project cannot be empty");
+        ensure!(
+            (1..=1_000).contains(&scan_limit),
+            "scan_limit must be between 1 and 1000"
+        );
+        ensure!(
+            (1..=10).contains(&max_conversations),
+            "max_conversations must be between 1 and 10"
+        );
+        ensure!(
+            (1..=MAX_MEMORY_COMPILER_MESSAGES).contains(&max_messages),
+            "max_messages must be between 1 and {MAX_MEMORY_COMPILER_MESSAGES}"
+        );
+        let candidates = self
+            .search(SearchOptions {
+                mode: Some(SearchMode::Metadata),
+                limit: Some(scan_limit),
+                ..SearchOptions::default()
+            })
+            .await?;
+        let mut result = MemoryProjectCompilerResult {
+            project: project.to_string(),
+            scanned: candidates.len(),
+            matched: 0,
+            caught_up: 0,
+            model_attempts: 0,
+            staged: Vec::new(),
+            failures: Vec::new(),
+        };
+        for candidate in candidates {
+            if !self.conversation_matches_project_strong(&candidate.conversation_id, project)? {
+                continue;
+            }
+            result.matched += 1;
+            let input = match self.prepare_memory_compilation(
+                project,
+                &candidate.conversation_id,
+                max_messages,
+            ) {
+                Ok(Some(input)) => input,
+                Ok(None) => {
+                    result.caught_up += 1;
+                    continue;
+                }
+                Err(error) => {
+                    result.failures.push(MemoryProjectCompilerFailure {
+                        conversation_id: candidate.conversation_id,
+                        error: format!("{error:#}"),
+                    });
+                    continue;
+                }
+            };
+            if result.model_attempts >= max_conversations {
+                break;
+            }
+            result.model_attempts += 1;
+            let conversation_id = input.conversation_id.clone();
+            match self.compile_prepared_memory(model, input).await {
+                Ok(run) => result.staged.push(MemoryProjectCompilerStaged {
+                    conversation_id,
+                    source_snapshot_id: run.input.source_snapshot_id,
+                    through_turn_index: run.input.through_turn_index,
+                    candidate_ids: run.staged.candidate_ids,
+                }),
+                Err(error) => result.failures.push(MemoryProjectCompilerFailure {
+                    conversation_id,
+                    error: format!("{error:#}"),
+                }),
+            }
+        }
+        Ok(result)
+    }
+
+    async fn compile_prepared_memory(
+        &self,
+        model: &MemoryModelClient,
+        input: MemoryCompilerInput,
+    ) -> anyhow::Result<MemoryCompilerRunResult> {
         let prompt = build_memory_compiler_prompt(&input)?;
         let output_json = model.generate_json(&prompt).await?;
         let model_label = model.model_label();
         let created_at = now_epoch();
         let staged =
             self.stage_memory_compiler_output(&input, &model_label, &output_json, created_at)?;
-        Ok(Some(MemoryCompilerRunResult {
+        Ok(MemoryCompilerRunResult {
             input,
             model_label,
             staged,
-        }))
+        })
     }
 }
 

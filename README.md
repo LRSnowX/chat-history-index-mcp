@@ -88,11 +88,19 @@ only; it never promotes them into durable Working Memory by itself:
 
 ```bash
 ./scripts/chat-history-cli memory-compile-conversation --project LEMonX <conversation-id>
+./scripts/chat-history-cli memory-compile-project --project LEMonX
 ./scripts/chat-history-cli memory-candidates --project LEMonX
 ./scripts/chat-history-cli memory-candidate <candidate-id>
 ./scripts/chat-history-cli memory-candidate-promote <candidate-id>
 ./scripts/chat-history-cli memory-candidate-reject <candidate-id> --reason "operator reason"
 ```
+
+Project compilation scans recent conversations in metadata-recency order,
+requires the same strong project match as single-conversation compilation, and
+is bounded by both scan count and model-call count. The defaults are 500 recent
+conversations scanned, at most 2 model attempts, and at most 8 new messages per
+conversation. One conversation failure is reported without aborting the rest of
+the bounded batch.
 
 The compiler uses the current Codex CLI account default model unless
 `CHAT_HISTORY_MEMORY_MODEL` is set to a non-empty model name. It invokes Codex

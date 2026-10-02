@@ -34,9 +34,11 @@ pub use memory_compile::{
     MemoryCompilationStageResult, MemoryCompileCheckpoint,
 };
 pub use memory_compiler::{
-    DEFAULT_MEMORY_COMPILER_MESSAGES, MAX_MEMORY_COMPILER_MESSAGES, MEMORY_COMPILER_VERSION,
+    DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
+    DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, MAX_MEMORY_COMPILER_MESSAGES, MEMORY_COMPILER_VERSION,
     MemoryCompilerInput, MemoryCompilerMessage, MemoryCompilerPendingCandidate,
-    MemoryCompilerRunResult,
+    MemoryCompilerRunResult, MemoryProjectCompilerFailure, MemoryProjectCompilerResult,
+    MemoryProjectCompilerStaged,
 };
 pub use models::{
     ConversationDetail, ConversationRecord, DatabaseHealth, IndexStats, JobKind, JobStatus,
