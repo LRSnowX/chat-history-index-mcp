@@ -123,6 +123,12 @@ pub struct ProjectWorkingMemory {
     pub items: Vec<MemoryItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CollaborationMemory {
+    pub generated_at: f64,
+    pub items: Vec<MemoryItem>,
+}
+
 impl IndexService {
     pub fn put_memory_item(&self, item: &MemoryItem) -> anyhow::Result<()> {
         let conn = open_database(&self.data_home.paths().db_path)?;
@@ -162,6 +168,34 @@ impl IndexService {
         }
         Ok(ProjectWorkingMemory {
             project: project.to_string(),
+            generated_at: now_epoch(),
+            items,
+        })
+    }
+
+    pub fn collaboration_memory(&self) -> anyhow::Result<CollaborationMemory> {
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT memory_id
+            FROM memory_items
+            WHERE scope_type = 'global'
+              AND scope_id = ''
+              AND status = 'active'
+              AND kind IN ('invariant', 'preference', 'decision')
+            ORDER BY importance DESC, updated_at DESC, memory_id ASC
+            "#,
+        )?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut items = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(item) = load_memory_item(&conn, &id)? {
+                items.push(item);
+            }
+        }
+        Ok(CollaborationMemory {
             generated_at: now_epoch(),
             items,
         })

@@ -84,6 +84,23 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         last_verified_at: Some(1_800_000_000.0),
         evidence: Vec::new(),
     })?;
+    service.put_memory_item(&MemoryItem {
+        memory_id: "global-collaboration-preference".to_string(),
+        scope: MemoryScope::Global,
+        kind: MemoryKind::Preference,
+        key: "collaboration_style".to_string(),
+        value: serde_json::json!({"text": "preserve upstream compatibility"}),
+        status: MemoryStatus::Active,
+        importance: 100,
+        confidence: 1.0,
+        valid_from: Some(1_800_000_000.0),
+        valid_until: None,
+        supersedes_memory_id: None,
+        created_at: 1_800_000_000.0,
+        updated_at: 1_800_000_000.0,
+        last_verified_at: Some(1_800_000_000.0),
+        evidence: Vec::new(),
+    })?;
     for index in 0..12 {
         service.put_memory_item(&MemoryItem {
             memory_id: format!("rust-secondary-{index}"),
@@ -247,6 +264,14 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     assert_eq!(
         project_context_json["working_memory"]["items"][0]["value"]["text"],
         "preserve migration history"
+    );
+    assert_eq!(
+        project_context_json["collaboration_memory"]["items"][0]["memory_id"],
+        "global-collaboration-preference"
+    );
+    assert_eq!(
+        project_context_json["collaboration_memory"]["items"][0]["value"]["text"],
+        "preserve upstream compatibility"
     );
 
     let collector_state = client

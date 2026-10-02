@@ -276,6 +276,59 @@ fn project_working_memory_requires_explicit_supersession() -> anyhow::Result<()>
     Ok(())
 }
 
+#[test]
+fn collaboration_memory_includes_only_active_global_rules() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let make = |id: &str, kind: MemoryKind, status: MemoryStatus| MemoryItem {
+        memory_id: id.to_string(),
+        scope: MemoryScope::Global,
+        kind,
+        key: id.to_string(),
+        value: json!({"text": id}),
+        status,
+        importance: 90,
+        confidence: 1.0,
+        valid_from: None,
+        valid_until: None,
+        supersedes_memory_id: None,
+        created_at: 1.0,
+        updated_at: 1.0,
+        last_verified_at: Some(1.0),
+        evidence: Vec::new(),
+    };
+    service.put_memory_item(&make(
+        "preference",
+        MemoryKind::Preference,
+        MemoryStatus::Active,
+    ))?;
+    service.put_memory_item(&make(
+        "invariant",
+        MemoryKind::Invariant,
+        MemoryStatus::Active,
+    ))?;
+    service.put_memory_item(&make(
+        "decision",
+        MemoryKind::Decision,
+        MemoryStatus::Active,
+    ))?;
+    service.put_memory_item(&make("state", MemoryKind::State, MemoryStatus::Active))?;
+    service.put_memory_item(&make(
+        "resolved",
+        MemoryKind::Preference,
+        MemoryStatus::Resolved,
+    ))?;
+
+    let memory = service.collaboration_memory()?;
+    let ids = memory
+        .items
+        .iter()
+        .map(|item| item.memory_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["decision", "invariant", "preference"]);
+    Ok(())
+}
+
 fn canonical_snapshot_id(service: &IndexService, conversation_id: &str) -> anyhow::Result<String> {
     let conn = open_database(&service.managed_db_path())?;
     Ok(conn.query_row(

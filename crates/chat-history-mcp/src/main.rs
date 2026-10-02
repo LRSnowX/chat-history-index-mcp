@@ -9,9 +9,9 @@ use axum::{
 };
 use chat_history_core::{
     ChatGptBlockedThread, ChatGptBridgeTranscript, ChatGptDiscoveryPlan, ChatGptSyncState,
-    ChatGptThreadListSnapshot, ConversationRecord, DataHome, ImportMode, ImportOptions,
-    IndexService, NormalizedConversation, ProjectWorkingMemory, SearchMode, SearchOptions,
-    SearchResult, SummaryRecord,
+    ChatGptThreadListSnapshot, CollaborationMemory, ConversationRecord, DataHome, ImportMode,
+    ImportOptions, IndexService, NormalizedConversation, ProjectWorkingMemory, SearchMode,
+    SearchOptions, SearchResult, SummaryRecord,
 };
 use clap::{Parser, ValueEnum};
 use rmcp::Json;
@@ -698,10 +698,15 @@ impl ChatHistoryMcp {
             .service
             .project_working_memory(&request.project)
             .map_err(|error| error.to_string())?;
+        let collaboration_memory = self
+            .service
+            .collaboration_memory()
+            .map_err(|error| error.to_string())?;
         Ok(Json(MemoryProjectContextResponse {
             project: request.project,
             query,
             source_policy,
+            collaboration_memory,
             working_memory,
             continuation,
             continuations,
@@ -1026,6 +1031,7 @@ struct MemoryProjectContextResponse {
     project: String,
     query: String,
     source_policy: String,
+    collaboration_memory: CollaborationMemory,
     working_memory: ProjectWorkingMemory,
     continuation: Option<MemoryContinuation>,
     continuations: Vec<MemoryContinuation>,

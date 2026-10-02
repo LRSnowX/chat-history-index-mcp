@@ -283,6 +283,7 @@ Remaining Phase 4 work is retrieval policy quality rather than wiring:
 
 The DevSpace HandoffPacket now combines:
 
+- bounded CollaborationMemory for stable cross-project rules;
 - bounded ProjectWorkingMemory;
 - bounded recent episodic continuation;
 - a live repository snapshot refreshed on every workspace open;
@@ -293,10 +294,21 @@ dirty-state counters, and a bounded changed-path sample. DevSpace exposes these
 live/authoritative sections explicitly and instructs the host to prefer them
 over stale stored memory when they conflict.
 
-The main remaining Phase 5 work is collaboration memory: stable cross-project
-working preferences and collaboration rules should become a small structured
-handoff section instead of being duplicated across project instructions or
-conversation history.
+CollaborationMemory is materialized from active global MemoryItems, but only
+the stable rule-like kinds `invariant`, `preference`, and `decision` enter
+the automatic handoff. Global state/task/blocker items are deliberately
+excluded so transient activity does not leak into every project.
+
+DevSpace gives CollaborationMemory a small bounded share of the existing
+dynamic-memory budget before ProjectWorkingMemory and recent continuation.
+Provenance references inside CollaborationMemory do not grant conversation
+thread access.
+
+The remaining Phase 5 work is authoring policy: the current read/handoff path is
+complete, but ordinary project conversation compilation does not automatically
+promote statements into global CollaborationMemory. Cross-project rules should
+remain explicit/operator-reviewed until a conservative global-memory policy is
+defined.
 
 ### Phase 6 follow-up — Memory health
 
