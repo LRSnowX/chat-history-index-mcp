@@ -1396,6 +1396,11 @@ async fn explicit_project_aliases_extend_strong_matching_without_changing_canoni
             .collect::<Vec<_>>(),
         vec![conversation_id]
     );
+    let compiler_input = service
+        .prepare_memory_compilation("devspace-memory-adapter", conversation_id, 8)?
+        .expect("alias-matched conversation should be compilable");
+    assert_eq!(compiler_input.project, "devspace-memory-adapter");
+    assert_eq!(compiler_input.project_aliases, vec!["DevSpace"]);
 
     let plan = service
         .plan_memory_project("devspace-memory-adapter", 20, 2, 8)
