@@ -148,7 +148,7 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     assert_eq!(results.is_error, Some(false));
 
     let args: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
-        serde_json::json!({"query": "Rust SQLite", "project": "Rust", "limit": 5}),
+        serde_json::json!({"query": "preserve migration", "project": "Rust", "limit": 5}),
     )?;
     let memory_search = client
         .call_tool(CallToolRequestParams::new("memory_search").with_arguments(args))
@@ -160,7 +160,7 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
         .expect("memory search structured");
     assert_eq!(
         memory_search_json["retrieval_mode"],
-        "working_memory_then_hybrid_evidence"
+        "query_ranked_working_memory_then_hybrid_evidence"
     );
     assert_eq!(memory_search_json["working_memory"]["project"], "Rust");
     assert_eq!(

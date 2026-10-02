@@ -144,6 +144,22 @@ impl IndexService {
     }
 
     pub fn project_working_memory(&self, project: &str) -> anyhow::Result<ProjectWorkingMemory> {
+        self.project_working_memory_ranked(project, None)
+    }
+
+    pub fn project_working_memory_for_query(
+        &self,
+        project: &str,
+        query: &str,
+    ) -> anyhow::Result<ProjectWorkingMemory> {
+        self.project_working_memory_ranked(project, Some(query))
+    }
+
+    fn project_working_memory_ranked(
+        &self,
+        project: &str,
+        query: Option<&str>,
+    ) -> anyhow::Result<ProjectWorkingMemory> {
         ensure!(
             !project.trim().is_empty(),
             "project memory scope cannot be empty"
@@ -165,6 +181,20 @@ impl IndexService {
             if let Some(item) = load_memory_item(&conn, &id)? {
                 items.push(item);
             }
+        }
+        if let Some(query) = query.filter(|query| !query.trim().is_empty()) {
+            items.sort_by(|left, right| {
+                memory_query_score(right, query)
+                    .cmp(&memory_query_score(left, query))
+                    .then_with(|| right.importance.cmp(&left.importance))
+                    .then_with(|| {
+                        right
+                            .updated_at
+                            .partial_cmp(&left.updated_at)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.memory_id.cmp(&right.memory_id))
+            });
         }
         Ok(ProjectWorkingMemory {
             project: project.to_string(),
@@ -200,6 +230,97 @@ impl IndexService {
             items,
         })
     }
+}
+
+fn memory_query_score(item: &MemoryItem, query: &str) -> u32 {
+    let query = normalize_memory_query_text(query);
+    if query.is_empty() {
+        return 0;
+    }
+    let key = normalize_memory_query_text(&item.key.replace(['_', '-'], " "));
+    let kind = normalize_memory_query_text(item.kind.as_str());
+    let value =
+        normalize_memory_query_text(&serde_json::to_string(&item.value).unwrap_or_default());
+    let terms = memory_query_terms(&query);
+
+    let mut score = 0u32;
+    if key == query {
+        score += 320;
+    } else if key.contains(&query) {
+        score += 220;
+    }
+    if kind == query {
+        score += 180;
+    }
+    if value.contains(&query) {
+        score += 120;
+    }
+
+    for term in terms {
+        if key == term {
+            score += 120;
+        } else if key.contains(&term) {
+            score += 80;
+        }
+        if kind == term {
+            score += 70;
+        } else if kind.contains(&term) {
+            score += 40;
+        }
+        if value.contains(&term) {
+            score += 25;
+        }
+    }
+    score
+}
+
+fn normalize_memory_query_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| ch.to_lowercase())
+        .map(|ch| {
+            if ch.is_alphanumeric() || is_cjk(ch) {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn memory_query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for token in query.split_whitespace() {
+        if token.chars().all(is_cjk) {
+            let chars = token.chars().collect::<Vec<_>>();
+            if chars.len() <= 3 {
+                terms.push(token.to_string());
+            } else {
+                terms.push(token.to_string());
+                for window in chars.windows(2) {
+                    terms.push(window.iter().collect());
+                }
+            }
+        } else if token.len() >= 2 {
+            terms.push(token.to_string());
+        }
+    }
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2FA1F
+    )
 }
 
 pub(crate) fn put_memory_item_tx(tx: &Transaction<'_>, item: &MemoryItem) -> anyhow::Result<()> {

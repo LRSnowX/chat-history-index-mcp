@@ -278,6 +278,83 @@ fn project_working_memory_requires_explicit_supersession() -> anyhow::Result<()>
 }
 
 #[test]
+fn project_working_memory_query_ranking_promotes_relevant_items_without_filtering()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let make = |id: &str,
+                kind: MemoryKind,
+                key: &str,
+                value: &str,
+                importance: u8,
+                updated_at: f64|
+     -> MemoryItem {
+        MemoryItem {
+            memory_id: id.to_string(),
+            scope: MemoryScope::Project {
+                project: "LEMonX".to_string(),
+            },
+            kind,
+            key: key.to_string(),
+            value: json!({"text": value}),
+            status: MemoryStatus::Active,
+            importance,
+            confidence: 1.0,
+            valid_from: None,
+            valid_until: None,
+            supersedes_memory_id: None,
+            created_at: updated_at,
+            updated_at,
+            last_verified_at: Some(updated_at),
+            evidence: Vec::new(),
+        }
+    };
+    service.put_memory_item(&make(
+        "high-decision",
+        MemoryKind::Decision,
+        "deployment_policy",
+        "keep release deployment manual",
+        100,
+        30.0,
+    ))?;
+    service.put_memory_item(&make(
+        "medium-state",
+        MemoryKind::State,
+        "current_phase",
+        "当前阶段：memory foundation implementation",
+        95,
+        20.0,
+    ))?;
+    service.put_memory_item(&make(
+        "low-blocker",
+        MemoryKind::Blocker,
+        "shared_equipment_playwright_blocker",
+        "isolated rerun is still blocked",
+        60,
+        10.0,
+    ))?;
+
+    let ranked = service.project_working_memory_for_query("LEMonX", "playwright blocker")?;
+    assert_eq!(ranked.items.len(), 3);
+    assert_eq!(ranked.items[0].memory_id, "low-blocker");
+    assert_eq!(ranked.items[1].memory_id, "high-decision");
+
+    let chinese = service.project_working_memory_for_query("LEMonX", "当前阶段")?;
+    assert_eq!(chinese.items[0].memory_id, "medium-state");
+
+    let fallback = service.project_working_memory_for_query("LEMonX", "completely unrelated")?;
+    assert_eq!(
+        fallback
+            .items
+            .iter()
+            .map(|item| item.memory_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["high-decision", "medium-state", "low-blocker"]
+    );
+    Ok(())
+}
+
+#[test]
 fn collaboration_memory_includes_only_active_global_rules() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let service = service(&temp);

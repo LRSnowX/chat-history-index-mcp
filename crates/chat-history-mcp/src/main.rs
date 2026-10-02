@@ -507,7 +507,10 @@ impl ChatHistoryMcp {
         let mut working_memory = request
             .project
             .as_deref()
-            .map(|project| self.service.project_working_memory(project))
+            .map(|project| {
+                self.service
+                    .project_working_memory_for_query(project, &request.query)
+            })
             .transpose()
             .map_err(|error| error.to_string())?;
         let working_memory_truncated = working_memory
@@ -526,7 +529,7 @@ impl ChatHistoryMcp {
             .await?;
         Ok(Json(MemorySearchResponse {
             retrieval_mode: if working_memory.is_some() {
-                "working_memory_then_hybrid_evidence".to_string()
+                "query_ranked_working_memory_then_hybrid_evidence".to_string()
             } else {
                 "hybrid".to_string()
             },
