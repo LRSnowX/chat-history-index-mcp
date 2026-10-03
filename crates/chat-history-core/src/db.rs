@@ -16,6 +16,9 @@ use crate::{
     sql::SCHEMA,
 };
 
+// Fork-local historical schema marker. Versions 2-6 are already published in
+// user databases; do not renumber or increment this sequentially without first
+// reconciling any upstream user_version changes. See docs/upstream-maintenance.md.
 const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 const REQUIRED_TABLES: &[&str] = &[

@@ -367,6 +367,9 @@ Read `docs/architecture.md`, `docs/AUTOMATION.md`, and `docs/SECURITY.md` before
 
 ## Development
 
+Fork maintainers should also read `docs/upstream-maintenance.md` before changing
+core ingestion/search/database contracts or syncing a moved upstream branch.
+
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace
