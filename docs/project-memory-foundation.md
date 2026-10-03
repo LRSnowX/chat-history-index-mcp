@@ -191,6 +191,11 @@ The current implementation provides:
   reason;
 - bounded model-driven incremental compilation through Codex in an ephemeral
   read-only sandbox with medium reasoning effort;
+- manual compiler handoff for user-operated Codex workflows: CHIM can export an
+  exact compiler bundle plus prompt without invoking a model, then later stage
+  a JSON response only after revalidating that the canonical snapshot,
+  Working Memory, Pending Memory, project identity, and compile delta still
+  match the exported bundle;
 - strong project/conversation matching before model invocation;
 - strict candidate JSON validation, delta-only evidence IDs, bounded values,
   authoritative active-memory revalidation, and duplicate/conflict rejection;
@@ -274,6 +279,18 @@ conversation evidence, stale/unverified active memory, and rejected
 lower-quality snapshots are warnings rather than project-wide blockers.
 `blocked_by_health` is retained in scheduler status/history as a successful
 safety outcome and does not increment the worker failure counter.
+
+The same compiler can also run through a fully manual handoff. The operator
+exports one `MemoryCompilerManualBundle` and its prompt, pastes that prompt into
+the approved Codex conversation, saves the JSON-only response, and stages it
+with the original bundle. Export never instantiates `MemoryModelClient` or
+starts Codex. Stage recomputes the current compiler input and fails closed if
+the bundle is stale; the only intentionally ignored comparison field is the
+Working Memory observation timestamp (`generated_at`). Prompt hash and compiler
+version are also revalidated. Successful manual stage advances the normal
+checkpoint and writes only Pending Memory candidates, so the bundle cannot be
+replayed after checkpoint advancement and no manual path bypasses promotion
+review.
 
 The remaining Phase 3 work is orchestration and review:
 

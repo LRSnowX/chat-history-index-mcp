@@ -329,3 +329,124 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
             .is_empty()
     );
 }
+
+#[test]
+fn manual_memory_compiler_cli_exports_and_stages_without_invoking_codex() {
+    let temp = TempDir::new().unwrap();
+    let data_home = temp.path().join("data");
+    let service = IndexService::new(DataHome::new(data_home.clone()), None);
+    service
+        .import_normalized(
+            vec![NormalizedConversation {
+                source: "chatgpt".to_string(),
+                source_instance: None,
+                source_conversation_id: "manual-compiler-cli-chat".to_string(),
+                title: "LEMonX manual compiler CLI".to_string(),
+                create_time: Some(1.0),
+                update_time: Some(2.0),
+                model: None,
+                source_url: None,
+                source_path: Some("test".to_string()),
+                messages: vec![
+                    message("manual-u1", "user", "Checkpoint B is now accepted.", 1.0),
+                    message(
+                        "manual-a1",
+                        "assistant",
+                        "Checkpoint B is the accepted baseline.",
+                        2.0,
+                    ),
+                ],
+                raw: json!({"source": "test"}),
+            }],
+            None,
+        )
+        .unwrap();
+
+    let bundle = temp.path().join("manual.bundle.json");
+    let prompt = temp.path().join("manual.prompt.txt");
+    let impossible_codex = temp.path().join("codex-must-not-run");
+    let exported = run_cli(
+        &data_home,
+        &[
+            "memory-compile-manual-export",
+            "--project",
+            "LEMonX",
+            "manual-compiler-cli-chat",
+            "--max-messages",
+            "8",
+            "--bundle-out",
+            bundle.to_str().unwrap(),
+            "--prompt-out",
+            prompt.to_str().unwrap(),
+        ],
+        &[("CODEX_BIN", impossible_codex.to_str().unwrap())],
+    );
+    assert_eq!(exported["status"], "exported");
+    assert_eq!(exported["project"], "LEMonX");
+    assert!(bundle.exists());
+    assert!(prompt.exists());
+    let prompt_text = fs::read_to_string(&prompt).unwrap();
+    assert!(prompt_text.contains("UNTRUSTED DATA"));
+    assert!(prompt_text.contains("manual-a1"));
+    assert!(!impossible_codex.exists());
+
+    let response = temp.path().join("manual.response.json");
+    fs::write(
+        &response,
+        json!({
+            "proposals": [{
+                "operation": "add",
+                "kind": "result",
+                "key": "checkpoint_b_baseline",
+                "value": {"status": "accepted"},
+                "importance": 90,
+                "confidence": 0.95,
+                "rationale": "The supplied dialogue establishes checkpoint B.",
+                "evidence_message_ids": ["manual-a1"]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let staged = run_cli(
+        &data_home,
+        &[
+            "memory-compile-manual-stage",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--response",
+            response.to_str().unwrap(),
+            "--model-label",
+            "manual-test-model + medium",
+        ],
+        &[("CODEX_BIN", impossible_codex.to_str().unwrap())],
+    );
+    assert_eq!(staged["status"], "staged");
+    assert_eq!(staged["model_label"], "manual-test-model + medium");
+    assert_eq!(
+        staged["staged"]["candidate_ids"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        service.pending_memory_candidates("LEMonX").unwrap().len(),
+        1
+    );
+    assert!(!impossible_codex.exists());
+
+    let repeat = Command::new(env!("CARGO_BIN_EXE_chat-history-cli"))
+        .args([
+            "memory-compile-manual-stage",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--response",
+            response.to_str().unwrap(),
+            "--model-label",
+            "manual-test-model + medium",
+        ])
+        .env("CHAT_HISTORY_DATA_HOME", &data_home)
+        .env("CODEX_BIN", &impossible_codex)
+        .output()
+        .expect("repeat manual stage");
+    assert!(!repeat.status.success());
+    assert!(String::from_utf8_lossy(&repeat.stderr).contains("stale or already caught up"));
+}

@@ -1,11 +1,11 @@
 use chat_history_core::{
     CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
-    DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, IndexService, MemoryAutoPromotionClass,
-    MemoryCandidateDecision, MemoryCandidateInput, MemoryCandidatePayload, MemoryCandidateStatus,
-    MemoryCheckpointPrefixStatus, MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind,
-    MemoryItem, MemoryKind, MemoryPromotionReview, MemoryScope, MemoryStatus,
-    NormalizedConversation, NormalizedMessage, WorkingMemoryEvidenceStrength,
-    WorkingMemoryVerificationState,
+    DEFAULT_MEMORY_COMPILER_MESSAGES, DataHome, IndexService, MEMORY_COMPILER_VERSION,
+    MemoryAutoPromotionClass, MemoryCandidateDecision, MemoryCandidateInput,
+    MemoryCandidatePayload, MemoryCandidateStatus, MemoryCheckpointPrefixStatus,
+    MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind,
+    MemoryPromotionReview, MemoryScope, MemoryStatus, NormalizedConversation, NormalizedMessage,
+    WorkingMemoryEvidenceStrength, WorkingMemoryVerificationState,
     db::{open_database, restore_database},
 };
 use rusqlite::params;
@@ -1613,6 +1613,104 @@ fn memory_bootstrap_plan_selects_recent_complete_chatgpt_and_explains_exclusions
     assert_eq!(initialized.estimated_model_attempts, 0);
     assert!(initialized.selected.is_empty());
     assert_eq!(initialized.excluded.not_selected_complete_chatgpt, 2);
+    Ok(())
+}
+
+#[test]
+fn manual_memory_compiler_bundle_is_state_bound_and_stages_only_after_revalidation()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let conversation_id = "manual-memory-compiler";
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            conversation_id,
+            10.0,
+            vec![
+                message("manual-u1", "user", "Checkpoint A is accepted.", 1.0),
+                message(
+                    "manual-a1",
+                    "assistant",
+                    "Checkpoint A is the current accepted baseline.",
+                    2.0,
+                ),
+            ],
+        )],
+        None,
+    )?;
+
+    let bundle = service
+        .prepare_manual_memory_compiler_bundle("LEMonX", conversation_id, 2)?
+        .expect("manual bundle should be available");
+    assert_eq!(bundle.compiler_version, MEMORY_COMPILER_VERSION);
+    assert_eq!(bundle.max_messages, 2);
+    assert_eq!(bundle.input.conversation_id, conversation_id);
+    assert_eq!(bundle.prompt_sha256.len(), 64);
+    assert!(bundle.prompt.contains("Compiler input:"));
+    assert!(bundle.prompt.contains("manual-a1"));
+
+    let valid = json!({
+        "proposals": [{
+            "operation": "add",
+            "kind": "result",
+            "key": "checkpoint_a_baseline",
+            "value": {"status": "accepted"},
+            "importance": 90,
+            "confidence": 0.95,
+            "rationale": "The supplied dialogue establishes the accepted baseline.",
+            "evidence_message_ids": ["manual-a1"]
+        }]
+    })
+    .to_string();
+    let staged =
+        service.stage_manual_memory_compiler_output(&bundle, "manual-test-model", &valid, 20.0)?;
+    assert_eq!(staged.candidate_ids.len(), 1);
+    assert!(
+        service
+            .memory_compile_checkpoint("LEMonX", conversation_id)?
+            .is_some()
+    );
+    let repeat = service
+        .stage_manual_memory_compiler_output(&bundle, "manual-test-model", &valid, 21.0)
+        .expect_err("manual bundle must be single-use after checkpoint advancement");
+    assert!(repeat.to_string().contains("stale or already caught up"));
+
+    let stale_conversation_id = "manual-memory-compiler-stale";
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            stale_conversation_id,
+            30.0,
+            vec![
+                message("stale-u1", "user", "State one.", 1.0),
+                message("stale-a1", "assistant", "State one is active.", 2.0),
+            ],
+        )],
+        None,
+    )?;
+    let stale_bundle = service
+        .prepare_manual_memory_compiler_bundle("LEMonX", stale_conversation_id, 2)?
+        .expect("stale test bundle should be available");
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            stale_conversation_id,
+            31.0,
+            vec![
+                message("stale-u1", "user", "State one.", 1.0),
+                message("stale-a1", "assistant", "State one is active.", 2.0),
+                message("stale-u2", "user", "State two supersedes it.", 3.0),
+                message("stale-a2", "assistant", "State two is current.", 4.0),
+            ],
+        )],
+        None,
+    )?;
+    let stale = service
+        .stage_manual_memory_compiler_output(&stale_bundle, "manual-test-model", &valid, 32.0)
+        .expect_err("changed canonical state must invalidate a manual bundle");
+    assert!(
+        stale
+            .to_string()
+            .contains("manual compiler bundle is stale")
+    );
     Ok(())
 }
 

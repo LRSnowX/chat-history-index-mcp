@@ -80,6 +80,15 @@ pub struct MemoryCompilerRunResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryCompilerManualBundle {
+    pub compiler_version: String,
+    pub max_messages: usize,
+    pub input: MemoryCompilerInput,
+    pub prompt_sha256: String,
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryProjectCompilerStaged {
     pub conversation_id: String,
     pub source_snapshot_id: String,
@@ -489,6 +498,65 @@ impl IndexService {
             candidates,
         };
         self.stage_memory_compilation(&batch)
+    }
+
+    pub fn prepare_manual_memory_compiler_bundle(
+        &self,
+        project: &str,
+        conversation_id: &str,
+        max_messages: usize,
+    ) -> anyhow::Result<Option<MemoryCompilerManualBundle>> {
+        let Some(input) =
+            self.prepare_memory_compilation(project, conversation_id, max_messages)?
+        else {
+            return Ok(None);
+        };
+        let prompt = build_memory_compiler_prompt(&input)?;
+        Ok(Some(MemoryCompilerManualBundle {
+            compiler_version: MEMORY_COMPILER_VERSION.to_string(),
+            max_messages,
+            prompt_sha256: sha256_hex(prompt.as_bytes()),
+            input,
+            prompt,
+        }))
+    }
+
+    pub fn stage_manual_memory_compiler_output(
+        &self,
+        bundle: &MemoryCompilerManualBundle,
+        model_label: &str,
+        output_json: &str,
+        created_at: f64,
+    ) -> anyhow::Result<MemoryCompilationStageResult> {
+        ensure!(
+            bundle.compiler_version == MEMORY_COMPILER_VERSION,
+            "manual compiler bundle version mismatch; regenerate the bundle"
+        );
+        ensure!(
+            (1..=MAX_MEMORY_COMPILER_MESSAGES).contains(&bundle.max_messages),
+            "manual compiler bundle max_messages is out of bounds"
+        );
+        let rebuilt_prompt = build_memory_compiler_prompt(&bundle.input)?;
+        ensure!(
+            rebuilt_prompt == bundle.prompt,
+            "manual compiler bundle prompt does not match its input; regenerate the bundle"
+        );
+        ensure!(
+            sha256_hex(bundle.prompt.as_bytes()) == bundle.prompt_sha256,
+            "manual compiler bundle prompt hash mismatch; regenerate the bundle"
+        );
+        let current = self
+            .prepare_memory_compilation(
+                &bundle.input.project,
+                &bundle.input.conversation_id,
+                bundle.max_messages,
+            )?
+            .ok_or_else(|| anyhow!("manual compiler bundle is stale or already caught up"))?;
+        ensure!(
+            memory_compiler_inputs_equivalent(&current, &bundle.input),
+            "manual compiler bundle is stale; project memory or canonical conversation state changed"
+        );
+        self.stage_memory_compiler_output(&bundle.input, model_label, output_json, created_at)
     }
 
     pub async fn compile_memory_conversation(
@@ -1042,6 +1110,21 @@ fn deterministic_id(prefix: &str, parts: &[&str]) -> String {
         digest.update(part.as_bytes());
     }
     format!("{prefix}:{}", hex::encode(digest.finalize()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn memory_compiler_inputs_equivalent(
+    current: &MemoryCompilerInput,
+    bundled: &MemoryCompilerInput,
+) -> bool {
+    let mut current = current.clone();
+    let mut bundled = bundled.clone();
+    current.working_memory.generated_at = 0.0;
+    bundled.working_memory.generated_at = 0.0;
+    current == bundled
 }
 
 fn clip_text(text: &str, max_chars: usize) -> String {

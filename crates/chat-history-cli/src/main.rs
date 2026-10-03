@@ -11,8 +11,9 @@ use chat_history_core::{
     CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
-    MAX_MEMORY_COMPILER_MESSAGES, MemoryEvidence, MemoryEvidenceKind, MemoryKind,
-    MemoryModelClient, MemoryPromotionReview, NormalizedConversation, SearchMode, SearchOptions,
+    MAX_MEMORY_COMPILER_MESSAGES, MemoryCompilerManualBundle, MemoryEvidence, MemoryEvidenceKind,
+    MemoryKind, MemoryModelClient, MemoryPromotionReview, NormalizedConversation, SearchMode,
+    SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
@@ -139,6 +140,29 @@ enum Command {
         conversation_id: String,
         #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
         max_messages: usize,
+    },
+    /// Export one bounded compiler prompt/bundle for manual Codex handoff. Never invokes a model.
+    MemoryCompileManualExport {
+        #[arg(long)]
+        project: String,
+        conversation_id: String,
+        #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
+        max_messages: usize,
+        #[arg(long)]
+        bundle_out: PathBuf,
+        #[arg(long)]
+        prompt_out: PathBuf,
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    /// Stage a manually returned compiler JSON response against its exact exported bundle.
+    MemoryCompileManualStage {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        response: PathBuf,
+        #[arg(long)]
+        model_label: String,
     },
     /// Compile recent strong-match conversations for one project, bounded by model-call count.
     MemoryCompileProject {
@@ -656,6 +680,73 @@ async fn main() -> anyhow::Result<()> {
                 "result": result,
             }))?;
         }
+        Command::MemoryCompileManualExport {
+            project,
+            conversation_id,
+            max_messages,
+            bundle_out,
+            prompt_out,
+            overwrite,
+        } => {
+            anyhow::ensure!(
+                bundle_out != prompt_out,
+                "--bundle-out and --prompt-out must be different paths"
+            );
+            anyhow::ensure!(
+                bundle_out != Path::new("-") && prompt_out != Path::new("-"),
+                "manual compiler export requires real output file paths"
+            );
+            let Some(bundle) = service.prepare_manual_memory_compiler_bundle(
+                &project,
+                &conversation_id,
+                max_messages,
+            )?
+            else {
+                print_json(&serde_json::json!({
+                    "status": "caught_up",
+                    "project": project,
+                    "conversation_id": conversation_id,
+                }))?;
+                return Ok(());
+            };
+            ensure_output_paths_available(&[&bundle_out, &prompt_out], overwrite)?;
+            write_output_file(&bundle_out, &serde_json::to_vec_pretty(&bundle)?)?;
+            write_output_file(&prompt_out, bundle.prompt.as_bytes())?;
+            print_json(&serde_json::json!({
+                "status": "exported",
+                "project": bundle.input.project,
+                "conversation_id": bundle.input.conversation_id,
+                "source_snapshot_id": bundle.input.source_snapshot_id,
+                "through_turn_index": bundle.input.through_turn_index,
+                "prompt_sha256": bundle.prompt_sha256,
+                "bundle_path": bundle_out,
+                "prompt_path": prompt_out,
+            }))?;
+        }
+        Command::MemoryCompileManualStage {
+            bundle,
+            response,
+            model_label,
+        } => {
+            let bundle: MemoryCompilerManualBundle = read_json_document(&bundle, None)?;
+            let output_json = read_input_text(&response, None)?;
+            let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let staged = service.stage_manual_memory_compiler_output(
+                &bundle,
+                &model_label,
+                &output_json,
+                created_at,
+            )?;
+            print_json(&serde_json::json!({
+                "status": "staged",
+                "project": bundle.input.project,
+                "conversation_id": bundle.input.conversation_id,
+                "source_snapshot_id": bundle.input.source_snapshot_id,
+                "through_turn_index": bundle.input.through_turn_index,
+                "model_label": model_label,
+                "staged": staged,
+            }))?;
+        }
         Command::MemoryCompileProject {
             project,
             scan_limit,
@@ -952,6 +1043,29 @@ fn default_export_path() -> PathBuf {
 fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn ensure_output_paths_available(paths: &[&Path], overwrite: bool) -> anyhow::Result<()> {
+    if overwrite {
+        return Ok(());
+    }
+    for path in paths {
+        anyhow::ensure!(
+            !path.exists(),
+            "output file already exists: {}; pass --overwrite to replace it",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn write_output_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
 fn parse_promotion_evidence(

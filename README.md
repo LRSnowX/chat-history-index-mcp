@@ -90,6 +90,14 @@ only; it never promotes them into durable Working Memory by itself:
 ./scripts/chat-history-cli memory-compile-plan --project LEMonX
 ./scripts/chat-history-cli memory-compile-conversation --project LEMonX <conversation-id>
 ./scripts/chat-history-cli memory-compile-project --project LEMonX
+./scripts/chat-history-cli memory-compile-manual-export \
+  --project LEMonX <conversation-id> \
+  --bundle-out /tmp/lemonx-memory.bundle.json \
+  --prompt-out /tmp/lemonx-memory.prompt.txt
+./scripts/chat-history-cli memory-compile-manual-stage \
+  --bundle /tmp/lemonx-memory.bundle.json \
+  --response /tmp/lemonx-memory.response.json \
+  --model-label "GPT-6.1 Sol + medium (manual)"
 ./scripts/chat-history-cli memory-candidates --project LEMonX
 ./scripts/chat-history-cli memory-candidate <candidate-id>
 ./scripts/chat-history-cli memory-candidate-reviews <candidate-id>
@@ -117,6 +125,17 @@ delta preparation without invoking Codex or staging candidates. It reports
 ready/caught-up/failure state and the exact turn range that a later compile
 would process. Legacy conversations may have their canonical evidence snapshot
 materialized lazily during planning.
+
+For workflows where Codex must remain a user-operated conversation, use the
+manual compiler handoff instead of `memory-compile-conversation` or
+`memory-compile-project`. `memory-compile-manual-export` never invokes a model:
+it writes one exact state-bound bundle plus the prompt to paste manually into
+Codex. Save Codex's JSON-only response separately, then pass both files to
+`memory-compile-manual-stage`. Before staging, CHIM rebuilds the current
+compiler input and rejects the bundle if the canonical snapshot, Working
+Memory, Pending Memory, project identity, or compile delta changed. A bundle is
+therefore effectively single-use. Manual staging still creates pending
+candidates only; promotion remains an explicit later review action.
 
 Project compilation scans recent conversations in metadata-recency order,
 requires the same strong project match as single-conversation compilation, and
