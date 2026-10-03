@@ -12,8 +12,8 @@ use chat_history_core::{
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
     MAX_MEMORY_COMPILER_MESSAGES, MemoryCompilerManualBundle, MemoryEvidence, MemoryEvidenceKind,
-    MemoryKind, MemoryModelClient, MemoryPromotionReview, NormalizedConversation, SearchMode,
-    SearchOptions,
+    MemoryKind, MemoryModelClient, MemoryPromotionReview, NormalizedConversation,
+    ProjectMemoryConfirmationInput, ProjectMemoryRetirementInput, SearchMode, SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
@@ -290,6 +290,47 @@ enum Command {
         #[arg(long)]
         reason: String,
         #[arg(long = "evidence", required = true)]
+        evidence: Vec<String>,
+    },
+    /// Confirm one stable project-local historical rule after explicit user review.
+    MemoryProjectConfirm {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        key: String,
+        #[arg(
+            long,
+            conflicts_with = "value_json",
+            required_unless_present = "value_json"
+        )]
+        value: Option<String>,
+        #[arg(long, conflicts_with = "value", required_unless_present = "value")]
+        value_json: Option<String>,
+        #[arg(long, default_value_t = 95)]
+        importance: u8,
+        #[arg(long, default_value_t = 1.0)]
+        confidence: f64,
+        #[arg(long)]
+        supersedes: Option<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        user_confirmation: String,
+        #[arg(long = "evidence")]
+        evidence: Vec<String>,
+    },
+    /// Retire one previously user-confirmed project-local rule.
+    MemoryProjectRetire {
+        #[arg(long)]
+        project: String,
+        memory_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        user_confirmation: String,
+        #[arg(long = "evidence")]
         evidence: Vec<String>,
     },
     Resume,
@@ -896,7 +937,7 @@ async fn main() -> anyhow::Result<()> {
             evidence,
         } => {
             let authored_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
-            let value = parse_collaboration_value(value, value_json)?;
+            let value = parse_memory_value(value, value_json)?;
             let item = service.author_collaboration_memory(&CollaborationMemoryAuthoringInput {
                 kind: MemoryKind::parse(kind.trim())?,
                 key,
@@ -933,6 +974,80 @@ async fn main() -> anyhow::Result<()> {
                     )?,
                     retired_at,
                 })?;
+            print_json(&item)?;
+        }
+        Command::MemoryProjectConfirm {
+            project,
+            kind,
+            key,
+            value,
+            value_json,
+            importance,
+            confidence,
+            supersedes,
+            reason,
+            user_confirmation,
+            evidence,
+        } => {
+            let confirmed_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let value = parse_memory_value(value, value_json)?;
+            let mut parsed_evidence = vec![MemoryEvidence {
+                kind: MemoryEvidenceKind::UserStatement,
+                reference: user_confirmation,
+                detail: serde_json::json!({
+                    "source": "operator_project_confirmation_cli",
+                }),
+                created_at: confirmed_at,
+            }];
+            parsed_evidence.extend(parse_memory_evidence(
+                &evidence,
+                confirmed_at,
+                "operator_project_confirmation_cli",
+            )?);
+            let item = service.confirm_project_memory(&ProjectMemoryConfirmationInput {
+                project,
+                kind: MemoryKind::parse(kind.trim())?,
+                key,
+                value,
+                importance,
+                confidence,
+                valid_from: None,
+                valid_until: None,
+                supersedes_memory_id: supersedes,
+                review_reason: reason,
+                evidence: parsed_evidence,
+                confirmed_at,
+            })?;
+            print_json(&item)?;
+        }
+        Command::MemoryProjectRetire {
+            project,
+            memory_id,
+            reason,
+            user_confirmation,
+            evidence,
+        } => {
+            let retired_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let mut parsed_evidence = vec![MemoryEvidence {
+                kind: MemoryEvidenceKind::UserStatement,
+                reference: user_confirmation,
+                detail: serde_json::json!({
+                    "source": "operator_project_confirmation_cli",
+                }),
+                created_at: retired_at,
+            }];
+            parsed_evidence.extend(parse_memory_evidence(
+                &evidence,
+                retired_at,
+                "operator_project_confirmation_cli",
+            )?);
+            let item = service.retire_confirmed_project_memory(&ProjectMemoryRetirementInput {
+                project,
+                memory_id,
+                review_reason: reason,
+                evidence: parsed_evidence,
+                retired_at,
+            })?;
             print_json(&item)?;
         }
         Command::Resume => {
@@ -1100,7 +1215,7 @@ fn parse_memory_evidence(
         .collect()
 }
 
-fn parse_collaboration_value(
+fn parse_memory_value(
     value: Option<String>,
     value_json: Option<String>,
 ) -> anyhow::Result<serde_json::Value> {

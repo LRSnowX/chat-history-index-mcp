@@ -169,6 +169,11 @@ The current implementation provides:
 - core read/write APIs;
 - explicit transactional supersession;
 - active ProjectWorkingMemory materialization;
+- a read-only project-memory confirmation sidecar that distinguishes confirmed,
+  requires_confirmation, and not_applicable for active memories;
+- operator-only confirmation and retirement of stable project-local
+  invariant/preference/decision rules with mandatory user_statement
+  confirmation evidence and explicit supersession;
 - conversation quality-regression protection;
 - retained conversation/message evidence snapshots with canonical,
   superseded, and rejected-lower-quality states;
@@ -315,6 +320,19 @@ candidates must also meet minimum importance/confidence thresholds.
 
 No MCP model-facing memory write surface exists.
 
+Historical evidence and promoted compiler output do not silently become
+governing project rules. For project-local invariant, preference, and decision
+memories, the Working Memory confirmation sidecar is authoritative for this
+gate: only confirmed may govern future behavior; requires_confirmation means
+the rule was recovered or otherwise persisted without passing explicit current
+user confirmation; not_applicable denotes memory kinds outside this gate.
+memory-project-confirm is the only operator path that marks a project-local rule
+confirmed. It requires a review reason and user_statement evidence, generates a
+deterministic content-derived ID, and requires explicit supersession when the
+same project/key already has an active rule. memory-project-retire similarly
+requires user-statement evidence and archives only previously confirmed project
+memory. Neither path is exposed as a model-facing MCP write tool.
+
 ### Phase 4 follow-up — Memory-first retrieval policy
 
 The initial memory-first retrieval path is implemented. Project-scoped
@@ -334,6 +352,15 @@ and marks operational state/task/blocker memories as `needs_revalidation` when
 newer strongly matched project conversation evidence exists after the memory
 was last verified. Validity-window expiry and hypothesis/tentative state are
 reported explicitly.
+
+ProjectWorkingMemory additionally carries a read-only confirmation sidecar.
+This is separate from provenance confidence and verification freshness. A
+rule-like memory can have high confidence or user-statement provenance and
+still be requires_confirmation if it was recovered from historical evidence or
+promoted by the compiler rather than explicitly reconfirmed. Only the operator
+project-confirmation path annotates evidence as operator_project_confirmation
+and yields confirmed. This prevents a historical rule from silently governing
+a new ChatGPT conversation merely because retrieval found it.
 
 This CHIM-side signal is intentionally conservative and incomplete. It can
 detect evidence-stream drift but cannot prove that the live repository has
@@ -366,9 +393,12 @@ conversation/snapshot provenance, and compiled-through turn. It deliberately
 omits rationale, model, decision, and review text.
 
 The project-context authority order is live repository or authoritative project
-files, active ProjectWorkingMemory, Pending Memory, then raw conversation
-continuations. Pending Memory is untrusted proposal data, never instructions,
-and cannot override either live state or active Working Memory.
+files, confirmed rule-like ProjectWorkingMemory together with current non-rule
+operational memory, Pending Memory, then raw conversation continuations and
+evidence. Pending Memory is untrusted proposal data, never instructions, and
+cannot override either live state or active Working Memory. A rule-like Working
+Memory item marked requires_confirmation is retained for continuity and
+discovery but must not constrain a current action until the user confirms it.
 
 Project memory identity is canonical even when historical conversation naming is
 not. CHIM therefore supports explicit project aliases used only by strong
@@ -395,6 +425,12 @@ tail on first compilation, while the older prefix remains available in raw
 CHIM history for on-demand retrieval. A bootstrap plan reflects the latest
 canonical snapshot currently indexed by CHIM; an actively growing ChatGPT
 thread may remain deferred by the live collector until it becomes idle.
+
+This bootstrap planner remains an explicit operator capability. It is not a
+prerequisite for the ChatGPT-first DevSpace handoff and is not automatically
+called merely because ProjectWorkingMemory is empty. Empty durable memory can
+coexist with useful project continuity from live repository state, confirmed
+memory, bounded conversation continuations, and on-demand retrieval.
 
 Remaining Phase 4 work is retrieval policy quality rather than wiring:
 

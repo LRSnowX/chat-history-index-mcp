@@ -86,6 +86,12 @@ lexical-vector fallback is desired; it is not a multilingual semantic model.
 Project-memory compilation is an explicit operator action and stages candidates
 only; it never promotes them into durable Working Memory by itself:
 
+These compiler and bootstrap commands are optional operator capabilities, not
+the default ChatGPT continuity path. DevSpace's ChatGPT-first handoff does not
+invoke a memory model or Codex merely because ProjectWorkingMemory is empty;
+it relies on live project state, confirmed memory, bounded continuations, and
+on-demand CHIM retrieval.
+
 ```bash
 ./scripts/chat-history-cli memory-compile-plan --project LEMonX
 ./scripts/chat-history-cli memory-compile-conversation --project LEMonX <conversation-id>
@@ -118,7 +124,37 @@ only; it never promotes them into durable Working Memory by itself:
 ./scripts/chat-history-cli memory-collaboration-retire <memory-id> \
   --reason "explicitly retired cross-project rule" \
   --evidence user_statement:<conversation-reference>
+./scripts/chat-history-cli memory-project-confirm \
+  --project LEMonX \
+  --kind decision \
+  --key prompt_policy \
+  --value "Use the confirmed project prompt policy." \
+  --reason "user confirmed recovered historical rule" \
+  --user-confirmation current_chat:user_confirmation
+./scripts/chat-history-cli memory-project-retire \
+  --project LEMonX <memory-id> \
+  --reason "user explicitly retired the project rule" \
+  --user-confirmation current_chat:user_retirement
 ```
+
+Project-local invariant/preference/decision memories are subject to a separate
+historical-decision confirmation gate. ProjectWorkingMemory exposes a
+`confirmation` sidecar with `confirmed`, `requires_confirmation`, or
+`not_applicable` for each active item. A historical or compiler-derived
+rule-like memory does not become governing merely because it exists in Working
+Memory or was promoted from a candidate: unless it was written through
+`memory-project-confirm` with explicit `user_statement` confirmation evidence,
+it remains `requires_confirmation`. Ordinary operational memories outside this
+rule gate are `not_applicable` and continue to use the existing verification
+and live-repository authority rules.
+
+`memory-project-confirm` is an operator-only CLI path. It accepts only
+`invariant`, `preference`, and `decision`, requires a non-empty review reason
+and explicit `--user-confirmation`, is deterministic/idempotent for the same
+canonical rule, and requires explicit `--supersedes` to replace an active rule
+with the same project/key. `memory-project-retire` likewise requires explicit
+user-confirmation evidence. Neither command is exposed as a model-facing MCP
+write tool.
 
 `memory-compile-plan` performs the same recent strong-match scan and bounded
 delta preparation without invoking Codex or staging candidates. It reports

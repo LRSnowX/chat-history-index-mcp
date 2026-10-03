@@ -88,6 +88,12 @@ string_enum!(MemoryEvidenceKind {
     DevspaceResult => "devspace_result",
 });
 
+string_enum!(ProjectMemoryConfirmationState {
+    Confirmed => "confirmed",
+    RequiresConfirmation => "requires_confirmation",
+    NotApplicable => "not_applicable",
+});
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryEvidence {
     pub kind: MemoryEvidenceKind,
@@ -124,6 +130,15 @@ pub struct ProjectWorkingMemory {
     pub items: Vec<MemoryItem>,
     #[serde(default)]
     pub verification: Vec<ProjectWorkingMemoryVerification>,
+    #[serde(default)]
+    pub confirmation: Vec<ProjectMemoryConfirmation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectMemoryConfirmation {
+    pub memory_id: String,
+    pub state: ProjectMemoryConfirmationState,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -187,6 +202,33 @@ pub struct CollaborationMemoryAuthoringInput {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CollaborationMemoryRetirementInput {
+    pub memory_id: String,
+    pub review_reason: String,
+    #[serde(default)]
+    pub evidence: Vec<MemoryEvidence>,
+    pub retired_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectMemoryConfirmationInput {
+    pub project: String,
+    pub kind: MemoryKind,
+    pub key: String,
+    pub value: Value,
+    pub importance: u8,
+    pub confidence: f64,
+    pub valid_from: Option<f64>,
+    pub valid_until: Option<f64>,
+    pub supersedes_memory_id: Option<String>,
+    pub review_reason: String,
+    #[serde(default)]
+    pub evidence: Vec<MemoryEvidence>,
+    pub confirmed_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectMemoryRetirementInput {
+    pub project: String,
     pub memory_id: String,
     pub review_reason: String,
     #[serde(default)]
@@ -272,11 +314,13 @@ impl IndexService {
             .iter()
             .map(|item| working_memory_verification(item, generated_at, latest_project_evidence_at))
             .collect();
+        let confirmation = items.iter().map(project_memory_confirmation).collect();
         Ok(ProjectWorkingMemory {
             project: project.to_string(),
             generated_at,
             items,
             verification,
+            confirmation,
         })
     }
 
@@ -405,6 +449,123 @@ impl IndexService {
         tx.commit()?;
         Ok(item)
     }
+
+    pub fn confirm_project_memory(
+        &self,
+        input: &ProjectMemoryConfirmationInput,
+    ) -> anyhow::Result<MemoryItem> {
+        validate_project_memory_confirmation(input)?;
+        let project = input.project.trim().to_string();
+        let canonical_value = canonical_json_string(&input.value)?;
+        let key = input.key.trim().to_string();
+        let memory_id = deterministic_project_confirmed_memory_id(
+            &project,
+            input.kind,
+            &key,
+            &canonical_value,
+            input.supersedes_memory_id.as_deref(),
+        );
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let tx = conn.unchecked_transaction()?;
+
+        if let Some(existing) = load_memory_item(&tx, &memory_id)? {
+            ensure!(
+                existing.scope
+                    == MemoryScope::Project {
+                        project: project.clone()
+                    }
+                    && existing.kind == input.kind
+                    && existing.key == key
+                    && existing.value == input.value
+                    && existing.supersedes_memory_id == input.supersedes_memory_id,
+                "existing confirmed project memory identity does not match confirmation request"
+            );
+            return Ok(existing);
+        }
+
+        if input.supersedes_memory_id.is_none() {
+            let active: Option<String> = tx
+                .query_row(
+                    "SELECT memory_id FROM memory_items WHERE scope_type = 'project' AND scope_id = ?1 AND memory_key = ?2 AND status = 'active'",
+                    params![project, key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            ensure!(
+                active.is_none(),
+                "active project memory already exists for key {}; explicitly supersede it",
+                key
+            );
+        }
+
+        let item = MemoryItem {
+            memory_id,
+            scope: MemoryScope::Project {
+                project: project.clone(),
+            },
+            kind: input.kind,
+            key,
+            value: input.value.clone(),
+            status: MemoryStatus::Active,
+            importance: input.importance,
+            confidence: input.confidence,
+            valid_from: input.valid_from.or(Some(input.confirmed_at)),
+            valid_until: input.valid_until,
+            supersedes_memory_id: input.supersedes_memory_id.clone(),
+            created_at: input.confirmed_at,
+            updated_at: input.confirmed_at,
+            last_verified_at: Some(input.confirmed_at),
+            evidence: annotate_project_confirmation_evidence(
+                &input.evidence,
+                &input.review_reason,
+                "confirm",
+            ),
+        };
+        put_memory_item_tx(&tx, &item)?;
+        tx.commit()?;
+        Ok(item)
+    }
+
+    pub fn retire_confirmed_project_memory(
+        &self,
+        input: &ProjectMemoryRetirementInput,
+    ) -> anyhow::Result<MemoryItem> {
+        validate_project_memory_retirement(input)?;
+        let project = input.project.trim();
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let tx = conn.unchecked_transaction()?;
+        let mut item = load_memory_item(&tx, &input.memory_id)?
+            .ok_or_else(|| anyhow!("project memory does not exist: {}", input.memory_id))?;
+        ensure!(
+            item.scope
+                == MemoryScope::Project {
+                    project: project.to_string()
+                },
+            "project memory does not belong to the requested project"
+        );
+        ensure!(
+            project_memory_confirmation(&item).state == ProjectMemoryConfirmationState::Confirmed,
+            "only user-confirmed project memory can be retired through this operator path"
+        );
+        if item.status == MemoryStatus::Archived {
+            return Ok(item);
+        }
+        ensure!(
+            item.status == MemoryStatus::Active,
+            "only active confirmed project memory can be retired"
+        );
+        item.status = MemoryStatus::Archived;
+        item.updated_at = input.retired_at;
+        item.last_verified_at = Some(input.retired_at);
+        item.evidence.extend(annotate_project_confirmation_evidence(
+            &input.evidence,
+            &input.review_reason,
+            "retire",
+        ));
+        put_memory_item_tx(&tx, &item)?;
+        tx.commit()?;
+        Ok(item)
+    }
 }
 
 fn validate_collaboration_authoring(
@@ -494,6 +655,99 @@ fn collaboration_kind_allowed(kind: MemoryKind) -> bool {
     )
 }
 
+fn project_confirmation_kind_allowed(kind: MemoryKind) -> bool {
+    matches!(
+        kind,
+        MemoryKind::Invariant | MemoryKind::Preference | MemoryKind::Decision
+    )
+}
+
+fn validate_project_memory_confirmation(
+    input: &ProjectMemoryConfirmationInput,
+) -> anyhow::Result<()> {
+    ensure!(
+        !input.project.trim().is_empty(),
+        "confirmed project memory project cannot be empty"
+    );
+    ensure!(
+        project_confirmation_kind_allowed(input.kind),
+        "confirmed project memory kind must be invariant, preference, or decision"
+    );
+    ensure!(
+        !input.key.trim().is_empty(),
+        "confirmed project memory key cannot be empty"
+    );
+    ensure!(
+        !input.value.is_null(),
+        "confirmed project memory value cannot be null"
+    );
+    ensure!(
+        input.confidence.is_finite() && (0.0..=1.0).contains(&input.confidence),
+        "confirmed project memory confidence must be between 0 and 1"
+    );
+    ensure!(
+        input.importance <= 100,
+        "confirmed project memory importance must be <= 100"
+    );
+    ensure!(
+        !input.review_reason.trim().is_empty(),
+        "confirmed project memory review reason cannot be empty"
+    );
+    ensure!(
+        !input.evidence.is_empty(),
+        "confirmed project memory requires confirmation evidence"
+    );
+    ensure!(
+        input
+            .evidence
+            .iter()
+            .any(|item| item.kind == MemoryEvidenceKind::UserStatement),
+        "confirmed project memory requires user_statement evidence"
+    );
+    ensure!(
+        input.confirmed_at.is_finite(),
+        "confirmed project memory confirmed_at must be finite"
+    );
+    if let (Some(from), Some(until)) = (input.valid_from, input.valid_until) {
+        ensure!(
+            until >= from,
+            "confirmed project memory validity interval is inverted"
+        );
+    }
+    validate_operator_evidence(&input.evidence)
+}
+
+fn validate_project_memory_retirement(input: &ProjectMemoryRetirementInput) -> anyhow::Result<()> {
+    ensure!(
+        !input.project.trim().is_empty(),
+        "confirmed project memory project cannot be empty"
+    );
+    ensure!(
+        !input.memory_id.trim().is_empty(),
+        "confirmed project memory id cannot be empty"
+    );
+    ensure!(
+        !input.review_reason.trim().is_empty(),
+        "confirmed project memory retirement reason cannot be empty"
+    );
+    ensure!(
+        !input.evidence.is_empty(),
+        "confirmed project memory retirement requires evidence"
+    );
+    ensure!(
+        input
+            .evidence
+            .iter()
+            .any(|item| item.kind == MemoryEvidenceKind::UserStatement),
+        "confirmed project memory retirement requires user_statement evidence"
+    );
+    ensure!(
+        input.retired_at.is_finite(),
+        "confirmed project memory retired_at must be finite"
+    );
+    validate_operator_evidence(&input.evidence)
+}
+
 fn annotate_operator_evidence(
     evidence: &[MemoryEvidence],
     review_reason: &str,
@@ -506,6 +760,27 @@ fn annotate_operator_evidence(
             reference: item.reference.clone(),
             detail: serde_json::json!({
                 "source": "operator_collaboration_authoring",
+                "action": action,
+                "review_reason": review_reason,
+                "original_detail": item.detail.clone(),
+            }),
+            created_at: item.created_at,
+        })
+        .collect()
+}
+
+fn annotate_project_confirmation_evidence(
+    evidence: &[MemoryEvidence],
+    review_reason: &str,
+    action: &str,
+) -> Vec<MemoryEvidence> {
+    evidence
+        .iter()
+        .map(|item| MemoryEvidence {
+            kind: item.kind,
+            reference: item.reference.clone(),
+            detail: serde_json::json!({
+                "source": "operator_project_confirmation",
                 "action": action,
                 "review_reason": review_reason,
                 "original_detail": item.detail.clone(),
@@ -533,6 +808,59 @@ fn deterministic_collaboration_memory_id(
         digest.update(part.as_bytes());
     }
     format!("collaboration-memory-v1:{}", hex::encode(digest.finalize()))
+}
+
+fn deterministic_project_confirmed_memory_id(
+    project: &str,
+    kind: MemoryKind,
+    key: &str,
+    canonical_value: &str,
+    supersedes_memory_id: Option<&str>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"project-confirmed-memory-v1");
+    for part in [
+        project.trim(),
+        kind.as_str(),
+        key.trim(),
+        canonical_value,
+        supersedes_memory_id.unwrap_or(""),
+    ] {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    format!(
+        "project-confirmed-memory-v1:{}",
+        hex::encode(digest.finalize())
+    )
+}
+
+fn project_memory_confirmation(item: &MemoryItem) -> ProjectMemoryConfirmation {
+    if !project_confirmation_kind_allowed(item.kind) {
+        return ProjectMemoryConfirmation {
+            memory_id: item.memory_id.clone(),
+            state: ProjectMemoryConfirmationState::NotApplicable,
+            reason: Some("memory kind is not governed by historical decision confirmation".into()),
+        };
+    }
+    let confirmed = item.evidence.iter().any(|evidence| {
+        evidence.kind == MemoryEvidenceKind::UserStatement
+            && evidence.detail.get("source").and_then(Value::as_str)
+                == Some("operator_project_confirmation")
+    });
+    ProjectMemoryConfirmation {
+        memory_id: item.memory_id.clone(),
+        state: if confirmed {
+            ProjectMemoryConfirmationState::Confirmed
+        } else {
+            ProjectMemoryConfirmationState::RequiresConfirmation
+        },
+        reason: Some(if confirmed {
+            "user confirmed this project rule through the operator confirmation path".into()
+        } else {
+            "rule-like project memory has not passed the user confirmation gate".into()
+        }),
+    }
 }
 
 fn canonical_json_string(value: &Value) -> anyhow::Result<String> {

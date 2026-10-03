@@ -29,8 +29,9 @@ pub use ingest::{ImportOptions, ImportReport, IndexService, decode_embedding, en
 pub use memory::{
     CollaborationMemory, CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
     MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope, MemoryStatus,
-    ProjectWorkingMemory, ProjectWorkingMemoryVerification, WorkingMemoryClass,
-    WorkingMemoryEvidenceStrength, WorkingMemoryVerificationState,
+    ProjectMemoryConfirmation, ProjectMemoryConfirmationInput, ProjectMemoryConfirmationState,
+    ProjectMemoryRetirementInput, ProjectWorkingMemory, ProjectWorkingMemoryVerification,
+    WorkingMemoryClass, WorkingMemoryEvidenceStrength, WorkingMemoryVerificationState,
 };
 pub use memory_compile::{
     DEFAULT_PENDING_MEMORY_LIMIT, MAX_PENDING_MEMORY_LIMIT, MemoryCandidate,

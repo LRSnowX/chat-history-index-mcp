@@ -5,6 +5,7 @@ use chat_history_core::{
     MemoryCandidatePayload, MemoryCandidateStatus, MemoryCheckpointPrefixStatus,
     MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind,
     MemoryPromotionReview, MemoryScope, MemoryStatus, NormalizedConversation, NormalizedMessage,
+    ProjectMemoryConfirmationInput, ProjectMemoryConfirmationState, ProjectMemoryRetirementInput,
     WorkingMemoryEvidenceStrength, WorkingMemoryVerificationState,
     db::{open_database, restore_database},
 };
@@ -546,6 +547,147 @@ fn collaboration_memory_includes_only_active_global_rules() -> anyhow::Result<()
         .map(|item| item.memory_id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, vec!["decision", "invariant", "preference"]);
+    Ok(())
+}
+
+#[test]
+fn project_historical_decision_confirmation_gate_is_explicit_and_persistent() -> anyhow::Result<()>
+{
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let project = "GateProject";
+
+    service.put_memory_item(&MemoryItem {
+        memory_id: "legacy-prompt-policy".to_string(),
+        scope: MemoryScope::Project {
+            project: project.to_string(),
+        },
+        kind: MemoryKind::Decision,
+        key: "prompt_policy".to_string(),
+        value: json!({"text": "Use the historical prompt structure."}),
+        status: MemoryStatus::Active,
+        importance: 95,
+        confidence: 0.95,
+        valid_from: Some(10.0),
+        valid_until: None,
+        supersedes_memory_id: None,
+        created_at: 10.0,
+        updated_at: 10.0,
+        last_verified_at: Some(10.0),
+        evidence: vec![MemoryEvidence {
+            kind: MemoryEvidenceKind::UserStatement,
+            reference: "conversation:historical:message:u1".to_string(),
+            detail: json!({"source": "historical_conversation"}),
+            created_at: 10.0,
+        }],
+    })?;
+    let initial = service.project_working_memory(project)?;
+    let legacy_confirmation = initial
+        .confirmation
+        .iter()
+        .find(|item| item.memory_id == "legacy-prompt-policy")
+        .expect("legacy rule has confirmation sidecar");
+    assert_eq!(
+        legacy_confirmation.state,
+        ProjectMemoryConfirmationState::RequiresConfirmation
+    );
+
+    let user_evidence = |reference: &str, at: f64| MemoryEvidence {
+        kind: MemoryEvidenceKind::UserStatement,
+        reference: reference.to_string(),
+        detail: json!({"source": "current_user_confirmation"}),
+        created_at: at,
+    };
+    let confirm = |value: &str,
+                   supersedes_memory_id: Option<String>,
+                   at: f64|
+     -> ProjectMemoryConfirmationInput {
+        ProjectMemoryConfirmationInput {
+            project: project.to_string(),
+            kind: MemoryKind::Preference,
+            key: "subagent_policy".to_string(),
+            value: json!({"text": value}),
+            importance: 100,
+            confidence: 1.0,
+            valid_from: None,
+            valid_until: None,
+            supersedes_memory_id,
+            review_reason: "User explicitly confirmed the recovered historical rule.".to_string(),
+            evidence: vec![user_evidence("conversation:current:confirmation", at)],
+            confirmed_at: at,
+        }
+    };
+
+    let mut missing_user_confirmation = confirm("Explicit approval only.", None, 20.0);
+    missing_user_confirmation.evidence[0].kind = MemoryEvidenceKind::ConversationTurn;
+    let error = service
+        .confirm_project_memory(&missing_user_confirmation)
+        .expect_err("confirmation gate requires current user confirmation evidence");
+    assert!(
+        error
+            .to_string()
+            .contains("requires user_statement evidence")
+    );
+
+    let first_request = confirm("Explicit approval only.", None, 20.0);
+    let first = service.confirm_project_memory(&first_request)?;
+    assert!(first.memory_id.starts_with("project-confirmed-memory-v1:"));
+    let replay = service.confirm_project_memory(&ProjectMemoryConfirmationInput {
+        confirmed_at: 21.0,
+        ..first_request.clone()
+    })?;
+    assert_eq!(replay.memory_id, first.memory_id);
+    assert_eq!(replay.created_at, first.created_at);
+
+    let working = service.project_working_memory(project)?;
+    let confirmed = working
+        .confirmation
+        .iter()
+        .find(|item| item.memory_id == first.memory_id)
+        .expect("confirmed rule has confirmation sidecar");
+    assert_eq!(confirmed.state, ProjectMemoryConfirmationState::Confirmed);
+
+    let conflicting = confirm("Automatic use is allowed.", None, 30.0);
+    let error = service
+        .confirm_project_memory(&conflicting)
+        .expect_err("same active key requires explicit supersession");
+    assert!(error.to_string().contains("explicitly supersede"));
+
+    let replacement = service.confirm_project_memory(&confirm(
+        "Explicit approval remains required unless the user changes the rule.",
+        Some(first.memory_id.clone()),
+        40.0,
+    ))?;
+    assert_eq!(
+        service.get_memory_item(&first.memory_id)?.unwrap().status,
+        MemoryStatus::Superseded
+    );
+    let working = service.project_working_memory(project)?;
+    let replacement_confirmation = working
+        .confirmation
+        .iter()
+        .find(|item| item.memory_id == replacement.memory_id)
+        .expect("replacement rule has confirmation sidecar");
+    assert_eq!(
+        replacement_confirmation.state,
+        ProjectMemoryConfirmationState::Confirmed
+    );
+
+    let retired = service.retire_confirmed_project_memory(&ProjectMemoryRetirementInput {
+        project: project.to_string(),
+        memory_id: replacement.memory_id.clone(),
+        review_reason: "User explicitly retired this project-local rule.".to_string(),
+        evidence: vec![user_evidence("conversation:current:retirement", 50.0)],
+        retired_at: 50.0,
+    })?;
+    assert_eq!(retired.status, MemoryStatus::Archived);
+    assert!(
+        service
+            .project_working_memory(project)?
+            .items
+            .iter()
+            .all(|item| item.memory_id != replacement.memory_id)
+    );
     Ok(())
 }
 
