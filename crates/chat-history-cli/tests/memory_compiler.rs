@@ -1,6 +1,8 @@
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
-use chat_history_core::{DataHome, IndexService, NormalizedConversation, NormalizedMessage};
+use chat_history_core::{
+    DataHome, IndexService, MemoryEvidenceKind, NormalizedConversation, NormalizedMessage,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -108,7 +110,7 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
                 "importance": 80,
                 "confidence": 0.9,
                 "rationale": "The compiler run is intentionally staged for operator review.",
-                "evidence_message_ids": ["a1"]
+                "evidence_message_ids": ["u1"]
             }
         ]
     })
@@ -167,6 +169,14 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
 
     let pending = service.pending_memory_candidates("LEMonX").unwrap();
     assert_eq!(pending.len(), 2);
+    let decision_candidate = service
+        .memory_candidate(candidate_ids[1].as_str())
+        .unwrap()
+        .expect("decision candidate exists");
+    assert_eq!(
+        decision_candidate.evidence[0].kind,
+        MemoryEvidenceKind::UserStatement
+    );
     assert!(
         service
             .project_working_memory("LEMonX")
@@ -189,6 +199,14 @@ printf '%s' "$FAKE_CODEX_RESPONSE" > "$out"
     );
     assert_eq!(inspected["status"], "pending");
     assert_eq!(inspected["candidate_id"], candidate_ids[0]);
+
+    let missing_reason = Command::new(env!("CARGO_BIN_EXE_chat-history-cli"))
+        .args(["memory-candidate-promote", candidate_ids[0].as_str()])
+        .env("CHAT_HISTORY_DATA_HOME", &data_home)
+        .output()
+        .expect("run promotion without review reason");
+    assert!(!missing_reason.status.success());
+    assert!(String::from_utf8_lossy(&missing_reason.stderr).contains("--reason <REASON>"));
 
     let promoted = run_cli(
         &data_home,

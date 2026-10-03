@@ -142,7 +142,7 @@ canonical evidence is preserved before mutation.
 
 ## Schema lifecycle
 
-Project Memory Foundation uses schema version 5:
+Project Memory Foundation uses schema version 6:
 
 - version 2 introduced MemoryItem and MemoryEvidence;
 - version 3 introduced retained conversation/message evidence snapshots.
@@ -151,6 +151,8 @@ Project Memory Foundation uses schema version 5:
 - version 5 introduced immutable candidate promotion/reverification review
   history while retaining the latest decision reason on the candidate row for
   compatibility.
+- version 6 introduced explicit canonical-project aliases for strong
+  conversation matching without changing project memory scope identity.
 
 The new tables are created by normal database opening. Legacy version-1
 databases and backups remain restorable: pre-migration health inspection keeps
@@ -248,11 +250,11 @@ Compiler output preserves provenance and cannot write MemoryItems directly.
 Candidates become durable memory only through promotion. Promotion revalidates
 the candidate evidence prefix against the current canonical conversation
 snapshot; edited or branched evidence becomes stale instead of mutating current
-memory. An operator may attach a review reason and additional evidence when
-promoting or reverifying a promoted candidate. The additional evidence is
+memory. The operator CLI requires a non-empty review reason for every promotion
+or reverification and may attach additional evidence. The additional evidence is
 merged into the durable MemoryItem, while each non-empty review remains in an
 append-only candidate review history. Repeating promotion with no new review
-data remains idempotent.
+data remains idempotent at the core API level.
 
 The bounded ChatGPT live-collector scheduler infrastructure is implemented but
 disabled by default. It can be explicitly configured with a project allow-list;
@@ -284,8 +286,10 @@ The remaining Phase 3 work is orchestration and review:
 
 The initial `conservative-v1` eligibility policy is read-only. It deliberately
 does not trust model confidence by itself. Pure `conversation_turn` evidence
-always remains review-required. Rule-like invariant/preference/decision
-candidates need explicit `user_statement` provenance; operational
+always remains review-required. Compiler evidence cited from a user-role message
+is preserved as `user_statement`; assistant and other dialogue evidence remains
+`conversation_turn`. Rule-like invariant/preference/decision candidates need
+explicit `user_statement` provenance; operational
 state/blocker/task/result candidates need independently verified Git,
 repository-state, or DevSpace-result provenance; artifact references need
 document/repository provenance. Hypotheses and archive operations are never
@@ -362,11 +366,13 @@ aliases must normalize to at least three alphanumeric characters, and the same
 normalized explicit alias cannot be registered for multiple canonical projects.
 
 Historical memory bootstrap is selective rather than exhaustive. The read-only
-`memory-bootstrap-plan` operator defaults to the three most recent complete,
-strongly matched ChatGPT conversations and excludes Codex root/child sessions
-from automatic baseline selection. Existing compiler checkpoints, incomplete
-ChatGPT evidence, and older complete ChatGPT conversations are reported as
-explicit exclusion counts. Each selected conversation is expected to require
+`memory-bootstrap-plan` operator first refuses cold bootstrap when active
+ProjectWorkingMemory already exists. Otherwise it defaults to the three most
+recent complete, strongly matched ChatGPT conversations and excludes Codex
+root/child sessions from automatic baseline selection. Existing compiler
+checkpoints, incomplete ChatGPT evidence, and complete ChatGPT conversations
+not selected by the bounded plan are reported as explicit exclusion counts.
+Each selected conversation is expected to require
 one tail-bootstrap model attempt: the compiler receives only its bounded recent
 tail on first compilation, while the older prefix remains available in raw
 CHIM history for on-demand retrieval. A bootstrap plan reflects the latest

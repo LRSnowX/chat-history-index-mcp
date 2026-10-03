@@ -930,7 +930,11 @@ fn candidate_from_proposal(
                 .get(message_id.as_str())
                 .ok_or_else(|| anyhow!("validated evidence message disappeared"))?;
             Ok(MemoryEvidence {
-                kind: MemoryEvidenceKind::ConversationTurn,
+                kind: if message.role == "user" {
+                    MemoryEvidenceKind::UserStatement
+                } else {
+                    MemoryEvidenceKind::ConversationTurn
+                },
                 reference: format!(
                     "conversation:{}:message:{}",
                     input.conversation_id, message.message_id

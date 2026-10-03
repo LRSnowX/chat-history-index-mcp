@@ -211,7 +211,7 @@ enum Command {
     MemoryCandidatePromote {
         candidate_id: String,
         #[arg(long)]
-        reason: Option<String>,
+        reason: String,
         #[arg(long = "evidence")]
         evidence: Vec<String>,
     },
@@ -755,7 +755,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let decided_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
             let review = MemoryPromotionReview {
-                reason,
+                reason: Some(reason),
                 evidence: parse_promotion_evidence(&evidence, decided_at)?,
             };
             let decision =
