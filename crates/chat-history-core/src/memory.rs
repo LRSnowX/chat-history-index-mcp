@@ -236,7 +236,257 @@ pub struct ProjectMemoryRetirementInput {
     pub retired_at: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectOperationalMemorySetInput {
+    pub project: String,
+    pub kind: MemoryKind,
+    pub key: String,
+    pub value: Value,
+    pub importance: u8,
+    pub confidence: f64,
+    pub supersedes_memory_id: Option<String>,
+    pub review_reason: String,
+    pub evidence: Vec<MemoryEvidence>,
+    pub set_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectOperationalMemoryTransitionInput {
+    pub project: String,
+    pub memory_id: String,
+    pub review_reason: String,
+    pub evidence: Vec<MemoryEvidence>,
+    pub transitioned_at: f64,
+}
+
 impl IndexService {
+    pub fn set_project_operational_memory(
+        &self,
+        input: &ProjectOperationalMemorySetInput,
+    ) -> anyhow::Result<MemoryItem> {
+        validate_operational_review(
+            &input.project,
+            &input.review_reason,
+            &input.evidence,
+            input.set_at,
+        )?;
+        ensure!(
+            operational_kind_allowed(input.kind),
+            "operational memory kind must be state, blocker, or task"
+        );
+        ensure!(
+            !input.key.trim().is_empty(),
+            "operational memory key cannot be empty"
+        );
+        ensure!(
+            !input.value.is_null(),
+            "operational memory value cannot be null"
+        );
+        ensure!(
+            input.importance <= 100,
+            "operational memory importance must be <= 100"
+        );
+        ensure!(
+            input.confidence.is_finite() && (0.0..=1.0).contains(&input.confidence),
+            "operational memory confidence must be between 0 and 1"
+        );
+        if let Some(predecessor) = &input.supersedes_memory_id {
+            ensure!(
+                !predecessor.trim().is_empty(),
+                "operational supersedes id cannot be empty"
+            );
+        }
+        let project = input.project.trim().to_string();
+        let key = input.key.trim().to_string();
+        // Request timestamps are observation metadata, not identity. Canonical
+        // content includes review inputs so a different assertion is not silently
+        // accepted as a replay. JSON object ordering is immaterial.
+        let mut identity_evidence = input
+            .evidence
+            .iter()
+            .map(|evidence| {
+                let value = serde_json::json!({
+                    "kind": evidence.kind,
+                    "reference": evidence.reference,
+                    "detail": evidence.detail,
+                });
+                Ok((canonical_json_string(&value)?, value))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        identity_evidence.sort_by(|left, right| left.0.cmp(&right.0));
+        let identity_evidence = identity_evidence
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        let content = canonical_json_string(&serde_json::json!({
+            "project": project, "kind": input.kind, "key": key,
+            "value": input.value, "importance": input.importance,
+            "confidence": input.confidence, "supersedes": input.supersedes_memory_id,
+            "review_reason": input.review_reason.trim(),
+            "evidence": identity_evidence,
+        }))?;
+        let mut digest = Sha256::new();
+        digest.update(b"project-operational-memory-v1:");
+        digest.update(content.as_bytes());
+        let memory_id = format!(
+            "project-operational-memory-v1:{}",
+            hex::encode(digest.finalize())
+        );
+        let scope = MemoryScope::Project {
+            project: project.clone(),
+        };
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let tx = conn.unchecked_transaction()?;
+        if let Some(existing) = load_memory_item(&tx, &memory_id)? {
+            ensure!(
+                existing.scope == scope
+                    && existing.kind == input.kind
+                    && existing.key == key
+                    && existing.value == input.value
+                    && existing.importance == input.importance
+                    && existing.confidence == input.confidence
+                    && existing.supersedes_memory_id == input.supersedes_memory_id,
+                "existing operational memory identity does not match set request"
+            );
+            // Replay must never reactivate a historical version.
+            return Ok(existing);
+        }
+        if let Some(predecessor) = &input.supersedes_memory_id {
+            let old = load_memory_item(&tx, predecessor)?
+                .ok_or_else(|| anyhow!("superseded memory item does not exist: {predecessor}"))?;
+            ensure!(
+                old.scope == scope
+                    && old.key == key
+                    && operational_kind_allowed(old.kind)
+                    && old.status == MemoryStatus::Active,
+                "operational predecessor must be active operational memory with the same project and key"
+            );
+        } else {
+            let active: Option<String> = tx.query_row(
+                "SELECT memory_id FROM memory_items WHERE scope_type = 'project' AND scope_id = ?1 AND memory_key = ?2 AND status = 'active'",
+                params![project, key], |row| row.get(0),
+            ).optional()?;
+            ensure!(
+                active.is_none(),
+                "active project memory already exists for key {}; explicitly supersede it",
+                key
+            );
+        }
+        let mut evidence = Vec::new();
+        append_operational_evidence(
+            &mut evidence,
+            annotate_operational_evidence(
+                &input.evidence,
+                &input.review_reason,
+                if input.supersedes_memory_id.is_some() {
+                    "supersede"
+                } else {
+                    "set"
+                },
+                input.set_at,
+            ),
+        );
+        let item = MemoryItem {
+            memory_id,
+            scope,
+            kind: input.kind,
+            key,
+            value: input.value.clone(),
+            status: MemoryStatus::Active,
+            importance: input.importance,
+            confidence: input.confidence,
+            valid_from: Some(input.set_at),
+            valid_until: None,
+            supersedes_memory_id: input.supersedes_memory_id.clone(),
+            created_at: input.set_at,
+            updated_at: input.set_at,
+            last_verified_at: Some(input.set_at),
+            evidence,
+        };
+        put_memory_item_tx(&tx, &item)?;
+        let item =
+            load_memory_item(&tx, &item.memory_id)?.context("reading operational set result")?;
+        tx.commit()?;
+        Ok(item)
+    }
+
+    pub fn resolve_project_operational_memory(
+        &self,
+        input: &ProjectOperationalMemoryTransitionInput,
+    ) -> anyhow::Result<MemoryItem> {
+        self.transition_project_operational_memory(input, MemoryStatus::Resolved)
+    }
+
+    pub fn archive_project_operational_memory(
+        &self,
+        input: &ProjectOperationalMemoryTransitionInput,
+    ) -> anyhow::Result<MemoryItem> {
+        self.transition_project_operational_memory(input, MemoryStatus::Archived)
+    }
+
+    fn transition_project_operational_memory(
+        &self,
+        input: &ProjectOperationalMemoryTransitionInput,
+        status: MemoryStatus,
+    ) -> anyhow::Result<MemoryItem> {
+        validate_operational_review(
+            &input.project,
+            &input.review_reason,
+            &input.evidence,
+            input.transitioned_at,
+        )?;
+        ensure!(
+            !input.memory_id.trim().is_empty(),
+            "operational memory id cannot be empty"
+        );
+        let conn = open_database(&self.data_home.paths().db_path)?;
+        let tx = conn.unchecked_transaction()?;
+        let mut item = load_memory_item(&tx, &input.memory_id)?
+            .ok_or_else(|| anyhow!("operational memory does not exist: {}", input.memory_id))?;
+        ensure!(
+            item.scope
+                == MemoryScope::Project {
+                    project: input.project.trim().to_string()
+                },
+            "operational memory does not belong to the requested project"
+        );
+        ensure!(
+            operational_kind_allowed(item.kind),
+            "operational memory kind must be state, blocker, or task"
+        );
+        if item.status == status {
+            return Ok(item);
+        }
+        ensure!(
+            item.status == MemoryStatus::Active
+                || (status == MemoryStatus::Archived && item.status == MemoryStatus::Resolved),
+            "invalid operational memory lifecycle transition: {} to {}",
+            item.status.as_str(),
+            status.as_str()
+        );
+        item.status = status;
+        item.updated_at = input.transitioned_at;
+        item.last_verified_at = Some(input.transitioned_at);
+        append_operational_evidence(
+            &mut item.evidence,
+            annotate_operational_evidence(
+                &input.evidence,
+                &input.review_reason,
+                if status == MemoryStatus::Resolved {
+                    "resolve"
+                } else {
+                    "archive"
+                },
+                input.transitioned_at,
+            ),
+        );
+        put_memory_item_tx(&tx, &item)?;
+        let item = load_memory_item(&tx, &item.memory_id)?
+            .context("reading operational transition result")?;
+        tx.commit()?;
+        Ok(item)
+    }
+
     pub fn put_memory_item(&self, item: &MemoryItem) -> anyhow::Result<()> {
         let conn = open_database(&self.data_home.paths().db_path)?;
         let tx = conn.unchecked_transaction()?;
@@ -646,6 +896,80 @@ fn validate_operator_evidence(evidence: &[MemoryEvidence]) -> anyhow::Result<()>
         );
     }
     Ok(())
+}
+
+fn operational_kind_allowed(kind: MemoryKind) -> bool {
+    matches!(
+        kind,
+        MemoryKind::State | MemoryKind::Blocker | MemoryKind::Task
+    )
+}
+
+fn validate_operational_review(
+    project: &str,
+    reason: &str,
+    evidence: &[MemoryEvidence],
+    timestamp: f64,
+) -> anyhow::Result<()> {
+    ensure!(
+        !project.trim().is_empty(),
+        "operational memory project cannot be empty"
+    );
+    ensure!(
+        !reason.trim().is_empty(),
+        "operational memory review reason cannot be empty"
+    );
+    ensure!(
+        !evidence.is_empty(),
+        "operational memory requires at least one evidence reference"
+    );
+    ensure!(
+        timestamp.is_finite(),
+        "operational memory mutation timestamp must be finite"
+    );
+    validate_operator_evidence(evidence)
+}
+
+fn annotate_operational_evidence(
+    evidence: &[MemoryEvidence],
+    reason: &str,
+    action: &str,
+    timestamp: f64,
+) -> Vec<MemoryEvidence> {
+    evidence
+        .iter()
+        .map(|item| MemoryEvidence {
+            kind: item.kind,
+            reference: item.reference.clone(),
+            created_at: item.created_at,
+            detail: serde_json::json!({
+                "source": "operator_project_operational", "action": action,
+                "review_reason": reason.trim(), "mutated_at": timestamp,
+                "original_detail": item.detail,
+            }),
+        })
+        .collect()
+}
+
+fn append_operational_evidence(existing: &mut Vec<MemoryEvidence>, extra: Vec<MemoryEvidence>) {
+    for review in extra {
+        if let Some(prior) = existing
+            .iter_mut()
+            .find(|item| item.kind == review.kind && item.reference == review.reference)
+        {
+            // The existing evidence primary key is (memory, kind, reference).
+            // Preserve its original detail/timestamp and append the new review
+            // inside detail rather than discarding either provenance record.
+            prior.detail = serde_json::json!({
+                "source": "operator_project_operational",
+                "prior_detail": prior.detail,
+                "appended_review": review.detail,
+                "appended_review_evidence_created_at": review.created_at,
+            });
+        } else {
+            existing.push(review);
+        }
+    }
 }
 
 fn collaboration_kind_allowed(kind: MemoryKind) -> bool {

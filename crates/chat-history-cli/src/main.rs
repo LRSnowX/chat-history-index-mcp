@@ -13,7 +13,8 @@ use chat_history_core::{
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
     MAX_MEMORY_COMPILER_MESSAGES, MemoryCompilerManualBundle, MemoryEvidence, MemoryEvidenceKind,
     MemoryKind, MemoryModelClient, MemoryPromotionReview, NormalizedConversation,
-    ProjectMemoryConfirmationInput, ProjectMemoryRetirementInput, SearchMode, SearchOptions,
+    ProjectMemoryConfirmationInput, ProjectMemoryRetirementInput, ProjectOperationalMemorySetInput,
+    ProjectOperationalMemoryTransitionInput, SearchMode, SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
@@ -331,6 +332,53 @@ enum Command {
         #[arg(long)]
         user_confirmation: String,
         #[arg(long = "evidence")]
+        evidence: Vec<String>,
+    },
+    /// Explicitly set or supersede project-local operational Working Memory.
+    MemoryProjectOperationalSet {
+        #[arg(long)]
+        project: String,
+        #[arg(long, value_parser = ["state", "blocker", "task"])]
+        kind: String,
+        #[arg(long)]
+        key: String,
+        #[arg(
+            long,
+            conflicts_with = "value_json",
+            required_unless_present = "value_json"
+        )]
+        value: Option<String>,
+        #[arg(long, conflicts_with = "value", required_unless_present = "value")]
+        value_json: Option<String>,
+        #[arg(long, default_value_t = 90)]
+        importance: u8,
+        #[arg(long, default_value_t = 1.0)]
+        confidence: f64,
+        #[arg(long)]
+        supersedes: Option<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "evidence", required = true)]
+        evidence: Vec<String>,
+    },
+    /// Explicitly resolve active project-local operational memory.
+    MemoryProjectOperationalResolve {
+        #[arg(long)]
+        project: String,
+        memory_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "evidence", required = true)]
+        evidence: Vec<String>,
+    },
+    /// Explicitly archive active or resolved project-local operational memory.
+    MemoryProjectOperationalArchive {
+        #[arg(long)]
+        project: String,
+        memory_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "evidence", required = true)]
         evidence: Vec<String>,
     },
     Resume,
@@ -1048,6 +1096,82 @@ async fn main() -> anyhow::Result<()> {
                 evidence: parsed_evidence,
                 retired_at,
             })?;
+            print_json(&item)?;
+        }
+        Command::MemoryProjectOperationalSet {
+            project,
+            kind,
+            key,
+            value,
+            value_json,
+            importance,
+            confidence,
+            supersedes,
+            reason,
+            evidence,
+        } => {
+            let set_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let item =
+                service.set_project_operational_memory(&ProjectOperationalMemorySetInput {
+                    project,
+                    kind: MemoryKind::parse(&kind)?,
+                    key,
+                    value: parse_memory_value(value, value_json)?,
+                    importance,
+                    confidence,
+                    supersedes_memory_id: supersedes,
+                    review_reason: reason,
+                    evidence: parse_memory_evidence(
+                        &evidence,
+                        set_at,
+                        "operator_project_operational_cli",
+                    )?,
+                    set_at,
+                })?;
+            print_json(&item)?;
+        }
+        Command::MemoryProjectOperationalResolve {
+            project,
+            memory_id,
+            reason,
+            evidence,
+        } => {
+            let transitioned_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let item = service.resolve_project_operational_memory(
+                &ProjectOperationalMemoryTransitionInput {
+                    project,
+                    memory_id,
+                    review_reason: reason,
+                    evidence: parse_memory_evidence(
+                        &evidence,
+                        transitioned_at,
+                        "operator_project_operational_cli",
+                    )?,
+                    transitioned_at,
+                },
+            )?;
+            print_json(&item)?;
+        }
+        Command::MemoryProjectOperationalArchive {
+            project,
+            memory_id,
+            reason,
+            evidence,
+        } => {
+            let transitioned_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+            let item = service.archive_project_operational_memory(
+                &ProjectOperationalMemoryTransitionInput {
+                    project,
+                    memory_id,
+                    review_reason: reason,
+                    evidence: parse_memory_evidence(
+                        &evidence,
+                        transitioned_at,
+                        "operator_project_operational_cli",
+                    )?,
+                    transitioned_at,
+                },
+            )?;
             print_json(&item)?;
         }
         Command::Resume => {

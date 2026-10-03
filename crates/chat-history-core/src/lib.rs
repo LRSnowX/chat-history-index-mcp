@@ -30,8 +30,10 @@ pub use memory::{
     CollaborationMemory, CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
     MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind, MemoryScope, MemoryStatus,
     ProjectMemoryConfirmation, ProjectMemoryConfirmationInput, ProjectMemoryConfirmationState,
-    ProjectMemoryRetirementInput, ProjectWorkingMemory, ProjectWorkingMemoryVerification,
-    WorkingMemoryClass, WorkingMemoryEvidenceStrength, WorkingMemoryVerificationState,
+    ProjectMemoryRetirementInput, ProjectOperationalMemorySetInput,
+    ProjectOperationalMemoryTransitionInput, ProjectWorkingMemory,
+    ProjectWorkingMemoryVerification, WorkingMemoryClass, WorkingMemoryEvidenceStrength,
+    WorkingMemoryVerificationState,
 };
 pub use memory_compile::{
     DEFAULT_PENDING_MEMORY_LIMIT, MAX_PENDING_MEMORY_LIMIT, MemoryCandidate,

@@ -1,6 +1,6 @@
 # Operational Working Memory Lifecycle — Checkpoint C
 
-Status: **frozen design / preflight; implementation pending**
+Status: **accepted**
 
 Baseline:
 
@@ -311,3 +311,37 @@ Checkpoint C is complete only when:
 5. the implementation is committed/pushed only after independent DevSpace
    acceptance.
 
+## Acceptance evidence
+
+Independent DevSpace acceptance completed on 2026-10-04.
+
+- Code review found one bounded deterministic-identity hardening issue:
+  operational-set evidence ordering was normalized so the same evidence set
+  remains the same canonical request regardless of CLI argument order.
+- Focused validation passed:
+  - `memory_foundation`: 28/28;
+  - `operational_memory`: 2/2;
+  - `cargo fmt --all -- --check`;
+  - `git diff --check`.
+- Full CI-parity validation passed after a separate baseline compatibility
+  cleanup commit (`9479c99`):
+  - strict workspace clippy with `-D warnings`;
+  - `cargo test --workspace`;
+  - package validation;
+  - Python syntax validation;
+  - remote Codex collector integration;
+  - shell syntax validation;
+  - final diff check.
+- Real LEMonX acceptance used the two existing stale operational memories:
+  - `resume_institutional_onboarding_acceptance` was explicitly resolved;
+  - `institutional_onboarding_access_candidate` was explicitly archived.
+- Both retained their original conversation provenance and received explicit
+  operator review evidence; no automatic retirement occurred.
+- LEMonX memory health after transition reports 2 active, 1 resolved,
+  1 archived, and 0 active memories requiring revalidation.
+- DevSpace handoff inspection contains only the two stable active LEMonX
+  memories and preserves bounded recent continuation; the retired operational
+  entries are absent from active Working Memory.
+
+No schema migration, compiler/candidate change, model-facing memory write tool,
+or DevSpace lifecycle implementation was introduced.

@@ -135,6 +135,17 @@ on-demand CHIM retrieval.
   --project LEMonX <memory-id> \
   --reason "user explicitly retired the project rule" \
   --user-confirmation current_chat:user_retirement
+./scripts/chat-history-cli memory-project-operational-set \
+  --project LEMonX --kind task --key acceptance_next_step \
+  --value "Run the reviewed checkpoint acceptance." \
+  --reason "checkpoint accepted; operator refreshed continuation state" \
+  --evidence document:docs/acceptance.md
+./scripts/chat-history-cli memory-project-operational-resolve \
+  --project LEMonX <memory-id> --reason "operator verified completion" \
+  --evidence git_commit:<sha>
+./scripts/chat-history-cli memory-project-operational-archive \
+  --project LEMonX <memory-id> --reason "operator retired obsolete state" \
+  --evidence document:<review-reference>
 ```
 
 Project-local invariant/preference/decision memories are subject to a separate
@@ -155,6 +166,28 @@ canonical rule, and requires explicit `--supersedes` to replace an active rule
 with the same project/key. `memory-project-retire` likewise requires explicit
 user-confirmation evidence. Neither command is exposed as a model-facing MCP
 write tool.
+
+Operational `state`, `blocker`, and `task` memory has a separate operator-only
+lifecycle through `memory-project-operational-set`, `-resolve`, and `-archive`.
+Every command requires `--project`, a non-empty `--reason`, and at least one
+supported `--evidence KIND:REFERENCE`; no `--user-confirmation` or compiler is
+required. Set accepts exactly one of `--value` or `--value-json`, with importance
+90 and confidence 1.0 by default (bounded to 0–100 and 0–1). An active project/key
+must be replaced explicitly with `--supersedes <active-memory-id>`. The
+predecessor must itself be operational memory in the same project/key, so this
+path cannot supersede a governing project rule.
+
+The canonical set request yields a `project-operational-memory-v1:` content
+ID, excluding generated timestamps but including review/evidence content.
+Exact replays return the existing item without reactivating historical state.
+Resolve accepts active/resolved targets; archive accepts active/resolved/archived
+targets. Superseded versions cannot be retired by these commands. Results are
+JSON MemoryItems. Transitions immediately affect active ProjectWorkingMemory
+and preserve historical provenance. Reused evidence references retain prior
+detail plus the appended review within the existing evidence JSON, respecting
+the existing evidence uniqueness constraint. `needs_revalidation` alone remains
+read-only and never performs lifecycle mutation. These commands add no MCP
+write tools, compiler default changes, or historical-rule confirmation bypass.
 
 `memory-compile-plan` performs the same recent strong-match scan and bounded
 delta preparation without invoking Codex or staging candidates. It reports

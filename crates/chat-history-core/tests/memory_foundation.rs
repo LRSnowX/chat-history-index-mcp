@@ -6,6 +6,7 @@ use chat_history_core::{
     MemoryCompilationBatch, MemoryEvidence, MemoryEvidenceKind, MemoryItem, MemoryKind,
     MemoryPromotionReview, MemoryScope, MemoryStatus, NormalizedConversation, NormalizedMessage,
     ProjectMemoryConfirmationInput, ProjectMemoryConfirmationState, ProjectMemoryRetirementInput,
+    ProjectOperationalMemorySetInput, ProjectOperationalMemoryTransitionInput,
     WorkingMemoryEvidenceStrength, WorkingMemoryVerificationState,
     db::{open_database, restore_database},
 };
@@ -15,6 +16,413 @@ use tempfile::TempDir;
 
 fn service(temp: &TempDir) -> IndexService {
     IndexService::new(DataHome::new(temp.path().join("managed")), None)
+}
+
+fn operational_set(kind: MemoryKind) -> ProjectOperationalMemorySetInput {
+    ProjectOperationalMemorySetInput {
+        project: "LEMonX".into(),
+        kind,
+        key: "operational_key".into(),
+        value: json!({"text": "Accepted checkpoint", "revision": 1}),
+        importance: 90,
+        confidence: 1.0,
+        supersedes_memory_id: None,
+        review_reason: "Checkpoint acceptance".into(),
+        evidence: vec![MemoryEvidence {
+            kind: MemoryEvidenceKind::Document,
+            reference: "docs/acceptance.md".into(),
+            detail: json!({"section": 2}),
+            created_at: 10.0,
+        }],
+        set_at: 10.0,
+    }
+}
+
+fn operational_transition(id: &str) -> ProjectOperationalMemoryTransitionInput {
+    ProjectOperationalMemoryTransitionInput {
+        project: "LEMonX".into(),
+        memory_id: id.into(),
+        review_reason: "Operator reviewed completion".into(),
+        evidence: vec![MemoryEvidence {
+            kind: MemoryEvidenceKind::GitCommit,
+            reference: "git:completed".into(),
+            detail: json!({"check": "passed"}),
+            created_at: 20.0,
+        }],
+        transitioned_at: 20.0,
+    }
+}
+
+#[test]
+fn operational_operator_lifecycle_is_explicit_atomic_and_preserves_history() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let input = operational_set(MemoryKind::State);
+    let first = service.set_project_operational_memory(&input)?;
+    assert!(
+        first
+            .memory_id
+            .starts_with("project-operational-memory-v1:")
+    );
+    assert_eq!(first.status, MemoryStatus::Active);
+    assert_eq!(first.evidence[0].detail["action"], "set");
+    assert_eq!(
+        first.evidence[0].detail["original_detail"],
+        input.evidence[0].detail
+    );
+    assert_eq!(first.evidence[0].detail["mutated_at"], 10.0);
+    assert_eq!(
+        service.project_working_memory("LEMonX")?.confirmation[0].state,
+        ProjectMemoryConfirmationState::NotApplicable
+    );
+    let mut replay = input.clone();
+    replay.project = " LEMonX ".into();
+    replay.key = " operational_key ".into();
+    replay.set_at = 99.0;
+    replay.evidence[0].created_at = 99.0;
+    replay.value = serde_json::from_str(r#"{"revision":1,"text":"Accepted checkpoint"}"#)?;
+    assert_eq!(service.set_project_operational_memory(&replay)?, first);
+
+    let mut replacement = input.clone();
+    replacement.value = json!({"text": "New checkpoint"});
+    replacement.set_at = 30.0;
+    assert!(
+        service
+            .set_project_operational_memory(&replacement)
+            .is_err()
+    );
+    replacement.supersedes_memory_id = Some(first.memory_id.clone());
+    // Force publication to fail after predecessor supersession: transaction
+    // rollback must preserve the original active view and evidence.
+    let conn = open_database(&service.data_home().paths().db_path)?;
+    conn.execute_batch("CREATE TRIGGER fail_operational_insert BEFORE INSERT ON memory_items BEGIN SELECT RAISE(ABORT, 'test publication failure'); END;")?;
+    assert!(
+        service
+            .set_project_operational_memory(&replacement)
+            .is_err()
+    );
+    assert_eq!(
+        service.get_memory_item(&first.memory_id)?,
+        Some(first.clone())
+    );
+    conn.execute_batch("DROP TRIGGER fail_operational_insert;")?;
+    let second = service.set_project_operational_memory(&replacement)?;
+    assert_eq!(second.evidence[0].detail["action"], "supersede");
+    let old = service.get_memory_item(&first.memory_id)?.unwrap();
+    assert_eq!(old.status, MemoryStatus::Superseded);
+    assert_eq!(old.evidence, first.evidence);
+    assert_eq!(
+        service.project_working_memory("LEMonX")?.items,
+        vec![second.clone()]
+    );
+    assert_eq!(
+        service.set_project_operational_memory(&replacement)?,
+        second
+    );
+    assert_eq!(
+        service.set_project_operational_memory(&input)?.status,
+        MemoryStatus::Superseded
+    );
+    assert!(
+        service
+            .resolve_project_operational_memory(&operational_transition(&first.memory_id))
+            .is_err()
+    );
+    assert!(
+        service
+            .archive_project_operational_memory(&operational_transition(&first.memory_id))
+            .is_err()
+    );
+
+    let transition = operational_transition(&second.memory_id);
+    let resolved = service.resolve_project_operational_memory(&transition)?;
+    assert_eq!(resolved.status, MemoryStatus::Resolved);
+    assert_eq!(resolved.last_verified_at, Some(20.0));
+    assert!(service.project_working_memory("LEMonX")?.items.is_empty());
+    assert_eq!(resolved.evidence.len(), 2);
+    assert_eq!(resolved.evidence[0], second.evidence[0]);
+    assert_eq!(resolved.evidence[1].detail["action"], "resolve");
+    assert_eq!(
+        resolved.evidence[1].detail["review_reason"],
+        transition.review_reason
+    );
+    assert_eq!(
+        resolved.evidence[1].detail["original_detail"],
+        transition.evidence[0].detail
+    );
+    assert_eq!(
+        service.resolve_project_operational_memory(&transition)?,
+        resolved
+    );
+    let mut archive_review = transition.clone();
+    archive_review.evidence[0].reference = "git:archive-review".into();
+    let archived = service.archive_project_operational_memory(&archive_review)?;
+    assert_eq!(archived.status, MemoryStatus::Archived);
+    assert_eq!(archived.evidence.len(), 3);
+    assert_eq!(
+        archived
+            .evidence
+            .iter()
+            .find(|evidence| evidence.reference == "git:archive-review")
+            .expect("archive provenance persisted")
+            .detail["action"],
+        "archive"
+    );
+    assert_eq!(
+        service.archive_project_operational_memory(&archive_review)?,
+        archived
+    );
+    assert!(
+        service
+            .resolve_project_operational_memory(&transition)
+            .is_err()
+    );
+    assert_eq!(
+        service.set_project_operational_memory(&replacement)?.status,
+        MemoryStatus::Archived
+    );
+    Ok(())
+}
+
+#[test]
+fn operational_operator_validates_scope_kind_review_and_lifecycle() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let active = service.set_project_operational_memory(&operational_set(MemoryKind::State))?;
+    for bad in 0..3 {
+        let mut replacement = operational_set(MemoryKind::State);
+        replacement.supersedes_memory_id = Some(active.memory_id.clone());
+        match bad {
+            0 => replacement.project = "Arcos".into(),
+            1 => replacement.key = "other_key".into(),
+            _ => replacement.supersedes_memory_id = Some("missing-predecessor".into()),
+        }
+        assert!(
+            service
+                .set_project_operational_memory(&replacement)
+                .is_err()
+        );
+        assert_eq!(
+            service.get_memory_item(&active.memory_id)?,
+            Some(active.clone())
+        );
+    }
+    for bad in 0..5 {
+        let mut review = operational_transition(&active.memory_id);
+        match bad {
+            0 => review.project = " ".into(),
+            1 => review.review_reason = " ".into(),
+            2 => review.evidence.clear(),
+            3 => review.evidence[0].created_at = f64::INFINITY,
+            _ => review.transitioned_at = f64::NAN,
+        }
+        assert!(service.resolve_project_operational_memory(&review).is_err());
+        assert!(service.archive_project_operational_memory(&review).is_err());
+        assert_eq!(
+            service.get_memory_item(&active.memory_id)?,
+            Some(active.clone())
+        );
+    }
+    for kind in [MemoryKind::State, MemoryKind::Blocker, MemoryKind::Task] {
+        let mut input = operational_set(kind);
+        input.key = kind.as_str().into();
+        let item = service.set_project_operational_memory(&input)?;
+        let mut transition = operational_transition(&item.memory_id);
+        transition.project = "Arcos".into();
+        assert!(
+            service
+                .resolve_project_operational_memory(&transition)
+                .is_err()
+        );
+        assert!(
+            service
+                .archive_project_operational_memory(&transition)
+                .is_err()
+        );
+        transition.project = "LEMonX".into();
+        assert_eq!(
+            service
+                .archive_project_operational_memory(&transition)?
+                .status,
+            MemoryStatus::Archived
+        );
+        assert_eq!(
+            service
+                .archive_project_operational_memory(&transition)?
+                .evidence
+                .len(),
+            2
+        );
+    }
+    for kind in [
+        MemoryKind::Invariant,
+        MemoryKind::Preference,
+        MemoryKind::Decision,
+        MemoryKind::Result,
+        MemoryKind::Hypothesis,
+        MemoryKind::ArtifactReference,
+    ] {
+        assert!(
+            service
+                .set_project_operational_memory(&operational_set(kind))
+                .is_err()
+        );
+        let mut item = project_memory(kind.as_str(), "non-operational", None, 1.0);
+        item.key = kind.as_str().into();
+        item.kind = kind;
+        service.put_memory_item(&item)?;
+        let transition = operational_transition(&item.memory_id);
+        assert!(
+            service
+                .resolve_project_operational_memory(&transition)
+                .is_err()
+        );
+        assert!(
+            service
+                .archive_project_operational_memory(&transition)
+                .is_err()
+        );
+        let mut input = operational_set(MemoryKind::State);
+        input.key = item.key.clone();
+        input.supersedes_memory_id = Some(item.memory_id.clone());
+        assert!(service.set_project_operational_memory(&input).is_err());
+        assert_eq!(service.get_memory_item(&item.memory_id)?, Some(item));
+    }
+    let mut global = project_memory("global-operational", "global", None, 1.0);
+    global.scope = MemoryScope::Global;
+    service.put_memory_item(&global)?;
+    assert!(
+        service
+            .archive_project_operational_memory(&operational_transition(&global.memory_id))
+            .is_err()
+    );
+    for bad in 0..8 {
+        let mut input = operational_set(MemoryKind::State);
+        match bad {
+            0 => input.project = " ".into(),
+            1 => input.key = " ".into(),
+            2 => input.review_reason = " ".into(),
+            3 => input.evidence.clear(),
+            4 => input.evidence[0].reference = " ".into(),
+            5 => input.set_at = f64::NAN,
+            6 => input.importance = 101,
+            _ => input.confidence = f64::NAN,
+        }
+        assert!(service.set_project_operational_memory(&input).is_err());
+    }
+    assert!(service.project_working_memory("Arcos")?.items.is_empty());
+    Ok(())
+}
+
+#[test]
+fn operational_revalidation_is_read_only_until_operator_transition() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let mut input = operational_set(MemoryKind::Task);
+    input.evidence[0].kind = MemoryEvidenceKind::ConversationTurn;
+    let item = service.set_project_operational_memory(&input)?;
+    service.import_normalized(
+        vec![chatgpt_conversation(
+            "new-evidence",
+            20.0,
+            vec![
+                message("u-new", "user", "continue LEMonX", 19.0),
+                message("a-new", "assistant", "new project state", 20.0),
+            ],
+        )],
+        None,
+    )?;
+    for _ in 0..2 {
+        let working = service.project_working_memory("LEMonX")?;
+        assert_eq!(
+            working.verification[0].state,
+            WorkingMemoryVerificationState::NeedsRevalidation
+        );
+        assert_eq!(working.items, vec![item.clone()]);
+        assert_eq!(
+            service.get_memory_item(&item.memory_id)?,
+            Some(item.clone())
+        );
+    }
+    service.resolve_project_operational_memory(&operational_transition(&item.memory_id))?;
+    assert!(service.project_working_memory("LEMonX")?.items.is_empty());
+    Ok(())
+}
+
+#[test]
+fn operational_set_identity_is_independent_of_evidence_argument_order() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let mut input = operational_set(MemoryKind::Task);
+    input.evidence.push(MemoryEvidence {
+        kind: MemoryEvidenceKind::GitCommit,
+        reference: "git:accepted".into(),
+        detail: json!({"sha": "abc123"}),
+        created_at: 11.0,
+    });
+    let first = service.set_project_operational_memory(&input)?;
+
+    let mut replay = input.clone();
+    replay.evidence.reverse();
+    replay.set_at = 99.0;
+    for evidence in &mut replay.evidence {
+        evidence.created_at = 99.0;
+    }
+    assert_eq!(service.set_project_operational_memory(&replay)?, first);
+    assert_eq!(service.project_working_memory("LEMonX")?.items, vec![first]);
+    Ok(())
+}
+
+#[test]
+fn operational_reused_evidence_reference_preserves_each_review_without_schema_changes()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let input = operational_set(MemoryKind::Blocker);
+    let first = service.set_project_operational_memory(&input)?;
+    let mut review = operational_transition(&first.memory_id);
+    review.evidence = input.evidence.clone();
+    review.evidence[0].created_at = 20.0;
+    let resolved = service.resolve_project_operational_memory(&review)?;
+    assert_eq!(resolved.evidence.len(), 1);
+    assert_eq!(resolved.evidence[0].reference, first.evidence[0].reference);
+    assert_eq!(
+        resolved.evidence[0].created_at,
+        first.evidence[0].created_at
+    );
+    assert_eq!(
+        resolved.evidence[0].detail["prior_detail"],
+        first.evidence[0].detail
+    );
+    assert_eq!(
+        resolved.evidence[0].detail["appended_review"]["action"],
+        "resolve"
+    );
+    assert_eq!(
+        resolved.evidence[0].detail["appended_review"]["original_detail"],
+        input.evidence[0].detail
+    );
+    assert_eq!(
+        resolved.evidence[0].detail["appended_review_evidence_created_at"],
+        20.0
+    );
+    review.transitioned_at = 30.0;
+    review.evidence[0].created_at = 30.0;
+    let archived = service.archive_project_operational_memory(&review)?;
+    assert_eq!(
+        archived.evidence[0].detail["prior_detail"],
+        resolved.evidence[0].detail
+    );
+    assert_eq!(
+        archived.evidence[0].detail["appended_review"]["action"],
+        "archive"
+    );
+    assert_eq!(
+        service.archive_project_operational_memory(&review)?,
+        archived
+    );
+    assert_eq!(service.get_memory_item(&first.memory_id)?, Some(archived));
+    Ok(())
 }
 
 fn message(id: &str, role: &str, text: &str, time: f64) -> NormalizedMessage {

@@ -174,6 +174,9 @@ The current implementation provides:
 - operator-only confirmation and retirement of stable project-local
   invariant/preference/decision rules with mandatory user_statement
   confirmation evidence and explicit supersession;
+- explicit operator set/supersede/resolve/archive for project-local operational
+  state/blocker/task memory, with mandatory review reason and evidence, without
+  invoking the compiler or changing the confirmation gate;
 - conversation quality-regression protection;
 - retained conversation/message evidence snapshots with canonical,
   superseded, and rejected-lower-quality states;
@@ -224,16 +227,20 @@ It does not yet provide:
 - automatic candidate promotion;
 - a richer operator review UI;
 - a default policy for which projects should opt into automatic compilation;
-- automatic global CollaborationMemory authoring;
-- a direct operator lifecycle for ordinary project-local operational
-  `state`/`blocker`/`task` memory when the memory compiler is disabled.
+- automatic global CollaborationMemory authoring.
 
-The design for that last gap is frozen as **Operational Working Memory
-Lifecycle — Checkpoint C**. It preserves `needs_revalidation` as a read-only
-freshness signal and adds explicit operator create/supersede/resolve/archive
-semantics without a model-facing write tool or automatic retirement. See
-`docs/operational-working-memory-lifecycle-checkpoint-c.md`. Implementation is
-pending.
+**Operational Working Memory Lifecycle — Checkpoint C** is accepted. It preserves
+`needs_revalidation` as read-only metadata. The operator commands
+`memory-project-operational-set`, `memory-project-operational-resolve`, and
+`memory-project-operational-archive` reuse MemoryItem transactions and the
+active-key uniqueness constraint; no schema migration, candidate change, or
+model-facing write tool is involved. Set uses a deterministic canonical-request
+ID excluding generated timestamps. Resolve/archive append review provenance;
+when an evidence kind/reference is reused, the prior detail and additional
+review are both retained in the existing detail JSON instead of inserting a
+duplicate evidence key. Active Working Memory remains a materialized view.
+See `docs/operational-working-memory-lifecycle-checkpoint-c.md` for the frozen
+contract and acceptance evidence.
 
 This boundary prevents an LLM from writing long-term state before provenance,
 conflict handling, and compiler rules are implemented and tested.
