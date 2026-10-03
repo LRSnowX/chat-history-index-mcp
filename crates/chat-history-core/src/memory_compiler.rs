@@ -116,6 +116,41 @@ pub struct MemoryProjectCompilerPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryBootstrapPlanEntry {
+    pub conversation_id: String,
+    pub title: String,
+    pub update_time: Option<f64>,
+    pub message_count: usize,
+    pub tail_from_turn_index: i64,
+    pub bootstrap_skipped_prefix_messages: usize,
+    pub estimated_model_attempts: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct MemoryBootstrapExcludedCounts {
+    pub codex_root: usize,
+    pub codex_child: usize,
+    pub incomplete_chatgpt: usize,
+    pub already_checkpointed: usize,
+    pub not_selected_complete_chatgpt: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryBootstrapPlan {
+    pub project: String,
+    pub project_aliases: Vec<String>,
+    pub source_policy: String,
+    pub bootstrap_required: bool,
+    pub bootstrap_skip_reason: Option<String>,
+    pub active_working_memory_items: usize,
+    pub max_conversations: usize,
+    pub max_messages: usize,
+    pub estimated_model_attempts: usize,
+    pub selected: Vec<MemoryBootstrapPlanEntry>,
+    pub excluded: MemoryBootstrapExcludedCounts,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryProjectCompilerResult {
     pub project: String,
     pub scanned: usize,
@@ -167,6 +202,92 @@ enum MemoryCompilerProposal {
 }
 
 impl IndexService {
+    pub fn plan_memory_bootstrap(
+        &self,
+        project: &str,
+        max_conversations: usize,
+        max_messages: usize,
+    ) -> anyhow::Result<MemoryBootstrapPlan> {
+        ensure!(!project.trim().is_empty(), "project cannot be empty");
+        ensure!(
+            (1..=10).contains(&max_conversations),
+            "max_conversations must be between 1 and 10"
+        );
+        ensure!(
+            (1..=MAX_MEMORY_COMPILER_MESSAGES).contains(&max_messages),
+            "max_messages must be between 1 and {MAX_MEMORY_COMPILER_MESSAGES}"
+        );
+
+        let project_aliases = self.project_aliases(project)?;
+        let conversations = self.strong_project_conversations(project)?;
+        let active_working_memory_items = self.project_working_memory(project)?.items.len();
+        let bootstrap_required = active_working_memory_items == 0;
+        let conn = open_database(&self.managed_db_path())?;
+        let mut selected = Vec::new();
+        let mut excluded = MemoryBootstrapExcludedCounts::default();
+
+        for conversation in conversations {
+            if conversation.source != "chatgpt" {
+                let parent_conversation_id: Option<String> = conn.query_row(
+                    "SELECT parent_conversation_id FROM conversations WHERE conversation_id = ?1",
+                    params![conversation.conversation_id],
+                    |row| row.get(0),
+                )?;
+                if parent_conversation_id.is_some() {
+                    excluded.codex_child += 1;
+                } else {
+                    excluded.codex_root += 1;
+                }
+                continue;
+            }
+
+            if conversation.message_count <= 0 || conversation.assistant_message_count <= 0 {
+                excluded.incomplete_chatgpt += 1;
+                continue;
+            }
+
+            if self
+                .memory_compile_checkpoint(project, &conversation.conversation_id)?
+                .is_some()
+            {
+                excluded.already_checkpointed += 1;
+                continue;
+            }
+
+            if !bootstrap_required || selected.len() >= max_conversations {
+                excluded.not_selected_complete_chatgpt += 1;
+                continue;
+            }
+
+            let message_count = usize::try_from(conversation.message_count)?;
+            let skipped = message_count.saturating_sub(max_messages);
+            selected.push(MemoryBootstrapPlanEntry {
+                conversation_id: conversation.conversation_id,
+                title: conversation.title,
+                update_time: conversation.update_time.or(conversation.create_time),
+                message_count,
+                tail_from_turn_index: i64::try_from(skipped)?,
+                bootstrap_skipped_prefix_messages: skipped,
+                estimated_model_attempts: 1,
+            });
+        }
+
+        Ok(MemoryBootstrapPlan {
+            project: project.to_string(),
+            project_aliases,
+            source_policy: "recent_complete_chatgpt_only".to_string(),
+            bootstrap_required,
+            bootstrap_skip_reason: (!bootstrap_required)
+                .then(|| "active_working_memory_exists".to_string()),
+            active_working_memory_items,
+            max_conversations,
+            max_messages,
+            estimated_model_attempts: selected.len(),
+            selected,
+            excluded,
+        })
+    }
+
     pub fn prepare_memory_compilation(
         &self,
         project: &str,
@@ -205,21 +326,20 @@ impl IndexService {
             );
         }
 
-        let (start_turn, bootstrap_skipped_prefix_messages) = if let Some(checkpoint) =
-            checkpoint.as_ref()
-        {
-            (checkpoint.through_turn_index + 1, 0)
-        } else {
-            let max_turn_index: Option<i64> = conn.query_row(
+        let (start_turn, bootstrap_skipped_prefix_messages) =
+            if let Some(checkpoint) = checkpoint.as_ref() {
+                (checkpoint.through_turn_index + 1, 0)
+            } else {
+                let max_turn_index: Option<i64> = conn.query_row(
                 "SELECT MAX(turn_index) FROM conversation_snapshot_messages WHERE snapshot_id = ?1",
                 params![snapshot_id],
                 |row| row.get(0),
             )?;
-            let start_turn = max_turn_index
-                .map(|max_turn| (max_turn + 1 - max_messages as i64).max(0))
-                .unwrap_or(0);
-            (start_turn, usize::try_from(start_turn)?)
-        };
+                let start_turn = max_turn_index
+                    .map(|max_turn| (max_turn + 1 - max_messages as i64).max(0))
+                    .unwrap_or(0);
+                (start_turn, usize::try_from(start_turn)?)
+            };
         let mut stmt = conn.prepare(
             r#"
             SELECT message_id, role, create_time, turn_index, normalized_text

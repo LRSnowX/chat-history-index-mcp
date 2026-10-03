@@ -1487,6 +1487,136 @@ async fn project_memory_compile_plan_counts_full_backlog_while_bounding_ready_de
 }
 
 #[test]
+fn memory_bootstrap_plan_selects_recent_complete_chatgpt_and_explains_exclusions()
+-> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let service = service(&temp);
+    let codex_root = NormalizedConversation {
+        source: "codex".to_string(),
+        source_instance: None,
+        source_conversation_id: "bootstrap-codex-root".to_string(),
+        title: "LEMonX implementation".to_string(),
+        create_time: Some(60.0),
+        update_time: Some(60.0),
+        model: Some("gpt-test".to_string()),
+        source_url: None,
+        source_path: None,
+        messages: vec![
+            message("cr-u", "user", "root", 1.0),
+            message("cr-a", "assistant", "root", 2.0),
+        ],
+        raw: json!({"collector": "test"}),
+    };
+    let mut codex_child = codex_root.clone();
+    codex_child.source_conversation_id = "bootstrap-codex-child".to_string();
+    codex_child.update_time = Some(55.0);
+    codex_child.messages = vec![
+        message("cc-u", "user", "child", 1.0),
+        message("cc-a", "assistant", "child", 2.0),
+    ];
+    let mut incomplete = chatgpt_conversation(
+        "bootstrap-incomplete",
+        45.0,
+        vec![
+            message("i-u1", "user", "continue", 1.0),
+            message("i-u2", "user", "continue again", 2.0),
+        ],
+    );
+    incomplete.title = "LEMonX incomplete".to_string();
+    service.import_normalized(
+        vec![
+            codex_root,
+            codex_child,
+            chatgpt_conversation(
+                "bootstrap-checkpointed",
+                50.0,
+                vec![
+                    message("cp-u", "user", "checkpointed", 1.0),
+                    message("cp-a", "assistant", "checkpointed", 2.0),
+                ],
+            ),
+            incomplete,
+            chatgpt_conversation(
+                "bootstrap-selected",
+                40.0,
+                vec![
+                    message("s-u1", "user", "older state", 1.0),
+                    message("s-a1", "assistant", "older state", 2.0),
+                    message("s-u2", "user", "current state", 3.0),
+                    message("s-a2", "assistant", "current state", 4.0),
+                ],
+            ),
+            chatgpt_conversation(
+                "bootstrap-older",
+                30.0,
+                vec![
+                    message("o-u", "user", "older", 1.0),
+                    message("o-a", "assistant", "older", 2.0),
+                ],
+            ),
+        ],
+        None,
+    )?;
+
+    let conn = open_database(&service.managed_db_path())?;
+    conn.execute(
+        "UPDATE conversations SET parent_conversation_id = 'bootstrap-codex-root' WHERE conversation_id = 'codex:bootstrap-codex-child'",
+        params![],
+    )?;
+    drop(conn);
+
+    let checkpoint_input = service
+        .prepare_memory_compilation("LEMonX", "bootstrap-checkpointed", 2)?
+        .expect("checkpointed conversation has a compile input");
+    service.stage_memory_compilation(&MemoryCompilationBatch {
+        project: "LEMonX".to_string(),
+        conversation_id: "bootstrap-checkpointed".to_string(),
+        source_snapshot_id: checkpoint_input.source_snapshot_id,
+        through_turn_index: checkpoint_input.through_turn_index,
+        through_message_id: checkpoint_input.through_message_id,
+        compiler_version: "bootstrap-plan-test".to_string(),
+        model_label: None,
+        created_at: 70.0,
+        candidates: Vec::new(),
+    })?;
+
+    let plan = service.plan_memory_bootstrap("LEMonX", 1, 2)?;
+    assert_eq!(plan.source_policy, "recent_complete_chatgpt_only");
+    assert!(plan.bootstrap_required);
+    assert_eq!(plan.bootstrap_skip_reason, None);
+    assert_eq!(plan.active_working_memory_items, 0);
+    assert_eq!(plan.estimated_model_attempts, 1);
+    assert_eq!(plan.selected.len(), 1);
+    assert_eq!(plan.selected[0].conversation_id, "bootstrap-selected");
+    assert_eq!(plan.selected[0].message_count, 4);
+    assert_eq!(plan.selected[0].tail_from_turn_index, 2);
+    assert_eq!(plan.selected[0].bootstrap_skipped_prefix_messages, 2);
+    assert_eq!(plan.excluded.codex_root, 1);
+    assert_eq!(plan.excluded.codex_child, 1);
+    assert_eq!(plan.excluded.incomplete_chatgpt, 1);
+    assert_eq!(plan.excluded.already_checkpointed, 1);
+    assert_eq!(plan.excluded.not_selected_complete_chatgpt, 1);
+
+    service.put_memory_item(&project_memory(
+        "bootstrap-existing-memory",
+        "already initialized",
+        None,
+        80.0,
+    ))?;
+    let initialized = service.plan_memory_bootstrap("LEMonX", 3, 16)?;
+    assert!(!initialized.bootstrap_required);
+    assert_eq!(
+        initialized.bootstrap_skip_reason.as_deref(),
+        Some("active_working_memory_exists")
+    );
+    assert_eq!(initialized.active_working_memory_items, 1);
+    assert_eq!(initialized.estimated_model_attempts, 0);
+    assert!(initialized.selected.is_empty());
+    assert_eq!(initialized.excluded.not_selected_complete_chatgpt, 2);
+    Ok(())
+}
+
+#[test]
 fn model_compiler_stages_only_valid_delta_evidence_and_keeps_ids_deterministic()
 -> anyhow::Result<()> {
     let temp = TempDir::new()?;

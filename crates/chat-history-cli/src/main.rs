@@ -11,8 +11,8 @@ use chat_history_core::{
     CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
-    MemoryEvidence, MemoryEvidenceKind, MemoryKind, MemoryModelClient, MemoryPromotionReview,
-    NormalizedConversation, SearchMode, SearchOptions,
+    MAX_MEMORY_COMPILER_MESSAGES, MemoryEvidence, MemoryEvidenceKind, MemoryKind,
+    MemoryModelClient, MemoryPromotionReview, NormalizedConversation, SearchMode, SearchOptions,
 };
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
@@ -149,6 +149,15 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS)]
         max_conversations: usize,
         #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
+        max_messages: usize,
+    },
+    /// Plan a selective current-state bootstrap from recent complete ChatGPT project conversations.
+    MemoryBootstrapPlan {
+        #[arg(long)]
+        project: String,
+        #[arg(long, default_value_t = 3)]
+        max_conversations: usize,
+        #[arg(long, default_value_t = MAX_MEMORY_COMPILER_MESSAGES)]
         max_messages: usize,
     },
     /// Plan a bounded recent project compilation without invoking a model or writing candidates.
@@ -664,6 +673,14 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
             print_json(&result)?;
+        }
+        Command::MemoryBootstrapPlan {
+            project,
+            max_conversations,
+            max_messages,
+        } => {
+            let plan = service.plan_memory_bootstrap(&project, max_conversations, max_messages)?;
+            print_json(&plan)?;
         }
         Command::MemoryCompilePlan {
             project,

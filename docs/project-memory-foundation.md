@@ -361,6 +361,18 @@ title/source-path/source-URL evidence as canonical-name matching. Explicit
 aliases must normalize to at least three alphanumeric characters, and the same
 normalized explicit alias cannot be registered for multiple canonical projects.
 
+Historical memory bootstrap is selective rather than exhaustive. The read-only
+`memory-bootstrap-plan` operator defaults to the three most recent complete,
+strongly matched ChatGPT conversations and excludes Codex root/child sessions
+from automatic baseline selection. Existing compiler checkpoints, incomplete
+ChatGPT evidence, and older complete ChatGPT conversations are reported as
+explicit exclusion counts. Each selected conversation is expected to require
+one tail-bootstrap model attempt: the compiler receives only its bounded recent
+tail on first compilation, while the older prefix remains available in raw
+CHIM history for on-demand retrieval. A bootstrap plan reflects the latest
+canonical snapshot currently indexed by CHIM; an actively growing ChatGPT
+thread may remain deferred by the live collector until it becomes idle.
+
 Remaining Phase 4 work is retrieval policy quality rather than wiring:
 
 - the initial deterministic retrieval benchmark now covers current-state

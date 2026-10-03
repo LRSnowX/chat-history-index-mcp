@@ -42,6 +42,7 @@ pub use memory_compile::{
 pub use memory_compiler::{
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, MAX_MEMORY_COMPILER_MESSAGES, MEMORY_COMPILER_VERSION,
+    MemoryBootstrapExcludedCounts, MemoryBootstrapPlan, MemoryBootstrapPlanEntry,
     MemoryCompilerInput, MemoryCompilerMessage, MemoryCompilerPendingCandidate,
     MemoryCompilerRunResult, MemoryProjectCompilerFailure, MemoryProjectCompilerPlan,
     MemoryProjectCompilerPlanEntry, MemoryProjectCompilerResult, MemoryProjectCompilerStaged,
