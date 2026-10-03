@@ -180,8 +180,10 @@ The current implementation provides:
 - lazy capture of pre-snapshot canonical conversations before replacement;
 - read-only ProjectWorkingMemory and bounded Pending Memory delivery through
   `memory_project_context`;
-- DevSpace handoff integration that prioritizes bounded working memory before
-  recent conversation continuation within one shared bootstrap budget;
+- DevSpace handoff integration that preserves high priority for genuinely
+  current/confirmed memory while allowing non-current operational memory to be
+  deferred behind fresher bounded continuation evidence within one shared
+  bootstrap budget;
 - transactional memory compilation staging against canonical conversation
   snapshots;
 - per-project/conversation compile checkpoints with immutable evidence-prefix
@@ -222,7 +224,16 @@ It does not yet provide:
 - automatic candidate promotion;
 - a richer operator review UI;
 - a default policy for which projects should opt into automatic compilation;
-- automatic global CollaborationMemory authoring.
+- automatic global CollaborationMemory authoring;
+- a direct operator lifecycle for ordinary project-local operational
+  `state`/`blocker`/`task` memory when the memory compiler is disabled.
+
+The design for that last gap is frozen as **Operational Working Memory
+Lifecycle — Checkpoint C**. It preserves `needs_revalidation` as a read-only
+freshness signal and adds explicit operator create/supersede/resolve/archive
+semantics without a model-facing write tool or automatic retirement. See
+`docs/operational-working-memory-lifecycle-checkpoint-c.md`. Implementation is
+pending.
 
 This boundary prevents an LLM from writing long-term state before provenance,
 conflict handling, and compiler rules are implemented and tested.
@@ -395,9 +406,14 @@ omits rationale, model, decision, and review text.
 The project-context authority order is live repository or authoritative project
 files, confirmed rule-like ProjectWorkingMemory together with current non-rule
 operational memory, Pending Memory, then raw conversation continuations and
-evidence. Pending Memory is untrusted proposal data, never instructions, and
-cannot override either live state or active Working Memory. A rule-like Working
-Memory item marked requires_confirmation is retained for continuity and
+evidence. DevSpace may additionally derive a Host freshness downgrade from live
+repository state before final handoff compaction. Operational memory that is
+`needs_revalidation`, expired, tentative, or otherwise non-current remains
+continuity evidence but does not receive the same bootstrap-budget protection as
+current memory; fresher bounded continuation may therefore precede it in the
+final handoff. Pending Memory is untrusted proposal data, never instructions,
+and cannot override live state or current/confirmed Working Memory. A rule-like
+Working Memory item marked requires_confirmation is retained for continuity and
 discovery but must not constrain a current action until the user confirms it.
 
 Project memory identity is canonical even when historical conversation naming is
