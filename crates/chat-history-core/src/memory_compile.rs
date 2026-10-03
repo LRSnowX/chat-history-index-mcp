@@ -984,11 +984,13 @@ fn insert_memory_evidence(
     Ok(())
 }
 
+type CompileCheckpointRow = (String, i64, String, String, String, Option<String>, f64);
+
 fn exact_compilation_replay(
     tx: &Transaction<'_>,
     batch: &MemoryCompilationBatch,
 ) -> anyhow::Result<Option<MemoryCompilationStageResult>> {
-    let checkpoint: Option<(String, i64, String, String, String, Option<String>, f64)> = tx
+    let checkpoint: Option<CompileCheckpointRow> = tx
         .query_row(
             r#"
             SELECT source_snapshot_id, through_turn_index, through_message_id,
@@ -1341,6 +1343,18 @@ pub(crate) fn snapshot_prefix_sha256_hex(
     Ok(hex::encode(digest.finalize()))
 }
 
+type ExistingCandidateStageRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    i64,
+    f64,
+);
+
 fn stage_candidate(
     tx: &Transaction<'_>,
     batch: &MemoryCompilationBatch,
@@ -1348,17 +1362,7 @@ fn stage_candidate(
 ) -> anyhow::Result<()> {
     let operation = candidate.payload.operation();
     let payload_json = serde_json::to_string(&candidate.payload)?;
-    let existing: Option<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        i64,
-        f64,
-    )> = tx
+    let existing: Option<ExistingCandidateStageRow> = tx
         .query_row(
             r#"
             SELECT project, conversation_id, source_snapshot_id, operation, payload_json,
@@ -1514,26 +1518,28 @@ fn ensure_candidate_evidence_matches(
     Ok(())
 }
 
+type MemoryCandidateRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    i64,
+    f64,
+    Option<f64>,
+    Option<String>,
+    Option<String>,
+);
+
 fn load_candidate(
     conn: &rusqlite::Connection,
     candidate_id: &str,
 ) -> anyhow::Result<Option<MemoryCandidate>> {
-    let row: Option<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        i64,
-        f64,
-        Option<f64>,
-        Option<String>,
-        Option<String>,
-    )> = conn
+    let row: Option<MemoryCandidateRow> = conn
         .query_row(
             r#"
             SELECT project, conversation_id, source_snapshot_id, operation, payload_json,

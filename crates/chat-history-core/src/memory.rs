@@ -1233,26 +1233,28 @@ fn validate_memory_item(item: &MemoryItem) -> anyhow::Result<()> {
     Ok(())
 }
 
+type MemoryItemRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    f64,
+    Option<f64>,
+    Option<f64>,
+    Option<String>,
+    f64,
+    f64,
+    Option<f64>,
+);
+
 fn load_memory_item(
     conn: &rusqlite::Connection,
     memory_id: &str,
 ) -> anyhow::Result<Option<MemoryItem>> {
-    let row: Option<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        i64,
-        f64,
-        Option<f64>,
-        Option<f64>,
-        Option<String>,
-        f64,
-        f64,
-        Option<f64>,
-    )> = conn
+    let row: Option<MemoryItemRow> = conn
         .query_row(
             r#"
             SELECT scope_type, scope_id, kind, memory_key, value_json, status,

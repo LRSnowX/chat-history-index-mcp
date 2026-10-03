@@ -197,11 +197,7 @@ impl ChatGptSyncState {
         let mut selected = Vec::new();
         let mut skipped_blocked_ids = Vec::new();
         let mut seen_thread_ids = HashSet::new();
-        for thread in snapshot
-            .threads
-            .into_iter()
-            .chain(snapshot.pinned_threads.into_iter())
-        {
+        for thread in snapshot.threads.into_iter().chain(snapshot.pinned_threads) {
             if !seen_thread_ids.insert(thread.thread_id.clone()) {
                 continue;
             }

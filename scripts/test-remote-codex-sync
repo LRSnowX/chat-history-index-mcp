@@ -43,7 +43,17 @@ done
 python3 - "$TEST_HOME/tools.json" <<'PY'
 import json, sys
 payload = json.load(open(sys.argv[1]))
-assert [tool["name"] for tool in payload["result"]["tools"]] == ["import_conversations"]
+actual = sorted(tool["name"] for tool in payload["result"]["tools"])
+expected = sorted([
+    "chatgpt_block",
+    "chatgpt_import_thread",
+    "chatgpt_plan_recent",
+    "chatgpt_seed_cursor",
+    "chatgpt_seed_from_index",
+    "chatgpt_state",
+    "import_conversations",
+])
+assert actual == expected, (actual, expected)
 PY
 
 CHAT_HISTORY_WRITER_TOKEN="synthetic-test-token" \

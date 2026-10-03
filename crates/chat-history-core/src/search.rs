@@ -590,10 +590,12 @@ fn hybrid_cjk_substring_search(
     Ok(results)
 }
 
+type LexicalAnchorRow = (String, (usize, String, Option<String>, f64));
+
 fn lexical_anchor_results(
     conn: &Connection,
     options: &SearchOptions,
-    ranked: Vec<(String, (usize, String, Option<String>, f64))>,
+    ranked: Vec<LexicalAnchorRow>,
     limit: usize,
     evidence_kind: &str,
 ) -> anyhow::Result<Vec<SearchResult>> {

@@ -1879,10 +1879,7 @@ fn remove_xml_blocks(text: &str, tag: &str) -> String {
     let opening = format!("<{tag}");
     let closing = format!("</{tag}>");
     let mut output = text.to_string();
-    loop {
-        let Some(start) = output.find(&opening) else {
-            break;
-        };
+    while let Some(start) = output.find(&opening) {
         let Some(relative_end) = output[start..].find(&closing) else {
             if output[..start].trim().is_empty() {
                 return String::new();
