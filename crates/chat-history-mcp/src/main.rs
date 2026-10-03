@@ -11,8 +11,9 @@ use chat_history_core::{
     ChatGptBlockedThread, ChatGptBridgeTranscript, ChatGptDiscoveryPlan, ChatGptSyncState,
     ChatGptThreadListSnapshot, CollaborationMemory, ConversationRecord,
     DEFAULT_PENDING_MEMORY_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
-    MAX_PENDING_MEMORY_LIMIT, MemoryHealthReport, NormalizedConversation, ProjectPendingMemory,
-    ProjectWorkingMemory, SearchMode, SearchOptions, SearchResult, SummaryRecord,
+    MAX_MEMORY_COMPILER_MESSAGES, MAX_PENDING_MEMORY_LIMIT, MemoryBootstrapPlan,
+    MemoryHealthReport, NormalizedConversation, ProjectPendingMemory, ProjectWorkingMemory,
+    SearchMode, SearchOptions, SearchResult, SummaryRecord,
 };
 use clap::{Parser, ValueEnum};
 use rmcp::Json;
@@ -65,6 +66,7 @@ impl ChatHistoryMcp {
                     "index_export",
                     "index_stats",
                     "memory_get_thread",
+                    "memory_bootstrap_plan",
                     "memory_health",
                     "memory_project_context",
                     "memory_recent",
@@ -181,6 +183,13 @@ struct MemoryHealthRequest {
     project: String,
     #[serde(default = "default_memory_health_stale_after_days")]
     stale_after_days: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryBootstrapPlanRequest {
+    project: String,
+    max_conversations: Option<usize>,
+    max_messages: Option<usize>,
 }
 
 fn default_memory_health_stale_after_days() -> u32 {
@@ -586,6 +595,23 @@ impl ChatHistoryMcp {
     ) -> Result<Json<MemoryHealthReport>, String> {
         self.service
             .memory_health(&request.project, request.stale_after_days)
+            .map(Json)
+            .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        description = "Plan a selective read-only project-memory bootstrap from recent complete ChatGPT conversations. This never invokes a model and never writes memory."
+    )]
+    async fn memory_bootstrap_plan(
+        &self,
+        Parameters(request): Parameters<MemoryBootstrapPlanRequest>,
+    ) -> Result<Json<MemoryBootstrapPlan>, String> {
+        self.service
+            .plan_memory_bootstrap(
+                &request.project,
+                request.max_conversations.unwrap_or(3),
+                request.max_messages.unwrap_or(MAX_MEMORY_COMPILER_MESSAGES),
+            )
             .map(Json)
             .map_err(|error| error.to_string())
     }

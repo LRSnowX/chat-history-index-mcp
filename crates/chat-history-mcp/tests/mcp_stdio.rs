@@ -459,6 +459,24 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     assert_eq!(memory_health_json["pending_revalidation_problem_count"], 1);
     assert_eq!(memory_health_json["checkpoint_count"], 1);
 
+    let args: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "project": "Rust",
+            "max_conversations": 3,
+            "max_messages": 8
+        }))?;
+    let bootstrap_plan = client
+        .call_tool(CallToolRequestParams::new("memory_bootstrap_plan").with_arguments(args))
+        .await?;
+    assert_eq!(bootstrap_plan.is_error, Some(false));
+    let bootstrap_plan_json = bootstrap_plan
+        .structured_content
+        .as_ref()
+        .expect("memory bootstrap plan structured");
+    assert_eq!(bootstrap_plan_json["project"], "Rust");
+    assert_eq!(bootstrap_plan_json["bootstrap_required"], false);
+    assert_eq!(bootstrap_plan_json["estimated_model_attempts"], 0);
+
     let collector_state = client
         .call_tool(CallToolRequestParams::new("chatgpt_state"))
         .await?;
