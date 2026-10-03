@@ -1289,8 +1289,8 @@ async fn project_memory_compile_plan_is_bounded_and_does_not_stage_candidates() 
     assert!(!plan.ready_truncated);
     assert_eq!(plan.ready.len(), 1);
     assert_eq!(plan.ready[0].conversation_id, matching_id);
-    assert_eq!(plan.ready[0].from_turn_index, 0);
-    assert_eq!(plan.ready[0].through_turn_index, 1);
+    assert_eq!(plan.ready[0].from_turn_index, 2);
+    assert_eq!(plan.ready[0].through_turn_index, 3);
     assert_eq!(plan.ready[0].message_count, 2);
     assert_eq!(plan.failures.len(), 1);
     assert_eq!(plan.failures[0].conversation_id, incomplete_id);
