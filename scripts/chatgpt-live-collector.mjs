@@ -35,6 +35,7 @@ const DEFAULT_MEMORY_AUTO_MAX_CONVERSATIONS = 1;
 const DEFAULT_MEMORY_AUTO_MAX_MESSAGES = 8;
 const DEFAULT_MEMORY_AUTO_MAX_PENDING_CANDIDATES = 20;
 const MAX_MEMORY_CANDIDATES_PER_MODEL_ATTEMPT = 8;
+const MEMORY_AUTO_TRIGGER_ENV = "CHAT_HISTORY_MEMORY_AUTO_TRIGGER_CONVERSATIONS";
 
 function pipeIdentity(pipePath) {
   return createHash("sha256").update(pipePath).digest("hex").slice(0, 16);
@@ -450,7 +451,7 @@ function memoryCompilerRunSummary(payload) {
             model_attempts: Number(entry.result?.model_attempts ?? 0),
             staged_candidates: Array.isArray(entry.result?.staged)
               ? entry.result.staged.reduce(
-                (sum, staged) => sum + Number(staged?.staged?.candidate_ids?.length ?? 0),
+                (sum, staged) => sum + Number(staged?.candidate_ids?.length ?? 0),
                 0,
               )
               : 0,
@@ -675,15 +676,49 @@ function memoryAutoHealthGate(health, maxPendingCandidates, maxConversations = 1
   };
 }
 
+function memoryAutoTriggerConversationIds(env = process.env) {
+  const raw = String(env[MEMORY_AUTO_TRIGGER_ENV] ?? "").trim();
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(MEMORY_AUTO_TRIGGER_ENV + " must be a JSON array");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(MEMORY_AUTO_TRIGGER_ENV + " must be a JSON array");
+  }
+  const ids = [...new Set(parsed.map((value) => String(value).trim()).filter(Boolean))];
+  if (ids.length > DISCOVERY_LIMIT) {
+    throw new Error(MEMORY_AUTO_TRIGGER_ENV + " supports at most " + DISCOVERY_LIMIT + " conversations");
+  }
+  return ids;
+}
+
 function maybeScheduleMemoryCompiler(syncResult, spawnImpl = spawn, env = process.env) {
   const config = memoryAutoConfig(env);
   if (!config.enabled || !(Number(syncResult?.imported) > 0)) {
     return { enabled: config.enabled, scheduled: false };
   }
+  const conversationIds = [...new Set(
+    (Array.isArray(syncResult?.conversation_ids) ? syncResult.conversation_ids : [])
+      .map((value) => String(value).trim())
+      .filter(Boolean),
+  )].slice(0, DISCOVERY_LIMIT);
+  if (conversationIds.length === 0) {
+    return {
+      enabled: true,
+      scheduled: false,
+      reason: "no_imported_conversation_ids",
+    };
+  }
   const child = spawnImpl(process.execPath, [process.argv[1], "--memory-compiler-worker"], {
     detached: true,
     stdio: "ignore",
-    env: { ...env },
+    env: {
+      ...env,
+      [MEMORY_AUTO_TRIGGER_ENV]: JSON.stringify(conversationIds),
+    },
   });
   child.unref?.();
   return {
@@ -694,6 +729,7 @@ function maybeScheduleMemoryCompiler(syncResult, spawnImpl = spawn, env = proces
     model: config.model,
     max_conversations: config.maxConversations,
     max_messages: config.maxMessages,
+    conversation_ids: conversationIds,
   };
 }
 
@@ -723,6 +759,10 @@ function runMemoryCompilerWorker() {
   mustExist(CLI);
   const config = memoryAutoConfig();
   if (!config.enabled) return { event: "memory_auto_compile_skipped", reason: "disabled" };
+  const triggerConversationIds = memoryAutoTriggerConversationIds();
+  if (triggerConversationIds.length === 0) {
+    return { event: "memory_auto_compile_skipped", reason: "no_trigger_conversations" };
+  }
   const releaseLock = acquirePidLock(MEMORY_COMPILER_LOCK);
   if (releaseLock == null) return { event: "memory_auto_compile_skipped", reason: "locked" };
   const startedAt = new Date().toISOString();
@@ -736,6 +776,7 @@ function runMemoryCompilerWorker() {
     max_conversations: config.maxConversations,
     max_messages: config.maxMessages,
     max_pending_candidates: config.maxPendingCandidates,
+    trigger_conversation_ids: triggerConversationIds,
   });
   const results = [];
   let failed = false;
@@ -759,13 +800,52 @@ function runMemoryCompilerWorker() {
           });
           continue;
         }
-        const result = cliJson([
-          "memory-compile-project",
-          "--project", project,
-          "--scan-limit", String(config.scanLimit),
-          "--max-conversations", String(config.maxConversations),
-          "--max-messages", String(config.maxMessages),
-        ]);
+        const result = {
+          project,
+          triggered: triggerConversationIds.length,
+          matched: 0,
+          caught_up: 0,
+          model_attempts: 0,
+          staged: [],
+          failures: [],
+        };
+        for (const conversationId of triggerConversationIds) {
+          const match = cliJson([
+            "memory-project-match",
+            "--project", project,
+            conversationId,
+          ]);
+          if (match?.strong_match !== true) continue;
+          result.matched += 1;
+          if (result.model_attempts >= config.maxConversations) continue;
+          result.model_attempts += 1;
+          try {
+            const compiled = cliJson([
+              "memory-compile-conversation",
+              "--project", project,
+              "--max-messages", String(config.maxMessages),
+              conversationId,
+            ]);
+            if (compiled?.status === "caught_up" || compiled?.result == null) {
+              result.caught_up += 1;
+              continue;
+            }
+            const run = compiled.result;
+            result.staged.push({
+              conversation_id: conversationId,
+              source_snapshot_id: run?.input?.source_snapshot_id ?? null,
+              through_turn_index: run?.input?.through_turn_index ?? null,
+              candidate_ids: Array.isArray(run?.staged?.candidate_ids)
+                ? run.staged.candidate_ids
+                : [],
+            });
+          } catch (error) {
+            result.failures.push({
+              conversation_id: conversationId,
+              error: String(error?.message ?? error),
+            });
+          }
+        }
         results.push({ project, status: "ok", result });
       } catch (error) {
         failed = true;
@@ -784,6 +864,7 @@ function runMemoryCompilerWorker() {
       completed_at: new Date().toISOString(),
       projects: config.projects,
       model: config.model,
+      trigger_conversation_ids: triggerConversationIds,
       results,
     };
     writeJsonStatus(MEMORY_COMPILER_STATUS_PATH, payload);
@@ -847,13 +928,21 @@ async function syncWithClient(client, contextThreadId) {
     ], snapshotText);
     const selected = planned.plan?.selected ?? [];
     if (selected.length === 0) {
-      return { event: "chatgpt_live_sync", imported: 0, blocked: 0, deferred_active: 0, titles: [] };
+      return {
+        event: "chatgpt_live_sync",
+        imported: 0,
+        blocked: 0,
+        deferred_active: 0,
+        titles: [],
+        conversation_ids: [],
+      };
     }
 
     let imported = 0;
     let deferredActive = 0;
     let blocked = 0;
     const importedTitles = [];
+    const importedConversationIds = [];
     for (const pending of selected) {
       const status = statusById.get(pending.thread_id);
       if (status !== "idle") {
@@ -865,9 +954,15 @@ async function syncWithClient(client, contextThreadId) {
         importTranscript(transcript);
         imported += 1;
         importedTitles.push(transcript.title);
+        importedConversationIds.push(pending.thread_id);
       } catch (error) {
         if (isRateLimit(error)) {
-          return { event: "chatgpt_live_rate_limited", imported, pending: pending.thread_id };
+          return {
+            event: "chatgpt_live_rate_limited",
+            imported,
+            pending: pending.thread_id,
+            conversation_ids: importedConversationIds,
+          };
         }
         if (error instanceof PermanentIncompleteError) {
           markBlocked(pending.thread_id, error.message);
@@ -888,6 +983,7 @@ async function syncWithClient(client, contextThreadId) {
       blocked,
       deferred_active: deferredActive,
       titles: importedTitles,
+      conversation_ids: importedConversationIds,
     };
   } finally {
     releaseLock();
@@ -1223,6 +1319,7 @@ export {
   ensureDaemonReady,
   memoryAutoConfig,
   memoryAutoHealthGate,
+  memoryAutoTriggerConversationIds,
   appendMemoryCompilerHistory,
   memoryCompilerHistorySummary,
   messageText,

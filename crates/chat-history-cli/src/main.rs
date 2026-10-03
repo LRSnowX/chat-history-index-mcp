@@ -162,6 +162,12 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_MEMORY_COMPILER_MESSAGES)]
         max_messages: usize,
     },
+    /// Check whether one indexed conversation strongly matches a canonical project identity.
+    MemoryProjectMatch {
+        #[arg(long)]
+        project: String,
+        conversation_id: String,
+    },
     /// List explicit strong-match aliases for one canonical project identity.
     MemoryProjectAliases {
         #[arg(long)]
@@ -669,6 +675,18 @@ async fn main() -> anyhow::Result<()> {
                 .plan_memory_project(&project, scan_limit, max_conversations, max_messages)
                 .await?;
             print_json(&plan)?;
+        }
+        Command::MemoryProjectMatch {
+            project,
+            conversation_id,
+        } => {
+            let strong_match =
+                service.conversation_matches_project_strong(&conversation_id, &project)?;
+            print_json(&serde_json::json!({
+                "project": project,
+                "conversation_id": conversation_id,
+                "strong_match": strong_match,
+            }))?;
         }
         Command::MemoryProjectAliases { project } => {
             print_json(&serde_json::json!({

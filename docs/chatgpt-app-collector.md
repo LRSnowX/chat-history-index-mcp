@@ -43,10 +43,15 @@ changing the global Codex configuration. The configured model is included in
 memory compiler scheduler status.
 
 The optional scheduler runs only after a polling cycle imports at least one new
-conversation snapshot. It starts a detached worker after ingestion has already
-committed, uses its own PID lock, and invokes the existing bounded
-`memory-compile-project` operator path. Compiler output can only stage pending
-candidates; it never promotes them into durable Working Memory automatically.
+conversation snapshot. It passes exactly those newly imported conversation IDs
+to a detached worker after ingestion has already committed. The worker checks
+each imported conversation against each configured canonical project identity
+and invokes the bounded `memory-compile-conversation` path only for matching
+new evidence. It does **not** use a new import as permission to scan or backfill
+older project history. Historical backlog remains an explicit operator action
+through `memory-compile-plan` / `memory-compile-project`. Compiler output can
+only stage pending candidates; it never promotes them into durable Working
+Memory automatically.
 Scheduler/configuration/model failures are logged separately and do not roll
 back the collector cursor or turn a successful transcript import into a failed
 ingestion cycle.

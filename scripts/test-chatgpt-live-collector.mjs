@@ -14,6 +14,7 @@ import {
   memoryCompilerHistorySummary,
   memoryAutoConfig,
   memoryAutoHealthGate,
+  memoryAutoTriggerConversationIds,
   maybeScheduleMemoryCompiler,
   readCompleteThread,
   readMemoryCompilerHistory,
@@ -246,25 +247,58 @@ test("memory auto compiler schedules only after a successful import and explicit
     { enabled: false, scheduled: false },
   );
   assert.deepEqual(
-    maybeScheduleMemoryCompiler({ imported: 0 }, fakeSpawn, enabledEnv),
+    maybeScheduleMemoryCompiler({ imported: 0, conversation_ids: [] }, fakeSpawn, enabledEnv),
     { enabled: true, scheduled: false },
   );
-  const scheduled = maybeScheduleMemoryCompiler({ imported: 2 }, fakeSpawn, enabledEnv);
+  assert.deepEqual(
+    maybeScheduleMemoryCompiler({ imported: 2 }, fakeSpawn, enabledEnv),
+    {
+      enabled: true,
+      scheduled: false,
+      reason: "no_imported_conversation_ids",
+    },
+  );
+  const scheduled = maybeScheduleMemoryCompiler({
+    imported: 2,
+    conversation_ids: ["thread-1", "thread-2", "thread-1"],
+  }, fakeSpawn, enabledEnv);
   assert.equal(scheduled.enabled, true);
   assert.equal(scheduled.scheduled, true);
   assert.equal(scheduled.pid, 12345);
   assert.deepEqual(scheduled.projects, ["LEMonX"]);
   assert.equal(scheduled.model, "gpt-5.6-sol");
+  assert.deepEqual(scheduled.conversation_ids, ["thread-1", "thread-2"]);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args.slice(-1), ["--memory-compiler-worker"]);
   assert.equal(calls[0].options.detached, true);
   assert.equal(calls[0].options.stdio, "ignore");
+  assert.equal(
+    calls[0].options.env.CHAT_HISTORY_MEMORY_AUTO_TRIGGER_CONVERSATIONS,
+    JSON.stringify(["thread-1", "thread-2"]),
+  );
+});
+
+test("memory auto compiler trigger ids are bounded, deduplicated, and fail closed", () => {
+  assert.deepEqual(memoryAutoTriggerConversationIds({
+    CHAT_HISTORY_MEMORY_AUTO_TRIGGER_CONVERSATIONS: JSON.stringify([
+      "thread-1",
+      " thread-2 ",
+      "thread-1",
+      "",
+    ]),
+  }), ["thread-1", "thread-2"]);
+  assert.throws(
+    () => memoryAutoTriggerConversationIds({
+      CHAT_HISTORY_MEMORY_AUTO_TRIGGER_CONVERSATIONS: "not-json",
+    }),
+    /must be a JSON array/,
+  );
 });
 
 test("memory auto compiler scheduling errors do not escape into ingestion", () => {
   const logged = [];
   const result = safeScheduleMemoryCompiler(
-    { imported: 1 },
+    { imported: 1, conversation_ids: ["thread-1"] },
     () => {
       throw new Error("spawn failed");
     },
@@ -296,7 +330,7 @@ test("memory compiler history is bounded and retains success/failure telemetry",
           status: "ok",
           result: {
             model_attempts: 1,
-            staged: [{ staged: { candidate_ids: ["one", "two"] } }],
+            staged: [{ candidate_ids: ["one", "two"] }],
             failures: [],
           },
         }],
@@ -354,12 +388,15 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
           incomplete_canonical_conversation_count: 0,
           active_stale_or_unverified: 0,
           tracked_rejected_lower_quality_snapshots: 0,
-        })}'; else printf '%s\\n' '${JSON.stringify({
-          project: "LEMonX",
-          model_attempts: 0,
-          staged: [],
-          failures: [],
-        })}'; fi`,
+        })}'; elif [ "$1" = "memory-project-match" ]; then printf '%s\\n' '${JSON.stringify({
+          strong_match: true,
+        })}'; elif [ "$1" = "memory-compile-conversation" ]; then printf '%s\\n' '${JSON.stringify({
+          status: "staged",
+          result: {
+            input: { source_snapshot_id: "snapshot-1", through_turn_index: 5 },
+            staged: { candidate_ids: ["candidate-1"] },
+          },
+        })}'; else exit 99; fi`,
         "",
       ].join("\n"),
       { mode: 0o755 },
@@ -375,13 +412,15 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
         CHAT_HISTORY_MEMORY_AUTO_MAX_CONVERSATIONS: "1",
         CHAT_HISTORY_MEMORY_AUTO_MAX_MESSAGES: "6",
         CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
+        CHAT_HISTORY_MEMORY_AUTO_TRIGGER_CONVERSATIONS: JSON.stringify(["thread-1"]),
       },
     });
     assert.equal(run.status, 0, run.stderr);
     const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n");
     assert.deepEqual(calls, [
       "memory-health --project LEMonX",
-      "memory-compile-project --project LEMonX --scan-limit 250 --max-conversations 1 --max-messages 6",
+      "memory-project-match --project LEMonX thread-1",
+      "memory-compile-conversation --project LEMonX --max-messages 6 thread-1",
     ]);
     const status = JSON.parse(
       fs.readFileSync(path.join(cache, "memory-auto-compiler-status.json"), "utf8"),
@@ -391,6 +430,9 @@ test("memory compiler worker is isolated, bounded, and releases its pid lock", (
     assert.equal(status.model, "gpt-5.6-sol");
     assert.equal(status.results.length, 1);
     assert.equal(status.results[0].status, "ok");
+    assert.equal(status.results[0].result.model_attempts, 1);
+    assert.equal(status.results[0].result.staged[0].conversation_id, "thread-1");
+    assert.deepEqual(status.trigger_conversation_ids, ["thread-1"]);
     const history = JSON.parse(
       fs.readFileSync(path.join(cache, "memory-auto-compiler-history.json"), "utf8"),
     );
@@ -439,6 +481,7 @@ test("memory compiler worker blocks unhealthy projects before model compilation 
         CHAT_HISTORY_DATA_HOME: root,
         CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
         CHAT_HISTORY_MEMORY_MODEL: "gpt-5.6-sol",
+        CHAT_HISTORY_MEMORY_AUTO_TRIGGER_CONVERSATIONS: JSON.stringify(["thread-1"]),
       },
     });
     assert.equal(run.status, 0, run.stderr);
