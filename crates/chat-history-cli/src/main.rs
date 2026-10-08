@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use chat_history_core::{
     ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot,
     CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
@@ -99,6 +99,19 @@ enum Command {
     },
     /// Inspect durable ChatGPT.app collector state.
     ChatgptState,
+    /// Read a current trusted canonical continuation baseline (no provider reads).
+    ChatgptContinuationBaseline {
+        thread_id: String,
+    },
+    /// Publish an identity-verified append-only replay; preserve the blocker until success.
+    ChatgptRepairContinuation {
+        #[arg(long, default_value = "-")]
+        path: PathBuf,
+        #[arg(long)]
+        stdin_bytes: Option<u64>,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        embed: bool,
+    },
     /// Plan one recent-50 ChatGPT.app discovery batch without importing transcripts.
     ChatgptPlanRecent {
         #[arg(long, default_value = "-")]
@@ -627,6 +640,49 @@ async fn main() -> anyhow::Result<()> {
         Command::ChatgptState => {
             let state = ChatGptSyncState::load(&data_home)?;
             print_json(&state)?;
+        }
+        Command::ChatgptContinuationBaseline { thread_id } => {
+            print_json(&service.continuation_baseline(&thread_id)?)?;
+        }
+        Command::ChatgptRepairContinuation {
+            path,
+            stdin_bytes,
+            embed,
+        } => {
+            let request: chat_history_core::continuation::ContinuationImport =
+                read_json_document(&path, stdin_bytes)?;
+            let report = service.import_verified_continuation(&request)?;
+            let embeddings_completed = if embed {
+                service
+                    .rebuild_embeddings(
+                        false,
+                        Some(vec![request.baseline.conversation_id.clone()]),
+                        None,
+                    )
+                    .await?
+            } else {
+                0
+            };
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            // Newer/contradictory observation after publication must not be erased.
+            let observation = state
+                .provider_observations
+                .get(&request.baseline.source_thread_id);
+            ensure!(
+                observation.is_some_and(|o| o.provider_revision
+                    == request.provider_after.update_time
+                    && o.provider_status.as_deref() == Some("idle")
+                    && o.observed_at == request.provider_after.observed_at),
+                "Provider changed after publication; collector state retained"
+            );
+            state.mark_imported_at(
+                &request.baseline.source_thread_id,
+                request.provider_after.update_time,
+            );
+            state.save(&data_home)?;
+            print_json(
+                &serde_json::json!({"import":report,"embeddings_completed":embeddings_completed,"state":state}),
+            )?;
         }
         Command::ChatgptPlanRecent { path, stdin_bytes } => {
             let snapshot: ChatGptThreadListSnapshot = read_json_document(&path, stdin_bytes)?;

@@ -92,6 +92,8 @@ pub struct ChatGptBridgeMessage {
     pub inaccessible: bool,
     #[serde(default)]
     pub raw: Value,
+    #[serde(default)]
+    pub stable_identity: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -101,6 +103,8 @@ pub struct ChatGptBridgePage {
     pub has_more: bool,
     #[serde(default)]
     pub messages: Vec<ChatGptBridgeMessage>,
+    #[serde(default)]
+    pub provider_revision: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -807,6 +811,7 @@ mod tests {
             truncated: false,
             inaccessible: false,
             raw: Value::Null,
+            stable_identity: true,
         }
     }
 
@@ -920,12 +925,14 @@ mod tests {
             attachment_metadata: Vec::new(),
             pages: vec![
                 ChatGptBridgePage {
+                    provider_revision: None,
                     request_cursor: None,
                     next_cursor: Some("older-1".to_string()),
                     has_more: true,
                     messages: vec![message("a2", "newest"), message("u2", "middle-new")],
                 },
                 ChatGptBridgePage {
+                    provider_revision: None,
                     request_cursor: Some("older-1".to_string()),
                     next_cursor: None,
                     has_more: false,
@@ -955,6 +962,7 @@ mod tests {
             source_url: None,
             attachment_metadata: Vec::new(),
             pages: vec![ChatGptBridgePage {
+                provider_revision: None,
                 request_cursor: None,
                 next_cursor: None,
                 has_more: false,

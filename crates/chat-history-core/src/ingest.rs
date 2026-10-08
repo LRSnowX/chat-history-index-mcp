@@ -541,6 +541,102 @@ impl IndexService {
         Ok(snapshot_id)
     }
 
+    pub fn continuation_baseline(
+        &self,
+        conversation_id: &str,
+    ) -> anyhow::Result<crate::continuation::ContinuationBaseline> {
+        let conn = open_database(&self.managed_db_path())?;
+        let tx = conn.unchecked_transaction()?;
+        let canonical = canonical_detail(&tx, conversation_id)?;
+        crate::continuation::baseline(&canonical.detail, canonical.native_export_provenance)
+    }
+
+    pub fn native_export_provenance_for_detail(
+        &self,
+        conversation_id: &str,
+        raw_json: Option<&Value>,
+    ) -> anyhow::Result<bool> {
+        let Some(raw_json) = raw_json else {
+            return Ok(false);
+        };
+        let raw_sha256 = hex::encode(Sha256::digest(serde_json::to_vec(raw_json)?));
+        let conn = open_database(&self.managed_db_path())?;
+        let provenance: Option<(String, String)> = conn
+            .query_row(
+                r#"
+                SELECT c.raw_json_sha256_hex, a.import_mode
+                FROM conversations c
+                JOIN archives a ON a.id = c.archive_id
+                WHERE c.conversation_id = ?1
+                "#,
+                params![conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(provenance.is_some_and(|(stored_sha256, import_mode)| {
+            stored_sha256 == raw_sha256 && matches!(import_mode.as_str(), "adopt" | "copy")
+        }))
+    }
+
+    pub fn import_verified_continuation(
+        &self,
+        request: &crate::continuation::ContinuationImport,
+    ) -> anyhow::Result<ImportReport> {
+        let mut conn = open_database(&self.managed_db_path())?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let canonical = canonical_detail(&tx, &request.baseline.conversation_id)?;
+        let detail = &canonical.detail;
+        let normalized = crate::continuation::verify_replay(
+            detail,
+            request,
+            canonical.native_export_provenance,
+        )?;
+        let check_observation = || -> anyhow::Result<()> {
+            let state = crate::ChatGptSyncState::load(&self.data_home)?;
+            let observation = state
+                .provider_observations
+                .get(&request.baseline.source_thread_id)
+                .ok_or_else(|| anyhow!("Missing durable provider observation"))?;
+            ensure!(
+                observation.provider_revision == request.provider_after.update_time
+                    && observation.provider_status.as_deref() == Some("idle")
+                    && observation.observed_at == request.provider_after.observed_at,
+                "Provider observation changed before continuation publication"
+            );
+            Ok(())
+        };
+        check_observation()?;
+        let label = "chatgpt-verified-continuation";
+        tx.execute("INSERT INTO archives (archive_path, source_path, sha256_hex, size_bytes, import_mode) VALUES (?1, ?1, ?2, 1, 'normalized')", params![label, request.baseline.baseline_token])?;
+        let prepared = PreparedConversation::from_normalized(tx.last_insert_rowid(), normalized)?;
+        ensure!(
+            prepared.conversation_id == detail.conversation.conversation_id,
+            "Canonical source identity changed"
+        );
+        let run_id = self.insert_run(&tx, "verified_continuation", Some(Path::new(label)))?;
+        ensure!(
+            write_conversation_in_transaction(&tx, &prepared)? == ConversationWriteOutcome::Written,
+            "Continuation publication rejected"
+        );
+        // Same derived-index/job invalidation as normal imports, with FTS updated atomically.
+        tx.execute(
+            "DELETE FROM conversation_fts WHERE conversation_id = ?1",
+            params![prepared.conversation_id],
+        )?;
+        tx.execute("INSERT INTO conversation_fts (conversation_id,title,transcript_text,summary_text,topic_tags) SELECT conversation_id,title,transcript_text,COALESCE(json_extract(summary_json,'$.abstract_text'),''),COALESCE(topic_tags_json,'[]') FROM conversations WHERE conversation_id = ?1", params![prepared.conversation_id])?;
+        let report = ImportReport {
+            archive_path: PathBuf::from(label),
+            conversations_indexed: 1,
+            messages_indexed: prepared.messages.len(),
+            ..ImportReport::default()
+        };
+        tx.execute("UPDATE runs SET status = 'complete', completed_at = CURRENT_TIMESTAMP, counters_json = ?2 WHERE id = ?1", params![run_id, serde_json::to_string(&report)?])?;
+        check_observation()?;
+        tx.commit()?;
+        // Sync-state is deliberately not cleared here: caller does so ONLY after publication.
+        Ok(report)
+    }
+
     pub fn conversation_matches_project_strong(
         &self,
         conversation_id: &str,
@@ -1197,6 +1293,15 @@ fn write_conversation(
     prepared: &PreparedConversation,
 ) -> anyhow::Result<ConversationWriteOutcome> {
     let tx = conn.unchecked_transaction()?;
+    let outcome = write_conversation_in_transaction(&tx, prepared)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+fn write_conversation_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    prepared: &PreparedConversation,
+) -> anyhow::Result<ConversationWriteOutcome> {
     let existing: Option<(String, String, Option<String>)> = tx
         .query_row(
             "SELECT title, transcript_text, parent_conversation_id FROM conversations WHERE conversation_id = ?1",
@@ -1228,9 +1333,9 @@ fn write_conversation(
         None
     };
     if existing.is_some() {
-        persist_legacy_canonical_snapshot(&tx, &prepared.conversation_id)?;
+        persist_legacy_canonical_snapshot(tx, &prepared.conversation_id)?;
     }
-    let incoming_snapshot_id = persist_prepared_snapshot(&tx, prepared)?;
+    let incoming_snapshot_id = persist_prepared_snapshot(tx, prepared)?;
     if let Some(reason) = existing_quality
         .as_ref()
         .and_then(|quality| incoming_conversation_quality_regression(quality, prepared))
@@ -1243,7 +1348,6 @@ fn write_conversation(
             "#,
             params![incoming_snapshot_id, reason],
         )?;
-        tx.commit()?;
         return Ok(ConversationWriteOutcome::SkippedLowerQuality);
     }
     tx.execute(
@@ -1385,14 +1489,7 @@ fn write_conversation(
                 "DELETE FROM conversation_embedding_chunks WHERE conversation_id = ?1",
                 params![parent],
             )?;
-            upsert_job(
-                &tx,
-                &parent,
-                JobKind::Embedding,
-                JobStatus::Pending,
-                None,
-                0,
-            )?;
+            upsert_job(tx, &parent, JobKind::Embedding, JobStatus::Pending, None, 0)?;
         }
     }
 
@@ -1434,7 +1531,7 @@ fn write_conversation(
     }
     if content_changed {
         upsert_job(
-            &tx,
+            tx,
             &prepared.conversation_id,
             JobKind::Summary,
             JobStatus::Pending,
@@ -1442,7 +1539,7 @@ fn write_conversation(
             0,
         )?;
         upsert_job(
-            &tx,
+            tx,
             &prepared.conversation_id,
             JobKind::Embedding,
             JobStatus::Pending,
@@ -1450,7 +1547,6 @@ fn write_conversation(
             0,
         )?;
     }
-    tx.commit()?;
     Ok(ConversationWriteOutcome::Written)
 }
 
@@ -2016,6 +2112,39 @@ fn load_conversation(
     )
     .optional()
     .map_err(Into::into)
+}
+
+struct CanonicalContinuationDetail {
+    detail: ConversationDetail,
+    native_export_provenance: bool,
+}
+
+fn canonical_detail(
+    conn: &Connection,
+    conversation_id: &str,
+) -> anyhow::Result<CanonicalContinuationDetail> {
+    let conversation = load_conversation(conn, conversation_id)?
+        .ok_or_else(|| anyhow!("Canonical conversation not found"))?;
+    let (blob, import_mode): (Vec<u8>, String) = conn.query_row(
+        r#"
+        SELECT c.raw_conversation_zstd, a.import_mode
+        FROM conversations c
+        JOIN archives a ON a.id = c.archive_id
+        WHERE c.conversation_id = ?1
+        "#,
+        params![conversation_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(CanonicalContinuationDetail {
+        detail: ConversationDetail {
+            conversation,
+            messages: load_messages(conn, conversation_id)?,
+            raw_json: Some(serde_json::from_slice(&decode_all(blob.as_slice())?)?),
+            summary_json: None,
+            attachments: Vec::new(),
+        },
+        native_export_provenance: matches!(import_mode.as_str(), "adopt" | "copy"),
+    })
 }
 
 fn load_messages(

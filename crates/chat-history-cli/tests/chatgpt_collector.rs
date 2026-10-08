@@ -19,6 +19,112 @@ fn run_cli(data_home: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("CLI JSON output")
 }
 
+#[test]
+fn operator_continuation_repair_preserves_trusted_body_and_clears_block_only_after_success() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("data");
+    let input = temp.path().join("input.json");
+    let old_body = "trusted historical body ".repeat(1500);
+    write_json(
+        &input,
+        json!({"thread_id":"synthetic-repair","title":"Arcos synthetic","update_time":20.0,"pages":[{"has_more":false,"messages":[
+            {"message_id":"old-assistant","role":"assistant","text":old_body},
+            {"message_id":"old-user","role":"user","text":"Question"}
+        ]}]}),
+    );
+    run_cli(
+        &home,
+        &[
+            "chatgpt-import-thread",
+            "--path",
+            input.to_str().unwrap(),
+            "--embed",
+            "false",
+        ],
+    );
+    let baseline = run_cli(
+        &home,
+        &["chatgpt-continuation-baseline", "synthetic-repair"],
+    );
+    let observation = json!({"thread_id":"synthetic-repair","kind":"chatgpt","title":"Arcos synthetic","update_time":30.0,"status":"idle","observed_at":40.0});
+    write_json(
+        &input,
+        json!({"requested_limit":50,"threads":[observation.clone()]}),
+    );
+    run_cli(
+        &home,
+        &["chatgpt-plan-recent", "--path", input.to_str().unwrap()],
+    );
+    run_cli(
+        &home,
+        &[
+            "chatgpt-block",
+            "synthetic-repair",
+            "--reason",
+            "20000-character safety limit",
+        ],
+    );
+    let mut repair = json!({"baseline":baseline,"provider_before":observation,"provider_after":observation,
+    "transcript":{"thread_id":"synthetic-repair","title":"Arcos synthetic","update_time":30.0,"pages":[{"has_more":false,"provider_revision":30.0,"messages":[
+        {"message_id":"new","role":"user","text":"Complete new tail","stable_identity":true,"truncated":true},
+        {"message_id":"old-assistant","role":"assistant","text":"truncated old copy","stable_identity":true,"truncated":true},
+        {"message_id":"old-user","role":"user","text":"Question","stable_identity":true}
+    ]}]}});
+    write_json(&input, repair.clone());
+    let failed = Command::new(env!("CARGO_BIN_EXE_chat-history-cli"))
+        .args([
+            "chatgpt-repair-continuation",
+            "--path",
+            input.to_str().unwrap(),
+            "--embed",
+            "false",
+        ])
+        .env("CHAT_HISTORY_DATA_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let state = run_cli(&home, &["chatgpt-state"]);
+    assert!(state["blocked"]["synthetic-repair"].is_object());
+    let service =
+        chat_history_core::IndexService::new(chat_history_core::DataHome::new(home.clone()), None);
+    assert_eq!(
+        service
+            .get_conversation("synthetic-repair", false)
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    repair["transcript"]["pages"][0]["messages"][0]["truncated"] = json!(false);
+    write_json(&input, repair);
+    let repaired = run_cli(
+        &home,
+        &[
+            "chatgpt-repair-continuation",
+            "--path",
+            input.to_str().unwrap(),
+            "--embed",
+            "false",
+        ],
+    );
+    assert!(repaired["state"]["blocked"].as_object().unwrap().is_empty());
+    let after = service
+        .get_conversation("synthetic-repair", true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.messages.len(), 3);
+    assert_eq!(after.messages[1].normalized_text, old_body);
+    assert_eq!(after.conversation.update_time, Some(30.0));
+    let state = chat_history_core::ChatGptSyncState::load(service.data_home()).unwrap();
+    assert_eq!(
+        state
+            .source_health("chatgpt", "synthetic-repair", Some(30.0))
+            .state,
+        chat_history_core::ConversationSourceHealthState::Aligned
+    );
+}
+
 fn write_json(path: &Path, value: Value) {
     fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 }

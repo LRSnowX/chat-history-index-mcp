@@ -210,6 +210,56 @@ Aligned means **at the last recorded provider observation only**. It is not
 proof that the provider has not changed since then or that a host has fully
 restored the predecessor conversation. G-A adds no verified-continuation protocol.
 
+### Verified continuation (Checkpoint G-B)
+
+Blocked threads can use an explicit `chatgpt-repair-continuation` operator path.
+The live collector selects that path for eligible idle blocked threads; it does
+not remove the blocked guard or relax normal full imports. There is no MCP
+write tool and no memory compiler invocation. The 20,000-character limit stays.
+
+`chatgpt-continuation-baseline THREAD_ID` derives a SHA-256 token from the current
+canonical record, ordered messages and raw provenance. Only complete bridge or
+native-export provenance, unique nonempty IDs, contiguous order and a finite
+canonical revision qualify. No new baseline store or schema migration is used.
+`chatgpt-repair-continuation --path REQUEST.json [--embed false]` consumes that
+baseline, two eligible provider observations, and the paginated replay.
+
+Repair requires the **entire ordered canonical identity prefix**, not a fuzzy
+match or a single timestamp/tail anchor. Complete old bodies must match; a
+provider-truncated old item can prove identity/order only and its trusted body,
+raw message and timestamp are retained. Every new item must have a stable
+provider ID and complete accessible body. Synthetic fallback IDs, missing or
+reordered overlap, duplicates, edits, inaccessible items and incomplete cursor
+chains fail closed. Pre/post `list_threads` observations must agree on idle
+status and revision; every replay page must carry the same thread identity and
+revision. Missing/contradictory/unknown statuses are not reinterpreted as safe.
+
+An immediate SQLite transaction rechecks the baseline and durable observation,
+publishes the canonical append, snapshots/audit run, FTS and normal derivative
+job invalidation together. The existing sync-state blocker is cleared only
+after publication and requested embedding maintenance succeed, and after a
+fresh durable-observation check. A crash/failure between those phases retains
+the blocker, never an early success claim. Existing sync-state version, cursor,
+provider observations and Working Memory persistence are unchanged. Bridge
+`stable_identity` defaults false and page `provider_revision` defaults absent
+for older inputs; neither field changes normal full-import eligibility.
+
+Read-only thread and project-continuation responses add `continuation_proof`:
+`state` (`verified | unverified`), nullable `indexed_revision`,
+`provider_revision`, `observed_at`, `total_messages`, nullable
+`final_message_id`/`final_turn_index`, bounded `reason`, and `method`
+(`ordered-canonical-prefix-v1`). Verified requires trusted canonical provenance,
+G-A alignment with eligible idle observation, and a nonempty returned range
+reaching the canonical end. Older pages, zero-message ranges, unsupported sources
+and blocked/pending/stale/unknown evidence remain unverified.
+
+Provider stability is established at recorded observations, not a remote lock:
+it cannot guarantee the provider never changes afterward. Likewise, identity-only
+overlap cannot inspect an edit hidden in a truncated old body; it never replaces
+that body. Missing stable provider IDs/revisions are a safe refusal, not grounds
+for timestamp/text heuristics. Host handoff additionally requires live-project
+reconciliation; an aligned bounded tail is not complete Host restoration.
+
 ### Discovery input
 
 Adapt the result of `list_threads(limit: 50)` to:

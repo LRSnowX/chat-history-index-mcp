@@ -29,6 +29,7 @@ async fn arcos_source_integrity_is_additive_on_real_mcp_reads() -> anyhow::Resul
     let normalized = serde_json::from_value(serde_json::json!({
         "source":"chatgpt", "source_conversation_id":id,
         "title":"⭐Arcos开发辅助-5", "create_time":10.0,"update_time":20.0,
+        "raw":{"collector":"chatgpt-app-bridge-v1"},
         "messages": (0..10).map(|index| serde_json::json!({
             "message_id":format!("message-{index}"),"role":if index % 2 == 0 { "user" } else { "assistant" },
             "text":"Arcos Foundation B / fourth-live-fire readiness", "create_time":10.0 + f64::from(index)
@@ -99,6 +100,19 @@ async fn arcos_source_integrity_is_additive_on_real_mcp_reads() -> anyhow::Resul
         assert_eq!(wire["total_messages"], 10);
         assert_eq!(wire["truncated"], false);
         assert_eq!(wire["thread"]["source_health"]["state"], expected);
+        assert_eq!(
+            wire["thread"]["continuation_proof"]["state"],
+            if expected == "aligned" {
+                "verified"
+            } else {
+                "unverified"
+            }
+        );
+        assert_eq!(
+            wire["thread"]["continuation_proof"]["final_message_id"],
+            "message-9"
+        );
+        assert_eq!(wire["thread"]["continuation_proof"]["total_messages"], 10);
         if expected == "blocked" {
             assert_eq!(
                 wire["thread"]["source_health"]["reason"],
@@ -121,6 +135,29 @@ async fn arcos_source_integrity_is_additive_on_real_mcp_reads() -> anyhow::Resul
             packet["continuations"][0]["source_health"],
             wire["thread"]["source_health"]
         );
+        assert_eq!(
+            packet["continuations"][0]["continuation_proof"],
+            wire["thread"]["continuation_proof"]
+        );
+        if expected == "aligned" {
+            let older = client.call_tool(CallToolRequestParams::new("memory_get_thread").with_arguments(serde_json::from_value(
+                serde_json::json!({"conversation_id":id,"message_offset":0,"message_limit":2})
+            )?)).await?.structured_content.unwrap();
+            assert_eq!(older["thread"]["continuation_proof"]["state"], "unverified");
+            let tail = client
+                .call_tool(
+                    CallToolRequestParams::new("memory_get_thread").with_arguments(
+                        serde_json::from_value(
+                            serde_json::json!({"conversation_id":id,"tail":true,"message_limit":2}),
+                        )?,
+                    ),
+                )
+                .await?
+                .structured_content
+                .unwrap();
+            assert_eq!(tail["message_offset"], 8);
+            assert_eq!(tail["thread"]["continuation_proof"]["state"], "verified");
+        }
     }
     // Malformed durable telemetry fails closed without losing indexed evidence.
     fs::write(

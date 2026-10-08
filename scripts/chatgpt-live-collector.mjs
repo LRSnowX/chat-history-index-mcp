@@ -265,6 +265,7 @@ function bridgeMessages(turn) {
       text,
       truncated,
       inaccessible: false,
+      stable_identity: typeof item.id === "string" && item.id.length > 0,
       raw: {
         turn_id: turn.id,
         turn_status: turn.status ?? null,
@@ -277,7 +278,7 @@ function bridgeMessages(turn) {
 
 class PermanentIncompleteError extends Error {}
 
-async function readCompleteThread(client, threadId, contextThreadId) {
+async function readCompleteThread(client, threadId, contextThreadId, continuationRevision) {
   let cursor = null;
   const seenCursors = new Set();
   const pages = [];
@@ -299,12 +300,16 @@ async function readCompleteThread(client, threadId, contextThreadId) {
     if (payload.page?.order !== "newest_first") {
       throw new PermanentIncompleteError(`unexpected read_thread order: ${payload.page?.order ?? "missing"}`);
     }
+    if (continuationRevision !== undefined && (
+      payload.thread?.id !== threadId || payload.thread?.updatedAt !== continuationRevision
+      || (payload.thread?.status != null && payload.thread.status !== "idle")
+    )) throw new PermanentIncompleteError("provider identity/revision/status changed during continuation replay");
     if (threadMetadata == null) threadMetadata = payload.thread ?? null;
     if (Array.isArray(payload.attachments) && payload.attachments.length > 0) {
       attachments = payload.attachments;
     }
     const messages = (payload.turns ?? []).flatMap((turn) => bridgeMessages(turn));
-    if (messages.some((message) => message.truncated)) {
+    if (continuationRevision === undefined && messages.some((message) => message.truncated)) {
       throw new PermanentIncompleteError(`read_thread reached the ${MAX_MESSAGE_CHARS}-character per-message safety limit`);
     }
     const hasMore = payload.page?.hasMore === true;
@@ -314,6 +319,7 @@ async function readCompleteThread(client, threadId, contextThreadId) {
       next_cursor: nextCursor,
       has_more: hasMore,
       messages,
+      provider_revision: Number.isFinite(payload.thread?.updatedAt) ? payload.thread.updatedAt : null,
     });
     if (!hasMore) break;
     if (typeof nextCursor !== "string" || nextCursor.length === 0) {
@@ -355,6 +361,31 @@ function importTranscript(transcript) {
 
 function markBlocked(threadId, reason) {
   return cliJson(["chatgpt-block", threadId, "--reason", reason]);
+}
+
+async function repairContinuation(client, threadId, contextThreadId) {
+  const baseline = cliJson(["chatgpt-continuation-baseline", threadId]);
+  const observe = async () => {
+    const catalog = toolText(await client.callTool("list_threads", { limit: DISCOVERY_LIMIT }, contextThreadId));
+    const observedAt = Date.now() / 1000;
+    const entries = [...(catalog.threads ?? []), ...(catalog.pinnedThreads ?? [])].filter((entry) => entry.id === threadId);
+    const snapshot = { requested_limit: DISCOVERY_LIMIT,
+      threads: (catalog.threads ?? []).map((entry) => bridgeThread(entry, observedAt)),
+      pinned_threads: (catalog.pinnedThreads ?? []).map((entry) => bridgeThread(entry, observedAt)) };
+    const input = JSON.stringify(snapshot);
+    cliJson(["chatgpt-plan-recent", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))], input);
+    if (!entries.length || entries.some((entry) => entry.kind !== "chatgpt" || entry.status !== "idle" || !Number.isFinite(entry.updatedAt) || entry.updatedAt !== entries[0].updatedAt)) {
+      throw new PermanentIncompleteError("continuation provider is absent, contradictory or non-idle");
+    }
+    return bridgeThread(entries[0], observedAt);
+  };
+  const providerBefore = await observe();
+  const transcript = await readCompleteThread(client, threadId, contextThreadId, providerBefore.update_time);
+  const providerAfter = await observe();
+  if (providerBefore.update_time !== providerAfter.update_time) throw new PermanentIncompleteError("provider changed across continuation replay");
+  const input = JSON.stringify({ baseline, provider_before: providerBefore, provider_after: providerAfter, transcript });
+  cliJson(["chatgpt-repair-continuation", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))], input);
+  return transcript;
 }
 
 function isRateLimit(error) {
@@ -939,6 +970,8 @@ async function syncWithClient(client, contextThreadId) {
       "--stdin-bytes", String(Buffer.byteLength(snapshotText)),
     ], snapshotText);
     const selected = planned.plan?.selected ?? [];
+    const repairIds = planned.plan?.skipped_blocked_ids ?? [];
+    for (const threadId of repairIds) selected.push({ thread_id: threadId, continuation_repair: true });
     if (selected.length === 0) {
       return {
         event: "chatgpt_live_sync",
@@ -962,8 +995,10 @@ async function syncWithClient(client, contextThreadId) {
         continue;
       }
       try {
-        const transcript = await readCompleteThread(client, pending.thread_id, contextThreadId);
-        importTranscript(transcript);
+        const transcript = pending.continuation_repair
+          ? await repairContinuation(client, pending.thread_id, contextThreadId)
+          : await readCompleteThread(client, pending.thread_id, contextThreadId);
+        if (!pending.continuation_repair) importTranscript(transcript);
         imported += 1;
         importedTitles.push(transcript.title);
         importedConversationIds.push(pending.thread_id);
@@ -977,7 +1012,7 @@ async function syncWithClient(client, contextThreadId) {
           };
         }
         if (error instanceof PermanentIncompleteError) {
-          markBlocked(pending.thread_id, error.message);
+          if (!pending.continuation_repair) markBlocked(pending.thread_id, error.message);
           blocked += 1;
           continue;
         }
@@ -1339,6 +1374,7 @@ export {
   safeScheduleMemoryCompiler,
   readMemoryCompilerHistory,
   readCompleteThread,
+  repairContinuation,
   runMemoryCompilerWorker,
   syncWithClient,
   syncOnce,

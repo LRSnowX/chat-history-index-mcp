@@ -178,6 +178,85 @@ test("bridgeMessages fails closed near the App Tools per-message output cap", ()
   assert.equal(messages[0].truncated, true);
 });
 
+test("continuation collector uses an auditable repair path with pre/post idle observations", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-continuation-"));
+  try {
+    fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+    const callsPath = path.join(root, "calls.jsonl");
+    fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
+    fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), `#!${process.execPath}
+import fs from 'node:fs';
+const input = fs.readFileSync(0, 'utf8');
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),input:input ? JSON.parse(input) : null})+'\\n');
+console.log(JSON.stringify(process.argv[2] === 'chatgpt-continuation-baseline' ? {conversation_id:'thread',baseline_token:'test-baseline'} : {plan:{selected:[],skipped_blocked_ids:['thread']}}));
+`, { mode: 0o755 });
+    const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+    for (const scenario of ["success", "sync", "revision", "active", "unknown", "missing", "page_changed", "contradictory"]) {
+      fs.writeFileSync(callsPath, "");
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import { repairContinuation, syncWithClient } from ${JSON.stringify(collector)};
+        const scenario = ${JSON.stringify(scenario)};
+        let observations = 0;
+        const reads = [];
+        const client = { async callTool(name,args) {
+          let payload;
+          if (name === 'list_threads') {
+            observations++;
+            const entry = {id:'thread',kind:'chatgpt',title:'synthetic',updatedAt:20,status:'idle'};
+            if (observations === 2) {
+              if (scenario === 'revision') entry.updatedAt=21;
+              if (scenario === 'active' || scenario === 'unknown') entry.status=scenario;
+            }
+            payload={threads:observations === 2 && scenario === 'missing' ? [] : [entry]};
+            if (observations === 2 && scenario === 'contradictory') payload.pinnedThreads=[{...entry,updatedAt:21}];
+          } else {
+            reads.push(args);
+            payload={thread:{id:'thread',title:'synthetic',updatedAt:scenario === 'page_changed' ? 21 : 20},
+              page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[
+                {type:'userMessage',id:'old',content:[{type:'text',text:'x'.repeat(19990)}]},
+                {type:'agentMessage',id:'new',text:'complete new tail'}]}]};
+          }
+          return {content:[{type:'text',text:JSON.stringify(payload)}]};
+        }};
+        try {
+          if (scenario === 'sync') {
+            const result=await syncWithClient(client,'context');
+            if (result.imported !== 1) throw new Error('blocked thread did not reach repair');
+          } else await repairContinuation(client,'thread','context');
+          console.log(JSON.stringify({ok:true,reads}));
+        }
+        catch(error) { console.log(JSON.stringify({ok:false,message:error.message,reads})); }
+      `], { encoding: "utf8", env: { ...process.env, CHAT_HISTORY_DATA_HOME: root } });
+      assert.equal(child.status, 0, child.stderr);
+      const output = JSON.parse(child.stdout);
+      const successful = scenario === "success" || scenario === "sync";
+      assert.equal(output.ok, successful, scenario);
+      assert.equal(output.reads[0].maxOutputCharsPerItem, 20_000);
+      assert.equal(output.reads[0].includeOutputs, true);
+      const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
+      assert.equal(calls[0].args[0], scenario === "sync" ? "chatgpt-plan-recent" : "chatgpt-continuation-baseline");
+      const repair = calls.find((call) => call.args[0] === "chatgpt-repair-continuation");
+      assert.equal(Boolean(repair), successful, scenario);
+      assert.equal(calls.some((call) => call.args[0] === "chatgpt-import-thread" || call.args[0] === "chatgpt-unblock"), false);
+      if (repair) {
+        assert.equal(repair.input.provider_before.status, "idle");
+        assert.equal(repair.input.provider_after.update_time, 20);
+        assert.ok(repair.input.provider_after.observed_at >= repair.input.provider_before.observed_at);
+        assert.equal(repair.input.transcript.pages[0].messages[1].truncated, true);
+        assert.ok(repair.input.transcript.pages[0].messages.every((message) => message.stable_identity));
+      }
+      if (scenario !== "page_changed") assert.equal(calls.filter((call) => call.args[0] === "chatgpt-plan-recent").length, scenario === "sync" ? 3 : 2);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("synthetic fallback item identities cannot prove continuation", () => {
+  const messages = bridgeMessages({ id: "turn", status: "completed", items: [{ type: "agentMessage", text: "no source ID" }] });
+  assert.equal(messages[0].stable_identity, false);
+});
+
 test("memory auto compiler is disabled by default and validates explicit bounds", () => {
   assert.deepEqual(memoryAutoConfig({}), {
     enabled: false,

@@ -629,7 +629,7 @@ impl ChatHistoryMcp {
         }
         let detail = self
             .service
-            .get_conversation(&request.conversation_id, false)
+            .get_conversation(&request.conversation_id, true)
             .map_err(|error| error.to_string())?;
         let Some(detail) = detail else {
             return Ok(Json(MemoryThreadResponse {
@@ -660,12 +660,24 @@ impl ChatHistoryMcp {
             .collect::<Vec<_>>();
         let summary = detail.conversation.summary.clone();
         let source_health = self.conversation_source_health(&detail.conversation);
+        let native_export_provenance = self
+            .service
+            .native_export_provenance_for_detail(&request.conversation_id, detail.raw_json.as_ref())
+            .map_err(|error| error.to_string())?;
+        let continuation_proof = chat_history_core::continuation::continuation_proof(
+            &detail,
+            &source_health,
+            offset,
+            messages.len(),
+            native_export_provenance,
+        );
         Ok(Json(MemoryThreadResponse {
             thread: Some(MemoryThread {
                 conversation: detail.conversation,
                 summary,
                 messages,
                 source_health,
+                continuation_proof,
             }),
             message_offset: offset,
             returned_messages: end.saturating_sub(offset),
@@ -950,7 +962,7 @@ impl ChatHistoryMcp {
                 }
                 let detail = self
                     .service
-                    .get_conversation(&candidate.conversation_id, false)
+                    .get_conversation(&candidate.conversation_id, true)
                     .map_err(|error| error.to_string())?;
                 let Some(detail) = detail else {
                     continue;
@@ -980,6 +992,20 @@ impl ChatHistoryMcp {
                     })
                     .collect::<Vec<_>>();
                 let source_health = self.conversation_source_health(&detail.conversation);
+                let native_export_provenance = self
+                    .service
+                    .native_export_provenance_for_detail(
+                        &candidate.conversation_id,
+                        detail.raw_json.as_ref(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let continuation_proof = chat_history_core::continuation::continuation_proof(
+                    &detail,
+                    &source_health,
+                    offset,
+                    messages.len(),
+                    native_export_provenance,
+                );
                 let continuation = MemoryContinuation {
                     conversation_id: detail.conversation.conversation_id,
                     source: detail.conversation.source,
@@ -990,6 +1016,7 @@ impl ChatHistoryMcp {
                     total_messages,
                     messages,
                     source_health,
+                    continuation_proof,
                 };
                 continuations.push(continuation);
                 if continuations.len() >= max_threads {
@@ -1200,6 +1227,7 @@ struct MemoryThread {
     summary: Option<SummaryRecord>,
     messages: Vec<MemoryMessage>,
     source_health: ConversationSourceHealth,
+    continuation_proof: chat_history_core::continuation::ContinuationProof,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1213,6 +1241,7 @@ struct MemoryContinuation {
     total_messages: usize,
     messages: Vec<MemoryMessage>,
     source_health: ConversationSourceHealth,
+    continuation_proof: chat_history_core::continuation::ContinuationProof,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

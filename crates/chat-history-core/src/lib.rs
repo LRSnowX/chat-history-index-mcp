@@ -2,6 +2,7 @@ pub mod antigravity;
 pub mod archive;
 pub mod chatgpt;
 pub mod codex;
+pub mod continuation;
 pub mod data_home;
 pub mod db;
 pub mod embedding;
