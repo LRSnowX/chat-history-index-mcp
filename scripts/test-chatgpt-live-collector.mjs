@@ -257,6 +257,88 @@ test("synthetic fallback item identities cannot prove continuation", () => {
   assert.equal(messages[0].stable_identity, false);
 });
 
+test("live repair persists bounded codes and never logs raw CLI/provider message bodies", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-repair-diagnostics-"));
+  try {
+    fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+    const callsPath = path.join(root, "calls.jsonl");
+    fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
+    fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), `#!${process.execPath}
+import fs from 'node:fs';
+const input=fs.readFileSync(0,'utf8');
+const args=process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)},JSON.stringify(args)+'\\n');
+if(args[0]==='chatgpt-repair-continuation') {
+  console.error('CHIM_REPAIR_'+process.env.TEST_REPAIR_CODE+': '+ 'PRIVATE_BODY_SENTINEL'.repeat(2000));
+  process.exit(1);
+}
+console.log(JSON.stringify(args[0]==='chatgpt-continuation-baseline' ? {} : args[0]==='chatgpt-record-repair-failure' ? {recorded:true,diagnostic:{code:args.at(-1),reason:'PRIVATE_BODY_SENTINEL'}} : {plan:{selected:[],skipped_blocked_ids:['thread']}}));
+`, { mode: 0o755 });
+    const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+    for (const code of ["TRUNCATED_NEW_TAIL", "MISSING_OVERLAP", "PROVIDER_CHANGED", "REPLAY_INCOMPLETE", "BASELINE_CHANGED", "UNKNOWN_PROVIDER_FAILURE"]) {
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import { syncWithClient } from ${JSON.stringify(collector)};
+        const client={async callTool(name,args) {
+          if(name==='read_thread' && process.env.TEST_REPAIR_CODE==='UNKNOWN_PROVIDER_FAILURE') throw new Error('PRIVATE_BODY_SENTINEL'.repeat(2000));
+          const payload=name==='list_threads' ? {threads:[{id:'thread',title:'synthetic',kind:'chatgpt',status:'idle',updatedAt:30}]} :
+            {thread:{id:'thread',title:'synthetic',updatedAt:30},page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[{id:'new',type:'agentMessage',text:'complete synthetic body'}]}]};
+          return {content:[{type:'text',text:JSON.stringify(payload)}]};
+        }};
+        console.log(JSON.stringify(await syncWithClient(client,'context')));
+      `], { encoding: "utf8", env: { ...process.env, CHAT_HISTORY_DATA_HOME: root, TEST_REPAIR_CODE: code } });
+      assert.equal(child.status, 0, child.stderr);
+      assert.equal(JSON.parse(child.stdout).imported, 0);
+      assert.equal(JSON.parse(child.stdout).blocked, 1);
+      assert.equal(child.stdout.includes("PRIVATE_BODY_SENTINEL"), false);
+      assert.equal(child.stderr.includes("PRIVATE_BODY_SENTINEL"), false);
+      const records = fs.readFileSync(path.join(root,"logs/chatgpt-live-collector.error.log"),"utf8").trim().split("\n").map(JSON.parse);
+      const diagnostic = records.at(-1);
+      assert.equal(diagnostic.code, code === "UNKNOWN_PROVIDER_FAILURE" ? "REPLAY_INCOMPLETE" : code);
+      assert.equal(diagnostic.diagnostic_persisted, true);
+      assert.ok(diagnostic.reason.length <= 240);
+      assert.equal(JSON.stringify(diagnostic).includes("PRIVATE_BODY_SENTINEL"), false);
+      const calls = fs.readFileSync(callsPath,"utf8").trim().split("\n").map(JSON.parse);
+      assert.equal(calls.some((args) => args[0] === "chatgpt-block" || args[0] === "chatgpt-import-thread"),false,"failed repair must not replace the original blocker or canonical history");
+      assert.deepEqual(calls.at(-1),["chatgpt-record-repair-failure","thread","--code",diagnostic.code]);
+    }
+  } finally {
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+test("continuation repair rate limits stay transient and do not persist repair diagnostics", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-repair-rate-limit-"));
+  try {
+    fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+    const callsPath = path.join(root, "calls.jsonl");
+    fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
+    fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), `#!${process.execPath}
+import fs from 'node:fs';
+const args=process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)},JSON.stringify(args)+'\\n');
+console.log(JSON.stringify(args[0]==='chatgpt-continuation-baseline' ? {} : {plan:{selected:[],skipped_blocked_ids:['thread']}}));
+`, { mode: 0o755 });
+    const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { syncWithClient } from ${JSON.stringify(collector)};
+      const client={async callTool(name) {
+        if(name==='list_threads') return {content:[{type:'text',text:JSON.stringify({threads:[{id:'thread',title:'synthetic',kind:'chatgpt',status:'idle',updatedAt:30}]})}]};
+        throw new Error('429 Too many requests');
+      }};
+      console.log(JSON.stringify(await syncWithClient(client,'context')));
+    `], { encoding: "utf8", env: { ...process.env, CHAT_HISTORY_DATA_HOME: root } });
+    assert.equal(child.status, 0, child.stderr);
+    const result = JSON.parse(child.stdout);
+    assert.equal(result.event, "chatgpt_live_rate_limited");
+    const calls = fs.readFileSync(callsPath,"utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(calls.some((args) => args[0] === "chatgpt-record-repair-failure"), false);
+    const errorLog = path.join(root,"logs/chatgpt-live-collector.error.log");
+    assert.equal(fs.existsSync(errorLog), false);
+  } finally {
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
 test("memory auto compiler is disabled by default and validates explicit bounds", () => {
   assert.deepEqual(memoryAutoConfig({}), {
     enabled: false,

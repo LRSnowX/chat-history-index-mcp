@@ -112,6 +112,21 @@ enum Command {
         #[arg(long, default_value_t = true, action = ArgAction::Set)]
         embed: bool,
     },
+    /// Append lossless official-export evidence to an already blocked canonical thread.
+    ChatgptRepairExport {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        baseline: PathBuf,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        embed: bool,
+    },
+    /// Record one bounded content-free failure without removing the original blocker.
+    ChatgptRecordRepairFailure {
+        thread_id: String,
+        #[arg(long)]
+        code: String,
+    },
     /// Plan one recent-50 ChatGPT.app discovery batch without importing transcripts.
     ChatgptPlanRecent {
         #[arg(long, default_value = "-")]
@@ -649,9 +664,21 @@ async fn main() -> anyhow::Result<()> {
             stdin_bytes,
             embed,
         } => {
+            use chat_history_core::continuation::RepairFailureCode;
             let request: chat_history_core::continuation::ContinuationImport =
-                read_json_document(&path, stdin_bytes)?;
-            let report = service.import_verified_continuation(&request)?;
+                read_json_document(&path, stdin_bytes)
+                    .map_err(|_| RepairFailureCode::ReplayIncomplete)?;
+            let report = match service.import_verified_continuation(&request) {
+                Ok(report) => report,
+                Err(error) => {
+                    let code = RepairFailureCode::from_error(&error);
+                    let mut state = ChatGptSyncState::load(&data_home)?;
+                    if state.record_repair_failure(&request.baseline.source_thread_id, code) {
+                        state.save(&data_home)?;
+                    }
+                    return Err(code.into());
+                }
+            };
             let embeddings_completed = if embed {
                 service
                     .rebuild_embeddings(
@@ -673,7 +700,7 @@ async fn main() -> anyhow::Result<()> {
                     == request.provider_after.update_time
                     && o.provider_status.as_deref() == Some("idle")
                     && o.observed_at == request.provider_after.observed_at),
-                "Provider changed after publication; collector state retained"
+                RepairFailureCode::ProviderChanged
             );
             state.mark_imported_at(
                 &request.baseline.source_thread_id,
@@ -682,6 +709,41 @@ async fn main() -> anyhow::Result<()> {
             state.save(&data_home)?;
             print_json(
                 &serde_json::json!({"import":report,"embeddings_completed":embeddings_completed,"state":state}),
+            )?;
+        }
+        Command::ChatgptRepairExport {
+            archive,
+            baseline,
+            embed,
+        } => {
+            use chat_history_core::continuation::{ContinuationBaseline, RepairFailureCode};
+            let expected: ContinuationBaseline = read_json_document(&baseline, None)
+                .map_err(|_| RepairFailureCode::BaselineChanged)?;
+            let report = service
+                .import_export_continuation(&expected, &archive)
+                .map_err(|error| RepairFailureCode::from_error(&error))?;
+            let embeddings_completed = if embed {
+                service
+                    .rebuild_embeddings(false, Some(vec![expected.conversation_id.clone()]), None)
+                    .await?
+            } else {
+                0
+            };
+            print_json(
+                &serde_json::json!({"status":"awaiting_live_verification","import":report,"embeddings_completed":embeddings_completed}),
+            )?;
+        }
+        Command::ChatgptRecordRepairFailure { thread_id, code } => {
+            let code: chat_history_core::continuation::RepairFailureCode =
+                serde_json::from_value(serde_json::json!(code))
+                    .map_err(|_| anyhow::anyhow!("Unknown repair failure code"))?;
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            let recorded = state.record_repair_failure(&thread_id, code);
+            if recorded {
+                state.save(&data_home)?;
+            }
+            print_json(
+                &serde_json::json!({"recorded":recorded,"diagnostic":chat_history_core::continuation::RepairDiagnostic::new(code)}),
             )?;
         }
         Command::ChatgptPlanRecent { path, stdin_bytes } => {

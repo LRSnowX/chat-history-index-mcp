@@ -596,12 +596,12 @@ impl IndexService {
             let observation = state
                 .provider_observations
                 .get(&request.baseline.source_thread_id)
-                .ok_or_else(|| anyhow!("Missing durable provider observation"))?;
+                .ok_or(crate::continuation::RepairFailureCode::ProviderChanged)?;
             ensure!(
                 observation.provider_revision == request.provider_after.update_time
                     && observation.provider_status.as_deref() == Some("idle")
                     && observation.observed_at == request.provider_after.observed_at,
-                "Provider observation changed before continuation publication"
+                crate::continuation::RepairFailureCode::ProviderChanged
             );
             Ok(())
         };
@@ -634,6 +634,80 @@ impl IndexService {
         check_observation()?;
         tx.commit()?;
         // Sync-state is deliberately not cleared here: caller does so ONLY after publication.
+        Ok(report)
+    }
+
+    /// Offline, operator-only repair. It cannot clear a live collector blocker.
+    pub fn import_export_continuation(
+        &self,
+        expected: &crate::continuation::ContinuationBaseline,
+        source_archive: &Path,
+    ) -> anyhow::Result<ImportReport> {
+        use crate::continuation::RepairFailureCode as Failure;
+        let paths = self.data_home.paths();
+        paths.ensure()?;
+        // Never reuse/replace sources/openai-export.zip. Own a private copy of
+        // precisely the bytes parsed, leaving all existing bootstrap evidence intact.
+        let mut staged = tempfile::NamedTempFile::new_in(&paths.sources_dir)?;
+        std::io::copy(&mut File::open(source_archive)?, &mut staged)?;
+        let managed = digest_file(staged.path())?;
+        let (export, outer_member, json_member) =
+            read_export_conversation(staged.path(), &paths.tmp_dir, &expected.source_thread_id)
+                .map_err(|error| {
+                    error
+                        .downcast_ref::<Failure>()
+                        .copied()
+                        .unwrap_or(Failure::InvalidExport)
+                })?;
+        let mut conn = open_database(&self.managed_db_path())?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let canonical = canonical_detail(&tx, &expected.conversation_id)?;
+        let mut normalized = crate::export_continuation::verify_export(
+            &canonical.detail,
+            expected,
+            canonical.native_export_provenance,
+            export,
+        )?;
+        let require_live_block = || -> anyhow::Result<()> {
+            let state = crate::ChatGptSyncState::load(&self.data_home)?;
+            ensure!(
+                state.blocked.contains_key(&expected.source_thread_id),
+                Failure::LiveBlockRequired
+            );
+            Ok(())
+        };
+        require_live_block()?;
+        normalized.raw["chim_export_repair"] = json!({
+            "method":"official-export-ordered-prefix-v1", "baseline_token":expected.baseline_token,
+            "archive_sha256":managed.sha256_hex, "appended_messages":normalized.messages.len()-expected.total_messages,
+            "requires_live_verification":true,
+        });
+        let archive_id = self.upsert_archive(&tx, &managed, source_archive, ImportMode::Copy)?;
+        let mut prepared = PreparedConversation::from_normalized(archive_id, normalized)?;
+        prepared.archive_member = outer_member;
+        prepared.source_member = json_member;
+        let run_id = self.insert_run(&tx, "official_export_continuation", Some(staged.path()))?;
+        ensure!(
+            write_conversation_in_transaction(&tx, &prepared)? == ConversationWriteOutcome::Written,
+            Failure::PublicationFailed
+        );
+        tx.execute(
+            "DELETE FROM conversation_fts WHERE conversation_id=?1",
+            params![prepared.conversation_id],
+        )?;
+        tx.execute("INSERT INTO conversation_fts (conversation_id,title,transcript_text,summary_text,topic_tags) SELECT conversation_id,title,transcript_text,COALESCE(json_extract(summary_json,'$.abstract_text'),''),COALESCE(topic_tags_json,'[]') FROM conversations WHERE conversation_id=?1", params![prepared.conversation_id])?;
+        let report = ImportReport {
+            archive_path: staged.path().to_path_buf(),
+            conversations_indexed: 1,
+            messages_indexed: prepared.messages.len(),
+            ..ImportReport::default()
+        };
+        tx.execute("UPDATE runs SET status='complete',completed_at=CURRENT_TIMESTAMP,counters_json=?2,notes_json=?3 WHERE id=?1", params![run_id,serde_json::to_string(&report)?,json!({"method":"official-export-ordered-prefix-v1","baseline_token":expected.baseline_token,"archive_sha256":managed.sha256_hex,"awaiting_live_verification":true}).to_string()])?;
+        require_live_block()?;
+        // Persist the exact evidence before DB publication. A crash here can leave
+        // an unreferenced private copy, but never a canonical row without evidence.
+        let _evidence = staged.keep().map_err(|error| error.error)?;
+        tx.commit()?;
         Ok(report)
     }
 
@@ -2209,13 +2283,60 @@ fn load_attachments(
     Ok(items)
 }
 
-struct ArrayProcessor<'a, F> {
-    callback: &'a mut F,
+fn read_export_conversation(
+    archive_path: &Path,
+    temp_dir: &Path,
+    target: &str,
+) -> anyhow::Result<(Value, String, String)> {
+    use crate::continuation::RepairFailureCode as Failure;
+    let mut selected = None;
+    let outer_members = list_outer_members(archive_path)?;
+    ensure!(
+        outer_members.iter().collect::<HashSet<_>>().len() == outer_members.len(),
+        Failure::InvalidExport
+    );
+    for outer in outer_members
+        .into_iter()
+        .filter(|name| name.contains("Conversations__") && name.ends_with(".zip"))
+    {
+        let materialized = materialize_nested_member(archive_path, &outer, temp_dir)?;
+        let result = (|| -> anyhow::Result<()> {
+            let members = list_nested_members(&materialized.temp_path)?;
+            ensure!(
+                members.iter().collect::<HashSet<_>>().len() == members.len(),
+                Failure::InvalidExport
+            );
+            let mut archive = zip::ZipArchive::new(File::open(&materialized.temp_path)?)?;
+            for member in members
+                .into_iter()
+                .filter(|name| name.starts_with("conversations-") && name.ends_with(".json"))
+            {
+                stream_json_array(archive.by_name(&member)?, &mut |crate::export_continuation::ExportValue(value): crate::export_continuation::ExportValue| {
+                    ensure!(value.is_object(), Failure::InvalidExport);
+                    if ["conversation_id","id"].iter().any(|key| value.get(key).and_then(Value::as_str)==Some(target)) {
+                        ensure!(selected.is_none(), Failure::ExportIdentity);
+                        selected = Some((value,outer.clone(),member.clone()));
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })();
+        let _ = fs::remove_file(&materialized.temp_path);
+        result?;
+    }
+    selected.ok_or_else(|| Failure::ExportIdentity.into())
 }
 
-impl<'de, F> Visitor<'de> for ArrayProcessor<'_, F>
+struct ArrayProcessor<'a, F, T> {
+    callback: &'a mut F,
+    marker: std::marker::PhantomData<T>,
+}
+
+impl<'de, F, T> Visitor<'de> for ArrayProcessor<'_, F, T>
 where
-    F: FnMut(Value) -> anyhow::Result<()>,
+    F: FnMut(T) -> anyhow::Result<()>,
+    T: serde::Deserialize<'de>,
 {
     type Value = ();
 
@@ -2227,20 +2348,22 @@ where
     where
         A: SeqAccess<'de>,
     {
-        while let Some(item) = seq.next_element::<Value>()? {
+        while let Some(item) = seq.next_element::<T>()? {
             (self.callback)(item).map_err(serde::de::Error::custom)?;
         }
         Ok(())
     }
 }
 
-struct ArraySeed<'a, F> {
+struct ArraySeed<'a, F, T> {
     callback: &'a mut F,
+    marker: std::marker::PhantomData<T>,
 }
 
-impl<'de, F> DeserializeSeed<'de> for ArraySeed<'_, F>
+impl<'de, F, T> DeserializeSeed<'de> for ArraySeed<'_, F, T>
 where
-    F: FnMut(Value) -> anyhow::Result<()>,
+    F: FnMut(T) -> anyhow::Result<()>,
+    T: serde::Deserialize<'de>,
 {
     type Value = ();
 
@@ -2250,17 +2373,24 @@ where
     {
         deserializer.deserialize_seq(ArrayProcessor {
             callback: self.callback,
+            marker: std::marker::PhantomData,
         })
     }
 }
 
-fn stream_json_array<R, F>(reader: R, callback: &mut F) -> anyhow::Result<()>
+fn stream_json_array<R, F, T>(reader: R, callback: &mut F) -> anyhow::Result<()>
 where
     R: Read,
-    F: FnMut(Value) -> anyhow::Result<()>,
+    F: FnMut(T) -> anyhow::Result<()>,
+    T: serde::de::DeserializeOwned,
 {
     let mut deserializer = serde_json::Deserializer::from_reader(reader);
-    ArraySeed { callback }.deserialize(&mut deserializer)?;
+    ArraySeed {
+        callback,
+        marker: std::marker::PhantomData,
+    }
+    .deserialize(&mut deserializer)?;
+    deserializer.end()?;
     Ok(())
 }
 

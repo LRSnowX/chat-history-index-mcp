@@ -7,6 +7,7 @@ pub mod data_home;
 pub mod db;
 pub mod embedding;
 pub mod error;
+mod export_continuation;
 pub mod gemini;
 pub mod ingest;
 pub mod memory;

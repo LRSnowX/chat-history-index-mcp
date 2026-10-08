@@ -276,7 +276,35 @@ function bridgeMessages(turn) {
   return result;
 }
 
-class PermanentIncompleteError extends Error {}
+class PermanentIncompleteError extends Error {
+  constructor(message, repairCode = "REPLAY_INCOMPLETE") {
+    super(message);
+    this.repairCode = repairCode;
+  }
+}
+
+const REPAIR_FAILURE_CODES = new Set([
+  "TRUNCATED_NEW_TAIL", "MISSING_OVERLAP", "PREFIX_DIVERGENCE", "AMBIGUOUS_IDENTITY",
+  "PROVIDER_CHANGED", "REPLAY_INCOMPLETE", "BASELINE_CHANGED", "INVALID_EXPORT",
+  "EXPORT_IDENTITY", "STALE_EXPORT", "LIVE_BLOCK_REQUIRED", "PUBLICATION_FAILED",
+]);
+
+function repairFailureCode(error) {
+  const code = error?.repairCode ?? /CHIM_REPAIR_([A-Z_]+):/u.exec(String(error?.message ?? ""))?.[1];
+  return REPAIR_FAILURE_CODES.has(code) ? code : "REPLAY_INCOMPLETE";
+}
+
+function recordRepairFailure(threadId, error) {
+  const code = repairFailureCode(error);
+  const fallback = { code, reason: "Live repair rejected; inspect durable collector diagnostics" };
+  try {
+    const result = cliJson(["chatgpt-record-repair-failure", threadId, "--code", code]);
+    return { ...fallback, diagnostic_persisted: result.recorded === true };
+  } catch {
+    // Never echo raw subprocess/provider failures, which may contain transcript text.
+  }
+  return { ...fallback, diagnostic_persisted: false };
+}
 
 async function readCompleteThread(client, threadId, contextThreadId, continuationRevision) {
   let cursor = null;
@@ -303,7 +331,7 @@ async function readCompleteThread(client, threadId, contextThreadId, continuatio
     if (continuationRevision !== undefined && (
       payload.thread?.id !== threadId || payload.thread?.updatedAt !== continuationRevision
       || (payload.thread?.status != null && payload.thread.status !== "idle")
-    )) throw new PermanentIncompleteError("provider identity/revision/status changed during continuation replay");
+    )) throw new PermanentIncompleteError("provider identity/revision/status changed during continuation replay", "PROVIDER_CHANGED");
     if (threadMetadata == null) threadMetadata = payload.thread ?? null;
     if (Array.isArray(payload.attachments) && payload.attachments.length > 0) {
       attachments = payload.attachments;
@@ -375,14 +403,14 @@ async function repairContinuation(client, threadId, contextThreadId) {
     const input = JSON.stringify(snapshot);
     cliJson(["chatgpt-plan-recent", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))], input);
     if (!entries.length || entries.some((entry) => entry.kind !== "chatgpt" || entry.status !== "idle" || !Number.isFinite(entry.updatedAt) || entry.updatedAt !== entries[0].updatedAt)) {
-      throw new PermanentIncompleteError("continuation provider is absent, contradictory or non-idle");
+      throw new PermanentIncompleteError("continuation provider is absent, contradictory or non-idle", "PROVIDER_CHANGED");
     }
     return bridgeThread(entries[0], observedAt);
   };
   const providerBefore = await observe();
   const transcript = await readCompleteThread(client, threadId, contextThreadId, providerBefore.update_time);
   const providerAfter = await observe();
-  if (providerBefore.update_time !== providerAfter.update_time) throw new PermanentIncompleteError("provider changed across continuation replay");
+  if (providerBefore.update_time !== providerAfter.update_time) throw new PermanentIncompleteError("provider changed across continuation replay", "PROVIDER_CHANGED");
   const input = JSON.stringify({ baseline, provider_before: providerBefore, provider_after: providerAfter, transcript });
   cliJson(["chatgpt-repair-continuation", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))], input);
   return transcript;
@@ -1003,6 +1031,19 @@ async function syncWithClient(client, contextThreadId) {
         importedTitles.push(transcript.title);
         importedConversationIds.push(pending.thread_id);
       } catch (error) {
+        if (pending.continuation_repair) {
+          if (isRateLimit(error)) return {
+            event: "chatgpt_live_rate_limited", imported, pending: pending.thread_id,
+            conversation_ids: importedConversationIds,
+          };
+          const diagnostic = recordRepairFailure(pending.thread_id, error);
+          appendLog(ERROR_LOG_PATH, {
+            event: "chatgpt_live_repair_rejected", thread_id: pending.thread_id.slice(0, 256),
+            ...diagnostic,
+          });
+          blocked += 1;
+          continue;
+        }
         if (isRateLimit(error)) {
           return {
             event: "chatgpt_live_rate_limited",

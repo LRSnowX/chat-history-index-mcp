@@ -260,6 +260,104 @@ that body. Missing stable provider IDs/revisions are a safe refusal, not grounds
 for timestamp/text heuristics. Host handoff additionally requires live-project
 reconciliation; an aligned bounded tail is not complete Host restoration.
 
+### Lossless oversized-message recovery (Checkpoint G-B.1)
+
+A **new** live message over the 20,000-character ceiling still fails closed.
+There is no character-range API in the App Tools contract and this collector
+does not increase the ceiling or use private ChatGPT endpoints/credentials.
+An operator can instead supply an official OpenAI export ZIP:
+
+```bash
+scripts/chat-history-cli chatgpt-continuation-baseline THREAD_ID > /tmp/baseline.json
+scripts/chat-history-cli chatgpt-repair-export \
+  --archive /path/to/official-openai-export.zip \
+  --baseline /tmp/baseline.json
+```
+
+This is not the broad bootstrap/import command. Recovery selects exactly one
+conversation by stable ID across all supported export parts. It requires an
+existing durable live collector blocker and a trusted current canonical baseline.
+The supported ZIP layout is the existing `Conversations__*.zip` envelope with
+`conversations-*.json` arrays. The complete mapping must be one connected tree
+with reciprocal parent/child links, no cycles or duplicate children, and globally
+unique stable node/message IDs. Branches are allowed. A valid `current_node`
+is required and is the explicit active-selection boundary; it need not be a graph
+leaf. Follow its parents to the root, reverse that path into chronological order,
+and publish **only** its active visible messages. Off-selection siblings or
+descendants are not flattened into canonical history or validated as active
+transcript content. Their structure and identities must still be coherent.
+
+Active messages must be complete (`finished_successfully`). Recognized assistant
+`thoughts` and `reasoning_recap` nodes, the null root, and existing empty system
+scaffold are non-visible; unknown internal/visible types are not silently skipped.
+Supported visible content is user/assistant `text`, user text with file-attachment
+metadata, and user `multimodal_text` containing image asset pointers plus text.
+Unsupported active tool/audio/video content, mixed image/file payloads, malformed
+metadata, missing links/IDs, contradictory `current_node`, duplicate JSON keys or
+matching conversations, and malformed/incomplete ZIP/JSON fail closed.
+
+The canonical prefix must match by ordered stable ID and role. Native/export-origin
+prefix content still requires exact raw-content equality, so the search projection's
+trimming/deduplication cannot hide an edit. Ordinary bridge-origin text requires
+exact projected content equality. User text parts retain whitespace, Unicode and
+repeats; attachment metadata deterministically appends `[User attached N files;
+file contents were not included]` or the equivalent image marker, with singular
+`file`/`image` for one item, after a double newline when text is nonempty. Full raw
+export messages, including asset pointers and attachment metadata, are retained.
+
+One narrow cross-surface exception applies to historical assistant `text` messages
+with a nonempty array of `metadata.content_references`: official-export text and
+App Tools rendered markdown are not byte-stable. Bridge -> export overlap uses
+only stable ID, role and active-lineage order in that case, preserving the trusted
+canonical body/raw/time exactly. **This cannot detect an in-place body mutation
+hidden behind the same provider message ID; canonical trusted content remains
+authoritative.** It is not an arbitrary mismatch fallback and does not apply to
+export -> export raw-content validation or to new live tail messages.
+
+Later live G-B overlap with export-origin historical messages uses the same
+deterministic projection for comparable content and identity/order only for the
+explicit citation-rendering case. Both paths preserve the complete stored body,
+raw evidence and time; a truncated historical copy likewise cannot replace them.
+New export messages must be complete. Because this operator only appends post-canonical history,
+the export revision must strictly advance beyond the trusted baseline; revision
+or count alone never proves ancestry.
+
+Recovery privately copies the supplied archive without replacing the existing
+bootstrap archive. The exact copy/hash, baseline token, selected archive members
+and method `official-export-ordered-prefix-v1` are audited using existing archive,
+run, raw provenance and snapshot records. An immediate canonical transaction
+rechecks the baseline, retains superseded evidence, updates FTS and the normal
+derivative jobs, and checks the durable blocker before publication. A crash just
+before DB commit may leave an unreferenced private evidence copy; no automatic
+cleanup or power-loss durability guarantee is added. No migration/new memory
+store is required.
+
+CLI success is `awaiting_live_verification`, **not** aligned/verified. Export
+repair never writes sync-state, clears a blocker, seeds a cursor or creates a
+provider observation. Stable normal live G-B replay must subsequently prove
+the current provider end. The newly recovered oversized message is then a
+trusted historical anchor: its truncated live copy cannot replace its complete
+body. Successful replay preserves bridge-complete provenance for future G-B
+verification even when the prefix originated in a native export.
+
+Live repair failures additionally retain one bounded content-free
+`blocked[THREAD_ID].last_repair_failure` with fixed `code` and `reason`, readable
+through `chatgpt-state` / read-only `chatgpt_state`. Legacy state defaults it absent;
+the state version is unchanged. Codes distinguish `TRUNCATED_NEW_TAIL`,
+`MISSING_OVERLAP`, `PREFIX_DIVERGENCE`, `AMBIGUOUS_IDENTITY`, `PROVIDER_CHANGED`,
+`REPLAY_INCOMPLETE`, `BASELINE_CHANGED` and publication/export failures. The
+original blocker reason and lifecycle are preserved; successful live import
+removes the blocker through the existing path. Collector repair logs contain
+only a bounded thread ID, fixed code/reason and diagnostic-persistence outcome,
+never raw provider/CLI error text or conversation bodies.
+`chatgpt-record-repair-failure THREAD_ID --code CODE` records diagnostics only
+for an already blocked thread; it grants no authority and is not an MCP tool.
+
+No new model-facing memory write tool or autonomous export-repair loop is added.
+Official-export authenticity is supplied by the operator, not cryptographically
+authenticated by CHIM. Real private-export/provider acceptance is a separate
+review step; unsupported lineage/content fails closed.
+
 ### Discovery input
 
 Adapt the result of `list_threads(limit: 50)` to:

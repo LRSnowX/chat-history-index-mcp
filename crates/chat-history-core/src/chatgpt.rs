@@ -135,6 +135,8 @@ pub struct ChatGptBlockedThread {
     pub title: String,
     pub update_time: Option<f64>,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_repair_failure: Option<crate::continuation::RepairDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -375,12 +377,31 @@ impl ChatGptSyncState {
                 .unwrap_or_default(),
             update_time: pending.as_ref().map(|value| value.update_time),
             reason: reason.into(),
+            last_repair_failure: None,
         };
         self.blocked.insert(thread_id.to_string(), blocked.clone());
         blocked
     }
 
+    /// Preserve the original blocker; a diagnostic never grants import authority.
+    pub fn record_repair_failure(
+        &mut self,
+        thread_id: &str,
+        code: crate::continuation::RepairFailureCode,
+    ) -> bool {
+        let Some(blocked) = self.blocked.get_mut(thread_id) else {
+            return false;
+        };
+        blocked.last_repair_failure = Some(crate::continuation::RepairDiagnostic::new(code));
+        true
+    }
+
     fn bound_observations(&mut self) {
+        for blocked in self.blocked.values_mut() {
+            if let Some(diagnostic) = &mut blocked.last_repair_failure {
+                diagnostic.reason = diagnostic.code.reason().to_string();
+            }
+        }
         self.provider_observations.retain(|id, observation| {
             id.len() <= 256
                 && observation
@@ -646,6 +667,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repair_diagnostics_are_bounded_backward_compatible_and_block_only() {
+        use crate::continuation::RepairFailureCode;
+        let temp = tempfile::tempdir().unwrap();
+        let home = DataHome::new(temp.path().to_path_buf());
+        home.paths().ensure().unwrap();
+        let legacy = serde_json::json!({"version":1,"discovery_overflow":false,"pending":{},"completed_since_cursor":{},"blocked":{"bad":{
+            "thread_id":"bad","title":"legacy","update_time":200.0,"reason":"original block"
+        }}});
+        fs::write(sync_state_path(&home), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let mut state = ChatGptSyncState::load(&home).unwrap();
+        assert!(state.blocked["bad"].last_repair_failure.is_none());
+        assert!(!state.record_repair_failure("unblocked", RepairFailureCode::MissingOverlap));
+        assert!(!state.blocked.contains_key("unblocked"));
+        assert!(state.record_repair_failure("bad", RepairFailureCode::TruncatedNewTail));
+        assert!(state.record_repair_failure("bad", RepairFailureCode::ProviderChanged));
+        let diagnostic = state
+            .blocked
+            .get_mut("bad")
+            .unwrap()
+            .last_repair_failure
+            .as_mut()
+            .unwrap();
+        diagnostic.reason = "PRIVATE_BODY_SENTINEL".repeat(20_000);
+        state.save(&home).unwrap();
+        let saved = fs::read_to_string(sync_state_path(&home)).unwrap();
+        assert!(!saved.contains("PRIVATE_BODY_SENTINEL"));
+        let reloaded = ChatGptSyncState::load(&home).unwrap();
+        assert_eq!(reloaded.blocked["bad"].reason, "original block");
+        assert_eq!(reloaded.blocked["bad"].update_time, Some(200.0));
+        let diagnostic = reloaded.blocked["bad"]
+            .last_repair_failure
+            .as_ref()
+            .unwrap();
+        assert_eq!(diagnostic.code, RepairFailureCode::ProviderChanged);
+        assert_eq!(
+            diagnostic.reason,
+            RepairFailureCode::ProviderChanged.reason()
+        );
+        assert!(diagnostic.reason.len() <= 128);
+    }
+
+    #[test]
     fn source_health_is_conservative_and_durable() {
         use ConversationSourceHealthState::*;
         let temp = tempfile::tempdir().unwrap();
@@ -895,6 +958,7 @@ mod tests {
                 title: "blocked".to_string(),
                 update_time: Some(105.0),
                 reason: "too large".to_string(),
+                last_repair_failure: None,
             },
         );
         let plan = state

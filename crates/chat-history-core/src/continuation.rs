@@ -11,6 +11,89 @@ use crate::{
 
 pub const CONTINUATION_METHOD: &str = "ordered-canonical-prefix-v1";
 
+/// Content-free diagnostics: never carry provider text, message IDs or parser output.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RepairFailureCode {
+    TruncatedNewTail,
+    MissingOverlap,
+    PrefixDivergence,
+    AmbiguousIdentity,
+    ProviderChanged,
+    ReplayIncomplete,
+    BaselineChanged,
+    InvalidExport,
+    ExportIdentity,
+    StaleExport,
+    LiveBlockRequired,
+    PublicationFailed,
+}
+
+impl RepairFailureCode {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::TruncatedNewTail => {
+                "New tail message is truncated; official export recovery is required"
+            }
+            Self::MissingOverlap => "Trusted ordered overlap is missing",
+            Self::PrefixDivergence => {
+                "Provider/export prefix differs from trusted canonical history"
+            }
+            Self::AmbiguousIdentity => "Stable message identity is missing or duplicated",
+            Self::ProviderChanged => "Provider identity, revision or eligible status changed",
+            Self::ReplayIncomplete => "Replay is inaccessible, malformed or cursor-incomplete",
+            Self::BaselineChanged => "Trusted canonical baseline changed before publication",
+            Self::InvalidExport => {
+                "Official export evidence is malformed, incomplete or unsupported"
+            }
+            Self::ExportIdentity => "Export conversation identity is wrong, missing or ambiguous",
+            Self::StaleExport => {
+                "Export revision does not advance beyond the trusted canonical revision"
+            }
+            Self::LiveBlockRequired => {
+                "Offline recovery requires an existing durable live-verification blocker"
+            }
+            Self::PublicationFailed => {
+                "Repair publication or maintenance failed; authority remains unchanged"
+            }
+        }
+    }
+
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        error
+            .downcast_ref::<Self>()
+            .copied()
+            .unwrap_or(Self::PublicationFailed)
+    }
+}
+
+impl std::fmt::Display for RepairFailureCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let code = serde_json::to_value(self).expect("unit enum serialization");
+        write!(
+            f,
+            "CHIM_REPAIR_{}: {}",
+            code.as_str().unwrap(),
+            self.reason()
+        )
+    }
+}
+impl std::error::Error for RepairFailureCode {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct RepairDiagnostic {
+    pub code: RepairFailureCode,
+    pub reason: String,
+}
+impl RepairDiagnostic {
+    pub fn new(code: RepairFailureCode) -> Self {
+        Self {
+            code,
+            reason: code.reason().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ContinuationBaseline {
     pub conversation_id: String,
@@ -72,26 +155,35 @@ pub fn baseline(
     })
 }
 
+pub(crate) fn verify_baseline(
+    detail: &ConversationDetail,
+    expected: &ContinuationBaseline,
+    native_export_provenance: bool,
+) -> anyhow::Result<ContinuationBaseline> {
+    let current = baseline(detail, native_export_provenance)?;
+    ensure!(
+        current.baseline_token == expected.baseline_token
+            && current.conversation_id == expected.conversation_id
+            && current.source_thread_id == expected.source_thread_id
+            && current.indexed_revision == expected.indexed_revision
+            && current.total_messages == expected.total_messages,
+        RepairFailureCode::BaselineChanged
+    );
+    Ok(current)
+}
+
 pub fn verify_replay(
     detail: &ConversationDetail,
     request: &ContinuationImport,
     native_export_provenance: bool,
 ) -> anyhow::Result<NormalizedConversation> {
-    let current = baseline(detail, native_export_provenance)?;
-    ensure!(
-        current.baseline_token == request.baseline.baseline_token
-            && current.conversation_id == request.baseline.conversation_id
-            && current.source_thread_id == request.baseline.source_thread_id
-            && current.indexed_revision == request.baseline.indexed_revision
-            && current.total_messages == request.baseline.total_messages,
-        "Canonical continuation baseline changed"
-    );
+    let current = verify_baseline(detail, &request.baseline, native_export_provenance)?;
     let before = &request.provider_before;
     let after = &request.provider_after;
     let provider_revision = before
         .update_time
         .filter(|v| v.is_finite())
-        .ok_or_else(|| anyhow!("Missing provider revision"))?;
+        .ok_or(RepairFailureCode::ProviderChanged)?;
     ensure!(
         before.kind == "chatgpt"
             && after.kind == "chatgpt"
@@ -100,23 +192,23 @@ pub fn verify_replay(
             && before.status.as_deref() == Some("idle")
             && after.status.as_deref() == Some("idle")
             && after.update_time == Some(provider_revision),
-        "Provider identity/revision/status changed or ineligible"
+        RepairFailureCode::ProviderChanged
     );
     ensure!(
         before.observed_at.is_some_and(f64::is_finite)
             && after.observed_at.is_some_and(f64::is_finite)
             && before.observed_at <= after.observed_at,
-        "Missing/contradictory provider observation time"
+        RepairFailureCode::ProviderChanged
     );
     ensure!(
         provider_revision >= current.indexed_revision,
-        "Provider revision precedes canonical baseline"
+        RepairFailureCode::ProviderChanged
     );
     let mut transcript = request.transcript.clone();
     ensure!(
         transcript.thread_id == current.source_thread_id
             && transcript.update_time == Some(provider_revision),
-        "Replay source revision mismatch"
+        RepairFailureCode::ProviderChanged
     );
     let replay = transcript
         .pages
@@ -126,7 +218,7 @@ pub fn verify_replay(
         .collect::<Vec<_>>();
     ensure!(
         replay.len() >= detail.messages.len(),
-        "Trusted overlap missing"
+        RepairFailureCode::MissingOverlap
     );
     let mut seen = std::collections::HashSet::new();
     for (index, message) in replay.iter().enumerate() {
@@ -134,28 +226,40 @@ pub fn verify_replay(
             message.stable_identity
                 && !message.message_id.is_empty()
                 && seen.insert(&message.message_id),
-            "Missing/duplicate stable provider identity"
+            RepairFailureCode::AmbiguousIdentity
         );
-        ensure!(!message.inaccessible, "Inaccessible provider message");
+        ensure!(!message.inaccessible, RepairFailureCode::ReplayIncomplete);
         if let Some(old) = detail.messages.get(index) {
             ensure!(
                 message.message_id == old.message_id && message.role == old.role,
-                "Provider diverged from ordered canonical prefix"
+                RepairFailureCode::PrefixDivergence
             );
             if !message.truncated {
-                ensure!(
-                    message.text == old.normalized_text,
-                    "Provider edited trusted historical content"
-                );
+                if old.raw_message_json.get("content").is_some() {
+                    let projection =
+                        crate::export_continuation::visible_projection(&old.raw_message_json)?
+                            .ok_or(RepairFailureCode::ReplayIncomplete)?;
+                    if !projection.citation_identity_only {
+                        ensure!(
+                            message.text == projection.text,
+                            RepairFailureCode::PrefixDivergence
+                        );
+                    }
+                } else {
+                    ensure!(
+                        message.text == old.normalized_text,
+                        RepairFailureCode::PrefixDivergence
+                    );
+                }
             }
         } else {
-            ensure!(!message.truncated, "Truncated new continuation message");
+            ensure!(!message.truncated, RepairFailureCode::TruncatedNewTail);
         }
     }
     for page in &mut transcript.pages {
         ensure!(
             page.provider_revision == Some(provider_revision),
-            "Provider revision changed during replay"
+            RepairFailureCode::ProviderChanged
         );
         for message in &mut page.messages {
             if let Some(old) = detail
@@ -171,13 +275,18 @@ pub fn verify_replay(
         }
     }
     // Reuse the full-import cursor-chain, terminal-page and message checks.
-    let mut normalized = transcript.into_normalized()?;
+    let mut normalized = transcript
+        .into_normalized()
+        .map_err(|_| RepairFailureCode::ReplayIncomplete)?;
     normalized.source_instance = detail.conversation.source_instance.clone();
     normalized.source_url = detail.conversation.source_url.clone();
     normalized.source_path = detail.conversation.source_path.clone();
     normalized.model = detail.conversation.default_model_slug.clone();
     normalized.create_time = detail.conversation.create_time;
     normalized.raw = detail.raw_json.clone().unwrap();
+    // A successful full identity replay is a complete bridge publication even
+    // when its trusted historical prefix originally came from a native export.
+    normalized.raw["collector"] = serde_json::json!("chatgpt-app-bridge-v1");
     normalized.raw["chim_continuation"] = serde_json::json!({"method":CONTINUATION_METHOD,"baseline_token":current.baseline_token,"provider_before":before,"provider_after":after,"appended_messages":normalized.messages.len()-detail.messages.len()});
     Ok(normalized)
 }

@@ -129,6 +129,171 @@ fn write_json(path: &Path, value: Value) {
     fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 }
 
+#[test]
+fn official_export_operator_then_live_repair_preserves_block_and_full_new_body() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("data");
+    let input = temp.path().join("input.json");
+    write_json(
+        &input,
+        json!({"thread_id":"oversized-cli","title":"synthetic","update_time":20.0,"pages":[{"has_more":false,"messages":[
+            {"message_id":"m1","role":"assistant","text":"answer"},{"message_id":"m0","role":"user","text":"Question"}
+        ]}]}),
+    );
+    run_cli(
+        &home,
+        &[
+            "chatgpt-import-thread",
+            "--path",
+            input.to_str().unwrap(),
+            "--embed",
+            "false",
+        ],
+    );
+    let baseline_path = temp.path().join("baseline.json");
+    write_json(
+        &baseline_path,
+        run_cli(&home, &["chatgpt-continuation-baseline", "oversized-cli"]),
+    );
+    let observation = json!({"thread_id":"oversized-cli","kind":"chatgpt","title":"synthetic","status":"idle","update_time":30.0,"observed_at":31.0});
+    write_json(
+        &input,
+        json!({"requested_limit":50,"threads":[observation]}),
+    );
+    run_cli(
+        &home,
+        &["chatgpt-plan-recent", "--path", input.to_str().unwrap()],
+    );
+    run_cli(
+        &home,
+        &[
+            "chatgpt-block",
+            "oversized-cli",
+            "--reason",
+            "original oversized blocker",
+        ],
+    );
+    let oversized = format!("  {}  ", "synthetic Unicode 完整正文🦀 ".repeat(2000));
+    let bodies = ["Question", "answer", oversized.as_str()];
+    let mut mapping = serde_json::Map::new();
+    mapping.insert(
+        "root".into(),
+        json!({"id":"root","parent":null,"children":["n0"],"message":null}),
+    );
+    for (i, text) in bodies.iter().enumerate() {
+        mapping.insert(format!("n{i}"),json!({"id":format!("n{i}"),"parent":if i==0 {"root".to_string()} else {format!("n{}",i-1)},"children":if i==2 {vec![]} else {vec![format!("n{}",i+1)]},"message":{"id":format!("m{i}"),"author":{"role":if i%2==0 {"user"} else {"assistant"}},"status":"finished_successfully","content":{"content_type":"text","parts":[text]}}}));
+    }
+    let archive_path = temp.path().join("official.zip");
+    let mut inner = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    inner
+        .start_file("conversations-000.json", SimpleFileOptions::default())
+        .unwrap();
+    inner.write_all(json!([{"id":"oversized-cli","conversation_id":"oversized-cli","title":"synthetic","update_time":30.0,"mapping":mapping,"current_node":"n2"}]).to_string().as_bytes()).unwrap();
+    let bytes = inner.finish().unwrap().into_inner();
+    let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+    archive
+        .start_file(
+            "User Online Activity/Conversations__fixture.zip",
+            SimpleFileOptions::default(),
+        )
+        .unwrap();
+    archive.write_all(&bytes).unwrap();
+    archive.finish().unwrap();
+    let before = run_cli(&home, &["chatgpt-state"]);
+    let imported = run_cli(
+        &home,
+        &[
+            "chatgpt-repair-export",
+            "--archive",
+            archive_path.to_str().unwrap(),
+            "--baseline",
+            baseline_path.to_str().unwrap(),
+            "--embed",
+            "false",
+        ],
+    );
+    assert_eq!(imported["status"], "awaiting_live_verification");
+    assert_eq!(run_cli(&home, &["chatgpt-state"]), before);
+    write_json(
+        &baseline_path,
+        run_cli(&home, &["chatgpt-continuation-baseline", "oversized-cli"]),
+    );
+    let observation = json!({"thread_id":"oversized-cli","kind":"chatgpt","title":"synthetic","status":"idle","update_time":40.0,"observed_at":41.0});
+    write_json(
+        &input,
+        json!({"requested_limit":50,"threads":[observation.clone()]}),
+    );
+    run_cli(
+        &home,
+        &["chatgpt-plan-recent", "--path", input.to_str().unwrap()],
+    );
+    let mut replay = json!({"baseline":run_cli(&home,&["chatgpt-continuation-baseline","oversized-cli"]),"provider_before":observation,"provider_after":observation,"transcript":{"thread_id":"oversized-cli","title":"synthetic","update_time":40.0,"pages":[{"has_more":false,"provider_revision":40.0,"messages":[
+        {"message_id":"m3","role":"assistant","text":"PRIVATE_BODY_SENTINEL","truncated":true,"stable_identity":true},
+        {"message_id":"m2","role":"user","text":"truncated provider representation","truncated":true,"stable_identity":true},
+        {"message_id":"m1","role":"assistant","text":"answer","stable_identity":true},
+        {"message_id":"m0","role":"user","text":"Question","stable_identity":true}
+    ]}]}});
+    write_json(&input, replay.clone());
+    let failed = Command::new(env!("CARGO_BIN_EXE_chat-history-cli"))
+        .args([
+            "chatgpt-repair-continuation",
+            "--path",
+            input.to_str().unwrap(),
+            "--embed",
+            "false",
+        ])
+        .env("CHAT_HISTORY_DATA_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(stderr.contains("CHIM_REPAIR_TRUNCATED_NEW_TAIL"));
+    assert!(!stderr.contains("PRIVATE_BODY_SENTINEL"));
+    let blocked = run_cli(&home, &["chatgpt-state"]);
+    assert_eq!(
+        blocked["blocked"]["oversized-cli"]["reason"],
+        "original oversized blocker"
+    );
+    assert_eq!(
+        blocked["blocked"]["oversized-cli"]["last_repair_failure"]["code"],
+        "TRUNCATED_NEW_TAIL"
+    );
+    assert!(
+        blocked["blocked"]["oversized-cli"]["last_repair_failure"]["reason"]
+            .as_str()
+            .unwrap()
+            .len()
+            <= 240
+    );
+    replay["transcript"]["pages"][0]["messages"][0]["truncated"] = json!(false);
+    write_json(&input, replay);
+    let repaired = run_cli(
+        &home,
+        &[
+            "chatgpt-repair-continuation",
+            "--path",
+            input.to_str().unwrap(),
+            "--embed",
+            "false",
+        ],
+    );
+    assert!(repaired["state"]["blocked"].as_object().unwrap().is_empty());
+    let service =
+        chat_history_core::IndexService::new(chat_history_core::DataHome::new(home), None);
+    let after = service
+        .get_conversation("oversized-cli", true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.messages.len(), 4);
+    assert_eq!(after.messages[2].normalized_text, oversized);
+    let state = chat_history_core::ChatGptSyncState::load(service.data_home()).unwrap();
+    let health = state.source_health("chatgpt", "oversized-cli", Some(40.0));
+    assert_eq!(
+        chat_history_core::continuation::continuation_proof(&after, &health, 2, 2, false).state,
+        "verified"
+    );
+}
+
 fn build_fixture_export(temp: &TempDir) -> std::path::PathBuf {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../chat-history-core/tests/fixtures/conversations-000.json");
