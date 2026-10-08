@@ -222,13 +222,15 @@ function toolText(result) {
   return JSON.parse(text);
 }
 
-function bridgeThread(entry) {
+function bridgeThread(entry, observedAt = null) {
   return {
     thread_id: entry.id,
     kind: entry.kind,
     title: entry.title ?? "",
     create_time: entry.createdAt ?? null,
     update_time: entry.updatedAt ?? null,
+    status: typeof entry.status === "string" ? entry.status : null,
+    observed_at: Number.isFinite(observedAt) ? observedAt : null,
   };
 }
 
@@ -911,14 +913,24 @@ async function syncWithClient(client, contextThreadId) {
   if (releaseLock == null) return { event: "chatgpt_live_sync_skipped", reason: "locked" };
   try {
     const catalog = toolText(await client.callTool("list_threads", { limit: DISCOVERY_LIMIT }, contextThreadId));
-    const statusById = new Map();
+    const observedAt = Date.now() / 1000;
+    const providerStateById = new Map();
     for (const entry of [...(catalog.threads ?? []), ...(catalog.pinnedThreads ?? [])]) {
-      statusById.set(entry.id, entry.status ?? null);
+      const state = {
+        status: typeof entry.status === "string" ? entry.status : null,
+        revision: Number.isFinite(entry.updatedAt) ? entry.updatedAt : null,
+        conflicted: false,
+      };
+      const existing = providerStateById.get(entry.id);
+      if (existing == null) providerStateById.set(entry.id, state);
+      else if (existing.status !== state.status || existing.revision !== state.revision) {
+        existing.conflicted = true;
+      }
     }
     const snapshot = {
       requested_limit: DISCOVERY_LIMIT,
-      threads: (catalog.threads ?? []).map(bridgeThread),
-      pinned_threads: (catalog.pinnedThreads ?? []).map(bridgeThread),
+      threads: (catalog.threads ?? []).map((entry) => bridgeThread(entry, observedAt)),
+      pinned_threads: (catalog.pinnedThreads ?? []).map((entry) => bridgeThread(entry, observedAt)),
     };
     const snapshotText = JSON.stringify(snapshot);
     const planned = cliJson([
@@ -944,8 +956,8 @@ async function syncWithClient(client, contextThreadId) {
     const importedTitles = [];
     const importedConversationIds = [];
     for (const pending of selected) {
-      const status = statusById.get(pending.thread_id);
-      if (status !== "idle") {
+      const providerState = providerStateById.get(pending.thread_id);
+      if (providerState == null || providerState.conflicted || providerState.status !== "idle") {
         deferredActive += 1;
         continue;
       }

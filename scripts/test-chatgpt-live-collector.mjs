@@ -44,8 +44,11 @@ test("bridgeThread maps ChatGPT sidebar metadata into the Rust discovery contrac
       title: "Project chat",
       create_time: 10,
       update_time: 20,
+      status: null,
+      observed_at: null,
     },
   );
+  assert.equal(bridgeThread({ id: "thread-1", kind: "chatgpt" }, 30).observed_at, 30);
   assert.throws(
     () => memoryAutoConfig({
       CHAT_HISTORY_MEMORY_AUTO_PROJECTS: "LEMonX",
@@ -78,6 +81,89 @@ test("bridgeMessages reverses items within newest-first turns for one final Rust
   );
   assert.equal(messages[0].truncated, false);
   assert.equal(messages[1].truncated, false);
+});
+
+test("collector records statuses and only imports idle threads; incomplete idle stays blocked", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-source-integrity-"));
+  try {
+    fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+    const callsPath = path.join(root, "calls.jsonl");
+    const cli = `#!${process.execPath}
+import fs from 'node:fs';
+const input = fs.readFileSync(0, 'utf8');
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),input:input ? JSON.parse(input) : null})+'\\n');
+if (process.argv[2] === 'chatgpt-plan-recent') console.log(JSON.stringify({plan:{selected:JSON.parse(input).threads.map(t=>({...t}))}}));
+else console.log('{}');
+`;
+    // .mjs target plus a shell-free executable wrapper at the normal CLI path.
+    fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
+    fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), cli, { mode: 0o755 });
+    const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { syncWithClient } from ${JSON.stringify(collector)};
+      const reads = [];
+      const client = { async callTool(name, args) {
+        if (name === 'list_threads') return {content:[{type:'text',text:JSON.stringify({threads:
+          ['idle','active','unknown',null].map((status,index)=>({id:'thread-'+index,kind:'chatgpt',title:'Arcos',createdAt:10,updatedAt:20,status}))
+        })}]};
+        reads.push(args.threadId);
+        return {content:[{type:'text',text:JSON.stringify({thread:{title:'Arcos',createdAt:10,updatedAt:20},
+          turns:[{id:'turn',items:[{type:'agentMessage',id:'large',text:'x'.repeat(19990)}]}],page:{hasMore:false,order:'newest_first'}})}]};
+      }};
+      const result = await syncWithClient(client, 'context');
+      console.log(JSON.stringify({result,reads}));
+    `], { encoding: "utf8", env: { ...process.env, CHAT_HISTORY_DATA_HOME: root } });
+    assert.equal(child.status, 0, child.stderr);
+    const output = JSON.parse(child.stdout);
+    assert.deepEqual(output.reads, ["thread-0"]);
+    assert.equal(output.result.deferred_active, 3);
+    assert.equal(output.result.blocked, 1);
+    assert.equal(output.result.imported, 0);
+    const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(calls[0].input.threads.map((thread) => thread.status), ["idle", "active", "unknown", null]);
+    assert.ok(calls[0].input.threads.every((thread) => Number.isFinite(thread.observed_at)));
+    assert.equal(calls[1].args[0], "chatgpt-block");
+    assert.match(calls[1].args.at(-1), /safety limit/);
+    assert.equal(calls.some((call) => call.args[0] === "chatgpt-import-thread"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("collector fails closed when recent and pinned metadata conflict for one thread", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-source-integrity-conflict-"));
+  try {
+    fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+    const callsPath = path.join(root, "calls.jsonl");
+    const cli = `#!${process.execPath}\nimport fs from 'node:fs';\nconst input = fs.readFileSync(0, 'utf8');\nfs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),input:JSON.parse(input)})+'\\n');\nconsole.log(JSON.stringify({plan:{selected:[JSON.parse(input).threads[0]]}}));\n`;
+    fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
+    fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), cli, { mode: 0o755 });
+    const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { syncWithClient } from ${JSON.stringify(collector)};
+      const reads = [];
+      const client = { async callTool(name, args) {
+        if (name === 'list_threads') return {content:[{type:'text',text:JSON.stringify({
+          threads:[{id:'same',kind:'chatgpt',title:'Arcos',createdAt:10,updatedAt:20,status:'idle'}],
+          pinnedThreads:[{id:'same',kind:'chatgpt',title:'Arcos',createdAt:10,updatedAt:21,status:'active'}]
+        })}]};
+        reads.push(args.threadId);
+        throw new Error('conflicted thread must not be read');
+      }};
+      const result = await syncWithClient(client, 'context');
+      console.log(JSON.stringify({result,reads}));
+    `], { encoding: "utf8", env: { ...process.env, CHAT_HISTORY_DATA_HOME: root } });
+    assert.equal(child.status, 0, child.stderr);
+    const output = JSON.parse(child.stdout);
+    assert.deepEqual(output.reads, []);
+    assert.equal(output.result.imported, 0);
+    assert.equal(output.result.deferred_active, 1);
+    const call = JSON.parse(fs.readFileSync(callsPath, "utf8").trim());
+    assert.equal(call.input.threads[0].observed_at, call.input.pinned_threads[0].observed_at);
+    assert.ok(Number.isFinite(call.input.threads[0].observed_at));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("bridgeMessages fails closed near the App Tools per-message output cap", () => {

@@ -22,7 +22,7 @@ pub mod sql;
 pub use chatgpt::{
     ChatGptBlockedThread, ChatGptBridgeMessage, ChatGptBridgePage, ChatGptBridgeThread,
     ChatGptBridgeTranscript, ChatGptDiscoveryPlan, ChatGptPendingThread, ChatGptSyncState,
-    ChatGptThreadListSnapshot,
+    ChatGptThreadListSnapshot, ConversationSourceHealth, ConversationSourceHealthState,
 };
 pub use data_home::{DataHome, ImportMode, ManagedPaths};
 pub use ingest::{ImportOptions, ImportReport, IndexService, decode_embedding, encode_embedding};

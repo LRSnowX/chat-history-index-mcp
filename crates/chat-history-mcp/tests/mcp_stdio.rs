@@ -1,9 +1,9 @@
 use std::{fs, io::Write, process::Stdio};
 
 use chat_history_core::{
-    DataHome, ImportMode, ImportOptions, IndexService, MemoryCandidateInput,
-    MemoryCandidatePayload, MemoryCompilationBatch, MemoryItem, MemoryKind, MemoryScope,
-    MemoryStatus,
+    ChatGptSyncState, ChatGptThreadListSnapshot, DataHome, ImportMode, ImportOptions, IndexService,
+    MemoryCandidateInput, MemoryCandidatePayload, MemoryCompilationBatch, MemoryItem, MemoryKind,
+    MemoryScope, MemoryStatus,
 };
 use rmcp::{
     ServiceExt,
@@ -18,6 +18,128 @@ fn fixture_text(name: &str) -> String {
         .join("../chat-history-core/tests/fixtures")
         .join(name);
     fs::read_to_string(path).expect("fixture text")
+}
+
+#[tokio::test]
+async fn arcos_source_integrity_is_additive_on_real_mcp_reads() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let home = DataHome::new(temp.path().join("data"));
+    let service = IndexService::new(home.clone(), None);
+    let id = "6ac4773c-b8e8-83e8-b954-9b0d49f08bb4";
+    let normalized = serde_json::from_value(serde_json::json!({
+        "source":"chatgpt", "source_conversation_id":id,
+        "title":"⭐Arcos开发辅助-5", "create_time":10.0,"update_time":20.0,
+        "messages": (0..10).map(|index| serde_json::json!({
+            "message_id":format!("message-{index}"),"role":if index % 2 == 0 { "user" } else { "assistant" },
+            "text":"Arcos Foundation B / fourth-live-fire readiness", "create_time":10.0 + f64::from(index)
+        })).collect::<Vec<_>>()
+    }))?;
+    service.import_normalized(vec![normalized], None)?;
+    let mut state = ChatGptSyncState::default();
+    // Cursor intentionally higher: observation of a known mismatch still matters
+    // even when discovery is not requeued. Do not manufacture later transcript text.
+    state.seed_cursor(100.0)?;
+    state.plan_recent(serde_json::from_value::<ChatGptThreadListSnapshot>(serde_json::json!({
+        "requested_limit":50,"threads":[{"thread_id":id,"kind":"chatgpt","title":"Arcos","update_time":30.0,"status":"idle","observed_at":40.0}]
+    }))?)?;
+    state.save(&home)?;
+    let transport = TokioChildProcess::builder(
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_chat-history-mcp")).configure(|cmd| {
+            cmd.env("CHAT_HISTORY_DATA_HOME", home.root())
+                .env("CHAT_HISTORY_EMBEDDING_PROVIDER", "hashed-v1")
+                .stderr(Stdio::inherit());
+        }),
+    )
+    .spawn()?
+    .0;
+    let client = ().serve(transport).await?;
+    for expected in ["stale", "pending", "blocked", "aligned", "unknown"] {
+        match expected {
+            "pending" => {
+                state.pending.insert(
+                    id.to_string(),
+                    chat_history_core::ChatGptPendingThread {
+                        thread_id: id.to_string(),
+                        title: "Arcos".to_string(),
+                        create_time: Some(10.0),
+                        update_time: 30.0,
+                    },
+                );
+            }
+            "blocked" => {
+                state.mark_blocked(id, "newer transcript inaccessible");
+            }
+            "aligned" => {
+                state.pending.clear();
+                state.blocked.clear();
+                state
+                    .provider_observations
+                    .get_mut(id)
+                    .unwrap()
+                    .provider_revision = Some(20.0);
+            }
+            "unknown" => {
+                state.provider_observations.clear();
+            }
+            _ => {}
+        }
+        state.save(&home)?;
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("memory_get_thread").with_arguments(
+                    serde_json::from_value(
+                        serde_json::json!({"conversation_id":id,"message_limit":16}),
+                    )?,
+                ),
+            )
+            .await?;
+        let wire = result
+            .structured_content
+            .expect("thread structured response");
+        assert_eq!(wire["total_messages"], 10);
+        assert_eq!(wire["truncated"], false);
+        assert_eq!(wire["thread"]["source_health"]["state"], expected);
+        if expected == "blocked" {
+            assert_eq!(
+                wire["thread"]["source_health"]["reason"],
+                "newer transcript inaccessible"
+            );
+        }
+        let context = client
+            .call_tool(
+                CallToolRequestParams::new("memory_project_context").with_arguments(
+                    serde_json::from_value(
+                        serde_json::json!({"project":"Arcos","relevant_limit":0,"recent_limit":3}),
+                    )?,
+                ),
+            )
+            .await?;
+        let packet = context
+            .structured_content
+            .expect("context structured response");
+        assert_eq!(
+            packet["continuations"][0]["source_health"],
+            wire["thread"]["source_health"]
+        );
+    }
+    // Malformed durable telemetry fails closed without losing indexed evidence.
+    fs::write(
+        chat_history_core::chatgpt::sync_state_path(&home),
+        b"{partial",
+    )?;
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("memory_get_thread").with_arguments(serde_json::from_value(
+                serde_json::json!({"conversation_id":id}),
+            )?),
+        )
+        .await?;
+    assert_eq!(
+        result.structured_content.unwrap()["thread"]["source_health"]["state"],
+        "unknown"
+    );
+    client.cancel().await?;
+    Ok(())
 }
 
 fn build_fixture_export(tempdir: &TempDir) -> anyhow::Result<std::path::PathBuf> {
@@ -291,6 +413,10 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     assert_eq!(memory_tail_json["message_offset"], 1);
     assert_eq!(memory_tail_json["returned_messages"], 1);
     assert_eq!(memory_tail_json["thread"]["messages"][0]["turn_index"], 1);
+    assert_eq!(
+        memory_tail_json["thread"]["source_health"]["state"],
+        "unknown"
+    );
 
     let args: serde_json::Map<String, serde_json::Value> =
         serde_json::from_value(serde_json::json!({
@@ -310,6 +436,10 @@ async fn serves_mcp_tools_over_stdio() -> anyhow::Result<()> {
     assert_eq!(
         project_context_json["continuation"]["conversation_id"],
         "conv-rust-index"
+    );
+    assert_eq!(
+        project_context_json["continuations"][0]["source_health"]["state"],
+        "unknown"
     );
     assert_eq!(project_context_json["continuation"]["returned_messages"], 2);
     assert_eq!(

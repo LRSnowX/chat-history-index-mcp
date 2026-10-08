@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::{DataHome, NormalizedConversation, NormalizedMessage};
 
 const CHATGPT_SYNC_STATE_VERSION: u32 = 1;
+pub const MAX_PROVIDER_OBSERVATIONS: usize = 2048;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ChatGptBridgeThread {
@@ -21,6 +22,54 @@ pub struct ChatGptBridgeThread {
     pub title: String,
     pub create_time: Option<f64>,
     pub update_time: Option<f64>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub observed_at: Option<f64>,
+}
+
+/// Latest list_threads observation, not a claim about the provider right now.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ChatGptProviderObservation {
+    #[serde(default)]
+    pub provider_title: Option<String>,
+    pub provider_revision: Option<f64>,
+    pub provider_status: Option<String>,
+    #[serde(default)]
+    pub observed_at: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationSourceHealthState {
+    Aligned,
+    Pending,
+    Blocked,
+    Stale,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ConversationSourceHealth {
+    pub state: ConversationSourceHealthState,
+    pub indexed_revision: Option<f64>,
+    pub provider_revision: Option<f64>,
+    pub provider_status: Option<String>,
+    pub observed_at: Option<f64>,
+    pub reason: Option<String>,
+}
+
+impl ConversationSourceHealth {
+    pub fn unknown(indexed_revision: Option<f64>, reason: &str) -> Self {
+        Self {
+            state: ConversationSourceHealthState::Unknown,
+            indexed_revision,
+            provider_revision: None,
+            provider_status: None,
+            observed_at: None,
+            reason: Some(reason.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -96,6 +145,8 @@ pub struct ChatGptSyncState {
     pub blocked: BTreeMap<String, ChatGptBlockedThread>,
     #[serde(default)]
     pub completed_since_cursor: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub provider_observations: BTreeMap<String, ChatGptProviderObservation>,
 }
 
 impl Default for ChatGptSyncState {
@@ -108,6 +159,7 @@ impl Default for ChatGptSyncState {
             pending: BTreeMap::new(),
             blocked: BTreeMap::new(),
             completed_since_cursor: BTreeMap::new(),
+            provider_observations: BTreeMap::new(),
         }
     }
 }
@@ -129,7 +181,7 @@ impl ChatGptSyncState {
         }
         let bytes = fs::read(&path)
             .with_context(|| format!("reading ChatGPT sync state at {}", path.display()))?;
-        let state: Self = serde_json::from_slice(&bytes)
+        let mut state: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing ChatGPT sync state at {}", path.display()))?;
         ensure!(
             state.version == CHATGPT_SYNC_STATE_VERSION,
@@ -137,6 +189,7 @@ impl ChatGptSyncState {
             state.version,
             CHATGPT_SYNC_STATE_VERSION
         );
+        state.bound_observations();
         Ok(state)
     }
 
@@ -149,7 +202,9 @@ impl ChatGptSyncState {
             .ok_or_else(|| anyhow!("ChatGPT sync state path has no parent"))?;
         let mut staged = tempfile::NamedTempFile::new_in(parent)
             .context("creating staged ChatGPT sync state")?;
-        serde_json::to_writer_pretty(&mut staged, self)
+        let mut bounded = self.clone();
+        bounded.bound_observations();
+        serde_json::to_writer_pretty(&mut staged, &bounded)
             .context("serializing ChatGPT sync state")?;
         staged.write_all(b"\n")?;
         staged.as_file().sync_all()?;
@@ -168,6 +223,66 @@ impl ChatGptSyncState {
             snapshot.requested_limit > 0,
             "requested_limit must be greater than zero"
         );
+
+        // Observe even entries below the safe cursor or already blocked/completed.
+        // Missing status/time in older bridge payloads stays unknown, never implicit idle/current.
+        let mut observations = BTreeMap::new();
+        for thread in snapshot
+            .threads
+            .iter()
+            .chain(snapshot.pinned_threads.iter())
+        {
+            if thread.kind != "chatgpt"
+                || thread.thread_id.is_empty()
+                || thread.thread_id.len() > 256
+            {
+                continue;
+            }
+            let observation = ChatGptProviderObservation {
+                provider_title: if thread.title.len() <= 512 {
+                    Some(thread.title.clone())
+                } else {
+                    None
+                },
+                provider_revision: thread.update_time.filter(|value| value.is_finite()),
+                provider_status: thread.status.clone().filter(|value| value.len() <= 64),
+                observed_at: thread.observed_at.filter(|value| value.is_finite()),
+            };
+            observations
+                .entry(thread.thread_id.clone())
+                .and_modify(|existing: &mut ChatGptProviderObservation| {
+                    if existing.provider_revision != observation.provider_revision
+                        || existing.provider_status != observation.provider_status
+                        || existing.observed_at != observation.observed_at
+                    {
+                        existing.provider_revision = None;
+                        existing.provider_status = None;
+                        existing.observed_at = None;
+                    }
+                    if existing.provider_title != observation.provider_title {
+                        existing.provider_title = None;
+                    }
+                })
+                .or_insert(observation);
+        }
+        self.provider_observations.extend(observations);
+        self.bound_observations();
+
+        // A malformed revision must invalidate old health observations even if
+        // discovery cannot proceed. Validate before changing cursor/pending state.
+        for thread in snapshot
+            .threads
+            .iter()
+            .chain(snapshot.pinned_threads.iter())
+        {
+            if thread.kind == "chatgpt" {
+                ensure!(
+                    thread.update_time.is_some_and(|time| time.is_finite()),
+                    "ChatGPT thread {} is missing a finite update_time",
+                    thread.thread_id
+                );
+            }
+        }
 
         let cursor_before = self.last_successful_update_time;
         let listed_count = snapshot.threads.len();
@@ -259,6 +374,106 @@ impl ChatGptSyncState {
         };
         self.blocked.insert(thread_id.to_string(), blocked.clone());
         blocked
+    }
+
+    fn bound_observations(&mut self) {
+        self.provider_observations.retain(|id, observation| {
+            id.len() <= 256
+                && observation
+                    .provider_title
+                    .as_ref()
+                    .is_none_or(|title| title.len() <= 512)
+                && observation
+                    .provider_status
+                    .as_ref()
+                    .is_none_or(|status| status.len() <= 64)
+                && observation.observed_at.is_none_or(f64::is_finite)
+        });
+        while self.provider_observations.len() > MAX_PROVIDER_OBSERVATIONS {
+            let oldest = self
+                .provider_observations
+                .iter()
+                .min_by(|(a_id, a), (b_id, b)| {
+                    a.observed_at
+                        .unwrap_or(f64::NEG_INFINITY)
+                        .total_cmp(&b.observed_at.unwrap_or(f64::NEG_INFINITY))
+                        .then(a_id.cmp(b_id))
+                })
+                .map(|(id, _)| id.clone())
+                .expect("nonempty observations");
+            self.provider_observations.remove(&oldest);
+        }
+    }
+
+    pub fn source_health(
+        &self,
+        source: &str,
+        thread_id: &str,
+        indexed_revision: Option<f64>,
+    ) -> ConversationSourceHealth {
+        let mut health =
+            ConversationSourceHealth::unknown(indexed_revision, "No usable provider observation");
+        if source != "chatgpt" {
+            health.reason = Some("Unsupported provider".to_string());
+            return health;
+        }
+        if let Some(observation) = self.provider_observations.get(thread_id) {
+            health.provider_revision = observation.provider_revision;
+            health.provider_status = observation.provider_status.clone();
+            health.observed_at = observation.observed_at.filter(|value| value.is_finite());
+        }
+        if let Some(blocked) = self.blocked.get(thread_id) {
+            health.state = ConversationSourceHealthState::Blocked;
+            health.reason = Some(blocked.reason.chars().take(240).collect());
+            return health;
+        }
+        if self.pending.contains_key(thread_id) {
+            health.state = ConversationSourceHealthState::Pending;
+            health.reason = Some(
+                "Awaiting complete import; non-idle or unknown statuses remain deferred"
+                    .to_string(),
+            );
+            return health;
+        }
+        let Some(observation) = self.provider_observations.get(thread_id) else {
+            return health;
+        };
+        if observation
+            .observed_at
+            .is_none_or(|value| !value.is_finite())
+        {
+            health.reason = Some("Provider observation time is unavailable".to_string());
+            return health;
+        }
+        if observation.provider_status.as_deref() == Some("active") {
+            health.state = ConversationSourceHealthState::Pending;
+            health.reason = Some("Provider thread is active; import deferred".to_string());
+            return health;
+        }
+        // Only idle has established safe eligibility. Do not reinterpret other statuses.
+        if observation.provider_status.as_deref() != Some("idle") {
+            health.reason = Some("Provider status is not known eligible/idle".to_string());
+            return health;
+        }
+        match (observation.provider_revision, indexed_revision) {
+            (Some(provider), Some(indexed)) if provider.is_finite() && indexed.is_finite() => {
+                if provider > indexed {
+                    health.state = ConversationSourceHealthState::Stale;
+                    health.reason = Some(
+                        "Observed provider revision is newer than indexed snapshot".to_string(),
+                    );
+                } else if provider == indexed {
+                    health.state = ConversationSourceHealthState::Aligned;
+                    health.reason = Some("Aligned at last provider observation only".to_string());
+                } else {
+                    health.reason = Some(
+                        "Provider/index revisions contradict observation ordering".to_string(),
+                    );
+                }
+            }
+            _ => {}
+        }
+        health
     }
 
     pub fn mark_imported(&mut self, thread_id: &str) {
@@ -426,6 +641,146 @@ pub fn read_json_input<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Res
 mod tests {
     use super::*;
 
+    #[test]
+    fn source_health_is_conservative_and_durable() {
+        use ConversationSourceHealthState::*;
+        let temp = tempfile::tempdir().unwrap();
+        let home = DataHome::new(temp.path().to_path_buf());
+        home.paths().ensure().unwrap();
+        // Deployed v1 state has no observation field; preserve every cursor/map.
+        let legacy = serde_json::json!({"version":1,"last_successful_update_time":100.0,
+            "active_high_watermark":200.0,"discovery_overflow":true,
+            "pending":{"waiting":{"thread_id":"waiting","title":"waiting","create_time":null,"update_time":200.0}},
+            "blocked":{"bad":{"thread_id":"bad","title":"bad","update_time":200.0,"reason":"truncated provider content"}},
+            "completed_since_cursor":{"done":150.0}});
+        fs::write(sync_state_path(&home), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let mut state = ChatGptSyncState::load(&home).unwrap();
+        assert_eq!(state.last_successful_update_time, Some(100.0));
+        assert_eq!(state.completed_since_cursor["done"], 150.0);
+        assert!(state.discovery_overflow);
+        assert!(state.provider_observations.is_empty());
+        assert_eq!(
+            state
+                .source_health("chatgpt", "unobserved", Some(100.0))
+                .state,
+            Unknown
+        );
+        assert_eq!(
+            state.source_health("chatgpt", "waiting", Some(100.0)).state,
+            Pending
+        );
+        let blocked = state.source_health("chatgpt", "bad", Some(100.0));
+        assert_eq!(blocked.state, Blocked);
+        assert_eq!(
+            blocked.reason.as_deref(),
+            Some("truncated provider content")
+        );
+
+        state
+            .plan_recent(ChatGptThreadListSnapshot {
+                requested_limit: 50,
+                threads: vec![
+                    thread("aligned", "chatgpt", 80.0),
+                    thread("arcos", "chatgpt", 90.0),
+                ],
+                pinned_threads: vec![],
+            })
+            .unwrap();
+        // Below the cursor still gets an observation. Arcos indexed revision is older.
+        assert_eq!(
+            state.source_health("chatgpt", "aligned", Some(80.0)).state,
+            Aligned
+        );
+        assert_eq!(
+            state.source_health("chatgpt", "arcos", Some(70.0)).state,
+            Stale
+        );
+        assert_eq!(
+            state.source_health("chatgpt", "arcos", Some(95.0)).state,
+            Unknown
+        );
+        assert_eq!(
+            state.source_health("codex", "aligned", Some(80.0)).state,
+            Unknown
+        );
+        assert_eq!(
+            state.source_health("chatgpt", "aligned", None).state,
+            Unknown
+        );
+        let aligned_observation = state.provider_observations.get_mut("aligned").unwrap();
+        assert_eq!(
+            aligned_observation.provider_title.as_deref(),
+            Some("aligned")
+        );
+        aligned_observation.observed_at = None;
+        assert_eq!(
+            state.source_health("chatgpt", "aligned", Some(80.0)).state,
+            Unknown
+        );
+        state
+            .provider_observations
+            .get_mut("aligned")
+            .unwrap()
+            .observed_at = Some(1_800_000_000.0);
+        for status in [None, Some("undocumented"), Some("active")] {
+            state
+                .provider_observations
+                .get_mut("aligned")
+                .unwrap()
+                .provider_status = status.map(str::to_string);
+            assert_eq!(
+                state.source_health("chatgpt", "aligned", Some(80.0)).state,
+                if status == Some("active") {
+                    Pending
+                } else {
+                    Unknown
+                }
+            );
+        }
+        state.save(&home).unwrap();
+        let reopened = ChatGptSyncState::load(&home).unwrap();
+        assert_eq!(reopened, state);
+        assert_eq!(
+            reopened.source_health("chatgpt", "arcos", Some(70.0)).state,
+            Stale
+        );
+    }
+
+    #[test]
+    fn observations_are_bounded_and_conflicting_list_entries_cannot_align() {
+        let mut state = ChatGptSyncState::default();
+        for index in 0..MAX_PROVIDER_OBSERVATIONS + 10 {
+            state.provider_observations.insert(
+                format!("thread-{index}"),
+                ChatGptProviderObservation {
+                    provider_title: Some(format!("thread-{index}")),
+                    provider_revision: Some(index as f64),
+                    provider_status: Some("idle".to_string()),
+                    observed_at: Some(index as f64),
+                },
+            );
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = DataHome::new(temp.path().to_path_buf());
+        state.save(&home).unwrap();
+        state = ChatGptSyncState::load(&home).unwrap();
+        assert_eq!(state.provider_observations.len(), MAX_PROVIDER_OBSERVATIONS);
+        assert!(!state.provider_observations.contains_key("thread-0"));
+        state.last_successful_update_time = Some(100.0);
+        state
+            .plan_recent(ChatGptThreadListSnapshot {
+                requested_limit: 50,
+                threads: vec![thread("conflict", "chatgpt", 80.0)],
+                pinned_threads: vec![thread("conflict", "chatgpt", 90.0)],
+            })
+            .unwrap();
+        assert_eq!(
+            state.source_health("chatgpt", "conflict", Some(80.0)).state,
+            ConversationSourceHealthState::Unknown
+        );
+        assert_eq!(state.provider_observations.len(), MAX_PROVIDER_OBSERVATIONS);
+    }
+
     fn thread(id: &str, kind: &str, updated: f64) -> ChatGptBridgeThread {
         ChatGptBridgeThread {
             thread_id: id.to_string(),
@@ -433,6 +788,8 @@ mod tests {
             title: id.to_string(),
             create_time: Some(updated - 1.0),
             update_time: Some(updated),
+            status: Some("idle".to_string()),
+            observed_at: Some(1_800_000_000.0),
         }
     }
 

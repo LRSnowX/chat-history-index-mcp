@@ -9,7 +9,7 @@ use axum::{
 };
 use chat_history_core::{
     ChatGptBlockedThread, ChatGptBridgeTranscript, ChatGptDiscoveryPlan, ChatGptSyncState,
-    ChatGptThreadListSnapshot, CollaborationMemory, ConversationRecord,
+    ChatGptThreadListSnapshot, CollaborationMemory, ConversationRecord, ConversationSourceHealth,
     DEFAULT_PENDING_MEMORY_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
     MAX_MEMORY_COMPILER_MESSAGES, MAX_PENDING_MEMORY_LIMIT, MemoryBootstrapPlan,
     MemoryHealthReport, NormalizedConversation, ProjectPendingMemory, ProjectWorkingMemory,
@@ -239,10 +239,11 @@ impl ChatHistoryMcp {
             ChatGptSyncState::load(self.service.data_home()).map_err(|error| error.to_string())?;
         let plan = state
             .plan_recent(request.snapshot)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string());
         let state_path = state
             .save(self.service.data_home())
             .map_err(|error| error.to_string())?;
+        let plan = plan?;
         Ok(Json(ChatGptPlanRecentResponse {
             plan,
             state_path,
@@ -658,11 +659,13 @@ impl ChatHistoryMcp {
             })
             .collect::<Vec<_>>();
         let summary = detail.conversation.summary.clone();
+        let source_health = self.conversation_source_health(&detail.conversation);
         Ok(Json(MemoryThreadResponse {
             thread: Some(MemoryThread {
                 conversation: detail.conversation,
                 summary,
                 messages,
+                source_health,
             }),
             message_offset: offset,
             returned_messages: end.saturating_sub(offset),
@@ -976,6 +979,7 @@ impl ChatHistoryMcp {
                         text: message.normalized_text.clone(),
                     })
                     .collect::<Vec<_>>();
+                let source_health = self.conversation_source_health(&detail.conversation);
                 let continuation = MemoryContinuation {
                     conversation_id: detail.conversation.conversation_id,
                     source: detail.conversation.source,
@@ -985,6 +989,7 @@ impl ChatHistoryMcp {
                     returned_messages: messages.len(),
                     total_messages,
                     messages,
+                    source_health,
                 };
                 continuations.push(continuation);
                 if continuations.len() >= max_threads {
@@ -993,6 +998,23 @@ impl ChatHistoryMcp {
             }
         }
         Ok(continuations)
+    }
+
+    fn conversation_source_health(
+        &self,
+        conversation: &ConversationRecord,
+    ) -> ConversationSourceHealth {
+        match ChatGptSyncState::load(self.service.data_home()) {
+            Ok(state) => state.source_health(
+                &conversation.source,
+                &conversation.source_conversation_id,
+                conversation.update_time,
+            ),
+            Err(_) => ConversationSourceHealth::unknown(
+                conversation.update_time,
+                "Provider observation state unavailable or malformed",
+            ),
+        }
     }
 }
 
@@ -1177,6 +1199,7 @@ struct MemoryThread {
     conversation: ConversationRecord,
     summary: Option<SummaryRecord>,
     messages: Vec<MemoryMessage>,
+    source_health: ConversationSourceHealth,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1189,6 +1212,7 @@ struct MemoryContinuation {
     returned_messages: usize,
     total_messages: usize,
     messages: Vec<MemoryMessage>,
+    source_health: ConversationSourceHealth,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

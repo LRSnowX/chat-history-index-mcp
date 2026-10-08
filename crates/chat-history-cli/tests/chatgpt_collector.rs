@@ -191,9 +191,59 @@ fn chatgpt_cli_imports_complete_threads_and_advances_cursor_only_when_batch_is_c
     assert_eq!(messages[0]["message_id"], "u1");
     assert_eq!(messages[1]["message_id"], "a2");
 
+    // A newer but incomplete/truncated snapshot never replaces the good canonical.
+    for invalid in [
+        json!({"request_cursor":null,"next_cursor":"missing-page","has_more":true,"messages":[]}),
+        json!({"request_cursor":null,"next_cursor":null,"has_more":false,"messages":[
+            {"message_id":"a-new","role":"assistant","text":"partial newer content","truncated":true}
+        ]}),
+        json!({"request_cursor":"wrong-cursor","next_cursor":null,"has_more":false,"messages":[]}),
+    ] {
+        write_json(
+            &first,
+            json!({"thread_id":"chat-a","title":"LEMonX","update_time":130.0,"pages":[invalid]}),
+        );
+        let rejected = Command::new(env!("CARGO_BIN_EXE_chat-history-cli"))
+            .args([
+                "chatgpt-import-thread",
+                "--path",
+                first.to_str().unwrap(),
+                "--embed",
+                "false",
+            ])
+            .env("CHAT_HISTORY_DATA_HOME", &data_home)
+            .output()
+            .unwrap();
+        assert!(!rejected.status.success());
+        let retained = run_cli(&data_home, &["show", "chat-a"]);
+        assert_eq!(retained["conversation"]["update_time"], json!(120.0));
+        assert_eq!(retained["messages"], detail["messages"]);
+    }
+
     let seeded = run_cli(&data_home, &["chatgpt-seed-from-index"]);
     assert_eq!(seeded["update_time"], json!(120.0));
     assert_eq!(seeded["state"]["last_successful_update_time"], json!(120.0));
+
+    // Invalid latest observation is durable even when planning fails; old idle
+    // observation cannot keep looking aligned after missing provider revision.
+    write_json(
+        &discovery,
+        json!({"requested_limit":50,"threads":[
+            {"thread_id":"chat-a","kind":"chatgpt","title":"LEMonX","update_time":null,"status":"idle"}
+        ]}),
+    );
+    let invalid_plan = Command::new(env!("CARGO_BIN_EXE_chat-history-cli"))
+        .args(["chatgpt-plan-recent", "--path", discovery.to_str().unwrap()])
+        .env("CHAT_HISTORY_DATA_HOME", &data_home)
+        .output()
+        .unwrap();
+    assert!(!invalid_plan.status.success());
+    let observed = run_cli(&data_home, &["chatgpt-state"]);
+    assert_eq!(
+        observed["provider_observations"]["chat-a"]["provider_revision"],
+        Value::Null
+    );
+    assert_eq!(observed["last_successful_update_time"], json!(120.0));
 }
 
 #[test]

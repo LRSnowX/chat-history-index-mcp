@@ -172,6 +172,44 @@ The durable state lives at `cache/chatgpt-sync-state.json` under the managed dat
 the last safe update-time cursor, the current high-water mark, pending threads, blocked threads,
 and threads already imported above a blocked cursor.
 
+### Conversation source integrity (Checkpoint G-A)
+
+Sync-state v1 additionally defaults `provider_observations` to an empty map for
+existing installations. Discovery records the provider title, ChatGPT
+`update_time` as `provider_revision`, the literal optional `status` as
+`provider_status`, and the observation time captured by the live collector
+immediately after `list_threads` returns (`observed_at`, Unix seconds), including entries below
+the cursor or already blocked/completed. Replaying an older discovery payload
+without its original observation time therefore degrades source health to unknown
+instead of manufacturing a fresh observation. The latest observation per provider
+thread is retained; oldest observations are evicted deterministically beyond
+2048 entries. IDs are bounded to 256 bytes, titles to 512 bytes, and statuses to 64 bytes. Existing
+cursor, pending, blocked, and completed state is preserved; no SQLite migration
+or reset is needed. Eviction means unknown, not implicit alignment.
+
+`memory_get_thread.thread.source_health` and
+`memory_project_context.continuations[].source_health` carry:
+`state`, nullable `indexed_revision`, `provider_revision`, `provider_status`,
+`observed_at`, and `reason` (a bounded 240-character explanation).
+Revisions are provider update-time values compared against the actual indexed
+canonical conversation update time, not the collector cursor/completion map.
+
+For ChatGPT, durable blocked state wins (with its reason), then pending state.
+An observed `active` status is also pending. Missing observations, conflicting
+list entries, absent/non-finite revisions, unsupported providers, unrecognized
+or missing statuses, and provider revisions older than the indexed revision
+are unknown. With an eligible `idle` observation and no pending/block, a newer
+provider revision is stale and an equal revision is aligned. Only `idle` remains
+eligible for transcript ingestion; every other status is deferred. If normal and
+pinned discovery entries disagree on the same thread's revision or status, that
+thread is also deferred rather than letting list order choose which value wins. The existing
+complete-transcript checks remain unchanged, and failed imports retain the
+known-good canonical snapshot.
+
+Aligned means **at the last recorded provider observation only**. It is not
+proof that the provider has not changed since then or that a host has fully
+restored the predecessor conversation. G-A adds no verified-continuation protocol.
+
 ### Discovery input
 
 Adapt the result of `list_threads(limit: 50)` to:
@@ -185,7 +223,9 @@ Adapt the result of `list_threads(limit: 50)` to:
       "kind": "chatgpt",
       "title": "Conversation title",
       "create_time": 1787184000.0,
-      "update_time": 1787187600.0
+      "update_time": 1787187600.0,
+      "status": "idle",
+      "observed_at": 1787187601.25
     }
   ],
   "pinned_threads": []

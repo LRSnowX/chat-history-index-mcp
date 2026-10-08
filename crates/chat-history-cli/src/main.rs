@@ -631,8 +631,9 @@ async fn main() -> anyhow::Result<()> {
         Command::ChatgptPlanRecent { path, stdin_bytes } => {
             let snapshot: ChatGptThreadListSnapshot = read_json_document(&path, stdin_bytes)?;
             let mut state = ChatGptSyncState::load(&data_home)?;
-            let plan = state.plan_recent(snapshot)?;
+            let plan = state.plan_recent(snapshot);
             let state_path = state.save(&data_home)?;
+            let plan = plan?;
             print_json(&serde_json::json!({
                 "plan": plan,
                 "state_path": state_path,
