@@ -13,13 +13,14 @@ LEGACY_LABEL="local.chat-history-index-chatgpt-sync"
 LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 BEGIN_MARKER="# BEGIN chat-history-index-mcp ChatGPT live collector"
 END_MARKER="# END chat-history-index-mcp ChatGPT live collector"
+APP_SERVER_PATTERN='/Applications/ChatGPT\.app/Contents/Resources/(codex|codex-cli/.*/codex) .*app-server'
 
 usage() {
   echo "usage: $0 install [--interval SECONDS] [--memory-projects CSV] [--memory-model MODEL] [--memory-scan-limit N] [--memory-max-conversations N] [--memory-max-messages N] [--memory-max-pending-candidates N] | start | stop | restart | status | uninstall" >&2
 }
 
 app_server_pid() {
-  pgrep -f '/Applications/ChatGPT.app/Contents/Resources/codex .*app-server' | head -1 || true
+  pgrep -f "$APP_SERVER_PATTERN" | head -1 || true
 }
 
 daemon_pid() {

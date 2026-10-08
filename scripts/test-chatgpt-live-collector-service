@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SERVICE="$SCRIPT_DIR/chatgpt-live-collector-service"
+
+eval "$(grep '^APP_SERVER_PATTERN=' "$SERVICE")"
+
+legacy='/Applications/ChatGPT.app/Contents/Resources/codex app-server'
+current='/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c features.code_mode_host=true app-server --analytics-default-enabled'
+unrelated='/Applications/Other.app/Contents/Resources/codex app-server'
+
+printf '%s\n' "$legacy" | grep -Eq "$APP_SERVER_PATTERN"
+printf '%s\n' "$current" | grep -Eq "$APP_SERVER_PATTERN"
+if printf '%s\n' "$unrelated" | grep -Eq "$APP_SERVER_PATTERN"; then
+  echo "app-server matcher accepted an unrelated application" >&2
+  exit 1
+fi
+
+echo "ChatGPT app-server matcher regression passed."
