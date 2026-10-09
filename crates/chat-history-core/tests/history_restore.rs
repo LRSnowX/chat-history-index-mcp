@@ -733,6 +733,9 @@ fn late_publication_failure_rolls_back_canonical_snapshots_fts_and_jobs() {
     let bundles = fs::read_dir(service.data_home().paths().sources_dir)
         .unwrap()
         .count();
+    // ZIP timestamps have two-second DOS granularity. Cross that boundary so
+    // this regression proves the evidence bytes do not depend on wall clock.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
     service.apply_history_restore(&plan, ID).unwrap();
     assert_eq!(
         fs::read_dir(service.data_home().paths().sources_dir)

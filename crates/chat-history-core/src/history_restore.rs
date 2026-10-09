@@ -624,6 +624,7 @@ fn persist_bundle(
         let mut zip = zip::ZipWriter::new(temporary.as_file_mut());
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default())
             .unix_permissions(0o600);
         zip.start_file("evidence-format.json", options)?;
         zip.write_all(&serde_json::to_vec(&json!({"format":"chim-historical-transcript-evidence-v1","generated":true,"source_evidence_sha256":source.evidence.sha256}))?)?;
