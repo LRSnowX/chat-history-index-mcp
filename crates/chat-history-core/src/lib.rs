@@ -9,6 +9,7 @@ pub mod embedding;
 pub mod error;
 mod export_continuation;
 pub mod gemini;
+pub mod history_restore;
 pub mod ingest;
 pub mod memory;
 pub mod memory_compile;

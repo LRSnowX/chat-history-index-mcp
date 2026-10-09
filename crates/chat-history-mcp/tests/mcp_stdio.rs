@@ -21,6 +21,102 @@ fn fixture_text(name: &str) -> String {
 }
 
 #[tokio::test]
+async fn historical_restore_proof_is_unverified_on_mcp_until_complete_live_replay()
+-> anyhow::Result<()> {
+    use serde_json::json;
+    let temp = TempDir::new()?;
+    let home = DataHome::new(temp.path().join("data"));
+    let service = IndexService::new(home.clone(), None);
+    let id = "synthetic-mcp-history-restore";
+    let input: chat_history_core::ChatGptBridgeTranscript = serde_json::from_value(
+        json!({"thread_id":id,"title":"Arcos synthetic history","update_time":20.0,"pages":[{"has_more":false,"messages":[{"message_id":"d","role":"assistant","text":"Arcos synthetic continuation"},{"message_id":"c","role":"user","text":"Arcos synthetic continuation"}]}]}),
+    )?;
+    service.import_normalized(vec![input.into_normalized()?], None)?;
+    let source = temp.path().join("export");
+    fs::create_dir(&source)?;
+    fs::write(source.join("export_manifest.json"), br#"{"version":1}"#)?;
+    let mut mapping = serde_json::Map::new();
+    mapping.insert(
+        "root".into(),
+        json!({"id":"root","parent":null,"children":["a"],"message":null}),
+    );
+    let ids = ["a", "b", "c", "d"];
+    for (i, id) in ids.iter().enumerate() {
+        mapping.insert((*id).into(),json!({"id":id,"parent":if i==0{"root"}else{ids[i-1]},"children":if i==3{vec![]}else{vec![ids[i+1]]},"message":{"id":id,"author":{"role":if i%2==0{"user"}else{"assistant"}},"content":{"content_type":"text","parts":["Arcos synthetic continuation"]}}}));
+    }
+    fs::write(
+        source.join("conversations-000.json"),
+        serde_json::to_vec(
+            &json!([{"id":id,"title":"Arcos synthetic history","update_time":20.0,"current_node":"d","mapping":mapping}]),
+        )?,
+    )?;
+    let observation = json!({"thread_id":id,"kind":"chatgpt","title":"Arcos synthetic history","status":"idle","update_time":20.0,"observed_at":30.0});
+    let mut state = ChatGptSyncState::default();
+    state.plan_recent(serde_json::from_value(
+        json!({"requested_limit":50,"threads":[observation.clone()]}),
+    )?)?;
+    state.mark_imported_at(id, Some(20.0));
+    state.save(&home)?;
+    let plan = service.history_restore_plan(&[source], "Arcos")?;
+    service.apply_history_restore(&plan, id)?;
+    let transport = TokioChildProcess::builder(
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_chat-history-mcp")).configure(|cmd| {
+            cmd.env("CHAT_HISTORY_DATA_HOME", home.root())
+                .env("CHAT_HISTORY_EMBEDDING_PROVIDER", "hashed-v1")
+                .stderr(Stdio::inherit());
+        }),
+    )
+    .spawn()?
+    .0;
+    let client = ().serve(transport).await?;
+    let tools = client.list_all_tools().await?;
+    assert!(!tools.iter().any(|t| t.name.contains("history_restore")));
+    for expected in ["unverified", "verified"] {
+        if expected == "verified" {
+            let detail = service.get_conversation(id, true)?.unwrap();
+            let request: chat_history_core::continuation::ContinuationImport =
+                serde_json::from_value(
+                    json!({"baseline":service.continuation_baseline(id)?,"provider_before":observation,"provider_after":observation,"transcript":{"thread_id":id,"title":"Arcos synthetic history","update_time":20.0,"pages":[{"has_more":false,"provider_revision":20.0,"messages":detail.messages.iter().rev().map(|m|json!({"message_id":m.message_id,"role":m.role,"text":m.normalized_text,"stable_identity":true})).collect::<Vec<_>>()}]}}),
+                )?;
+            service.import_verified_continuation(&request)?;
+        }
+        let thread = client
+            .call_tool(
+                CallToolRequestParams::new("memory_get_thread").with_arguments(
+                    serde_json::from_value(json!({"conversation_id":id,"message_limit":16}))?,
+                ),
+            )
+            .await?
+            .structured_content
+            .unwrap();
+        assert_eq!(thread["total_messages"], 4);
+        assert_eq!(thread["thread"]["source_health"]["state"], "aligned");
+        assert_eq!(thread["thread"]["continuation_proof"]["state"], expected);
+        let context = client
+            .call_tool(
+                CallToolRequestParams::new("memory_project_context").with_arguments(
+                    serde_json::from_value(
+                        json!({"project":"Arcos","relevant_limit":0,"recent_limit":3}),
+                    )?,
+                ),
+            )
+            .await?
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            context["continuations"][0]["continuation_proof"]["state"],
+            expected
+        );
+        assert_eq!(
+            context["continuations"][0]["source_health"]["state"],
+            "aligned"
+        );
+    }
+    client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn arcos_source_integrity_is_additive_on_real_mcp_reads() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let home = DataHome::new(temp.path().join("data"));

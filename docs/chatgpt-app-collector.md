@@ -279,8 +279,9 @@ conversation by stable ID across all supported export parts. It requires an
 existing durable live collector blocker and a trusted current canonical baseline.
 The supported ZIP layout is the existing `Conversations__*.zip` envelope with
 `conversations-*.json` arrays. The complete mapping must be one connected tree
-with reciprocal parent/child links, no cycles or duplicate children, and globally
-unique stable node/message IDs. Branches are allowed. A valid `current_node`
+with no cycles and globally unique stable node/message IDs. Legacy mappings also
+require reciprocal parent/child links and no duplicate children; newer parent-only
+mappings derive the same topology from parent links. Branches are allowed. A valid `current_node`
 is required and is the explicit active-selection boundary; it need not be a graph
 leaf. Follow its parents to the root, reverse that path into chronological order,
 and publish **only** its active visible messages. Off-selection siblings or
@@ -291,7 +292,12 @@ Completion metadata is schema-sensitive but fail-closed. Legacy exports that car
 message `status` fields require every active message to be
 `finished_successfully`. Newer official exports may omit `status` only when the
 entire mapping is statusless; a mixed mapping cannot use a missing active status
-as a completeness bypass. Recognized assistant `thoughts` and
+as a completeness bypass. Mapping topology is likewise schema-sensitive: legacy
+exports must carry `children` arrays on every node with reciprocal parent/child
+links, while newer parent-only exports may omit `children` only when every node
+does so. Parent-only adjacency is derived from parent links and must still form one
+connected, acyclic, single-root graph. Mixed topology schemas fail closed.
+Recognized assistant `thoughts` and
 `reasoning_recap` nodes, the null root, and existing empty system scaffold are
 non-visible; unknown internal/visible types are not silently skipped.
 Supported visible content is user/assistant `text`, user text with file-attachment
@@ -361,6 +367,79 @@ No new model-facing memory write tool or autonomous export-repair loop is added.
 Official-export authenticity is supplied by the operator, not cryptographically
 authenticated by CHIM. Real private-export/provider acceptance is a separate
 review step; unsupported lineage/content fails closed.
+
+### Starred-mainline historical restoration (Checkpoint G-B.2)
+
+Historical gaps are a separate operator workflow, not an automatic collector repair.
+The title prefix is operator policy; the core does not hardcode `⭐` or project names.
+Plan first, review the bounded metadata, then apply **one** conversation explicitly:
+
+```bash
+scripts/chat-history-cli chatgpt-history-restore-plan \
+  --source /path/to/extracted-official-export \
+  --source /path/to/older-official-export.zip \
+  --title-prefix "⭐" > /tmp/history-plan.json
+scripts/chat-history-cli chatgpt-history-restore-apply \
+  --plan /tmp/history-plan.json --conversation-id THREAD_ID
+```
+
+Planning opens the existing index read-only and binds exact source-evidence digests
+and canonical baseline tokens. It selects existing, uninstanced ChatGPT canonicals
+by literal title prefix, not new export-only conversations. Output contains no
+message bodies: at most 256 entries, bounded titles/IDs, and at most 8 sources.
+`truncated` reports selection overflow; no autonomous batch mutation is provided.
+Source-missing, already-trusted-native, insufficient/reordered overlap, conflicting
+records, unsupported content and ambiguous gaps have explicit typed classifications.
+Changed source bytes/file sets, changed baseline or tampered entry metadata fail
+apply with `CHIM_HISTORY_RESTORE_*` errors before canonical commit.
+
+Sources may be the existing nested `Conversations__*.zip` layout or a directory with
+`export_manifest.json` version 1 and top-level `conversations-*.json` shards. Directory
+reading/evidence capture ignores attachment `.dat` files; it never repacks the whole
+export. All supplied transcript shards are digest-bound, even where only one thread
+is selected. When restoration is required, conflicting records at the selected
+freshest revision fail closed; an already-trusted native canonical at an equal or
+newer revision short-circuits to no-restoration without reprojecting it through a
+different exporter representation. The freshest compatible record is otherwise
+selected. Authenticity of a supplied official export remains the operator's
+responsibility, not something CHIM can cryptographically establish.
+
+The merge partitions export and canonical sequences by exact shared stable IDs,
+requiring matching roles and relative order. Multi-message canonicals require at
+least two shared IDs; a single-message canonical requires its exact ID. Each gap
+may have exclusive messages on **only one** side. Two exclusive sides fail closed:
+no timestamps, similarity, LCS or heuristic interleaving. This supports prefixes,
+suffixes, sparse subsequences, complementary gaps and a newer live-only tail. Shared
+messages retain canonical text/raw/create time, canonical-only messages remain
+unchanged, and export-only messages retain full export raw evidence. The existing
+G-B.1 strict raw-content/projection, citation identity-only exception, attachment,
+image and statusless-schema rules are reused unchanged. Revision is `max(C, E)`;
+equal/older exports can recover proven history. Native `copy`/`adopt` canonicals at
+an equal/newer revision default to no rewrite despite exporter projection changes.
+
+Before publication, CHIM saves a private deterministic, content-addressed generated
+evidence ZIP of exact transcript/manifest bytes (not attachment payloads), original
+member names and hashes. It is explicitly tagged generated and recorded under
+`archives.import_mode = historical_restore`, never passed off as an untouched native
+ZIP. Trust is anchored in DB/archive provenance plus the canonical raw SHA-256, not
+a JSON marker alone. No schema migration is needed. Failed transactions may leave
+an unreferenced immutable evidence bundle; retry reuses the same content address.
+No new automatic evidence cleanup is introduced.
+
+Canonical publication, old snapshot supersession, FTS and derivative invalidation
+use the existing transaction path. Memory checkpoints/candidates remain bound to
+their old snapshot/prefix and require the existing revalidation, never silent rebinding.
+The bounded `chim_historical_restore` marker records method/version, source/bundle
+digests, prior baseline/revisions, counts and `requires_live_verification = true`.
+Offline restoration never changes sync pending/blockers/cursors/observations.
+Even coincidentally aligned source health cannot yield verified continuation while
+this marker is unresolved. Ordinary imports cannot erase/resolve it; a successful
+normal full G-B identity/order replay alone resolves it while preserving restored
+bodies (including oversized/truncated live overlaps). MCP thread/continuation
+responses consume the audited provenance and retain their existing read-only schema.
+No MCP write tool, model compilation, live-provider call or deployment is added.
+Real private-export planning/restoration and provider acceptance remain separate
+operator review steps.
 
 ### Discovery input
 

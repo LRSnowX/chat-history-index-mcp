@@ -12,18 +12,56 @@ use crate::{ConversationDetail, NormalizedConversation, NormalizedMessage};
 pub(crate) fn verify_export(
     detail: &ConversationDetail,
     expected: &ContinuationBaseline,
-    native_export_provenance: bool,
+    trusted_export_provenance: bool,
     export: Value,
 ) -> anyhow::Result<NormalizedConversation> {
-    let current = verify_baseline(detail, expected, native_export_provenance)?;
+    let current = verify_baseline(detail, expected, trusted_export_provenance)?;
+    let (revision, mut messages) = export_messages(&export, &current.source_thread_id)?;
+    // G-B.1 remains append-only with strict revision advancement. G-B.2 reuses
+    // parsing and overlap validation without changing this accepted contract.
+    ensure!(
+        revision > current.indexed_revision,
+        RepairFailureCode::StaleExport
+    );
+    ensure!(
+        messages.len() > detail.messages.len(),
+        RepairFailureCode::MissingOverlap
+    );
+    for (old, incoming) in detail.messages.iter().zip(&mut messages) {
+        validate_shared(old, incoming)?;
+        incoming.text = old.normalized_text.clone();
+        incoming.raw = old.raw_message_json.clone();
+        incoming.create_time = old.create_time;
+    }
+    let old = &detail.conversation;
+    Ok(NormalizedConversation {
+        source: old.source.clone(),
+        source_instance: old.source_instance.clone(),
+        source_conversation_id: old.source_conversation_id.clone(),
+        title: export
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or(&old.title)
+            .to_string(),
+        create_time: old.create_time,
+        update_time: Some(revision),
+        model: old.default_model_slug.clone(),
+        source_url: old.source_url.clone(),
+        source_path: old.source_path.clone(),
+        messages,
+        raw: export,
+    })
+}
+
+pub(crate) fn export_messages(
+    export: &Value,
+    thread_id: &str,
+) -> anyhow::Result<(f64, Vec<NormalizedMessage>)> {
     let id = export
         .get("conversation_id")
         .or_else(|| export.get("id"))
         .and_then(Value::as_str);
-    ensure!(
-        id == Some(current.source_thread_id.as_str()),
-        RepairFailureCode::ExportIdentity
-    );
+    ensure!(id == Some(thread_id), RepairFailureCode::ExportIdentity);
     for key in ["id", "conversation_id"] {
         if let Some(value) = export.get(key) {
             ensure!(value.as_str() == id, RepairFailureCode::ExportIdentity);
@@ -34,15 +72,7 @@ pub(crate) fn verify_export(
         .and_then(Value::as_f64)
         .filter(|v| v.is_finite())
         .ok_or(RepairFailureCode::InvalidExport)?;
-    // This operator only exists to append post-canonical history. If an export
-    // claims additional messages at the exact same provider revision as a
-    // previously trusted complete canonical snapshot, those two claims
-    // contradict each other and must not be reconciled heuristically.
-    ensure!(
-        revision > current.indexed_revision,
-        RepairFailureCode::StaleExport
-    );
-    let lineage = active_lineage(&export)?;
+    let lineage = active_lineage(export)?;
     let mapping = export
         .get("mapping")
         .and_then(Value::as_object)
@@ -82,54 +112,35 @@ pub(crate) fn verify_export(
             _ => return Err(RepairFailureCode::InvalidExport.into()),
         }
     }
+    Ok((revision, messages))
+}
+
+pub(crate) fn validate_shared(
+    old: &crate::models::ConversationMessage,
+    incoming: &NormalizedMessage,
+) -> anyhow::Result<()> {
     ensure!(
-        messages.len() > detail.messages.len(),
-        RepairFailureCode::MissingOverlap
+        old.message_id == incoming.message_id && old.role == incoming.role,
+        RepairFailureCode::PrefixDivergence
     );
-    for (old, incoming) in detail.messages.iter().zip(&mut messages) {
+    // Native canonical text is a search projection; compare its complete raw
+    // content too, so whitespace/deduplication cannot conceal historical edits.
+    if let Some(content) = old.raw_message_json.get("content") {
         ensure!(
-            old.message_id == incoming.message_id && old.role == incoming.role,
+            incoming.raw.get("content") == Some(content),
             RepairFailureCode::PrefixDivergence
         );
-        // Native canonical text is a search projection; compare its complete raw
-        // content too, so whitespace/deduplication cannot conceal historical edits.
-        if let Some(content) = old.raw_message_json.get("content") {
+    } else {
+        let projection =
+            visible_projection(&incoming.raw)?.ok_or(RepairFailureCode::InvalidExport)?;
+        if !projection.citation_identity_only {
             ensure!(
-                incoming.raw.get("content") == Some(content),
+                old.normalized_text == projection.text,
                 RepairFailureCode::PrefixDivergence
             );
-        } else {
-            let projection =
-                visible_projection(&incoming.raw)?.ok_or(RepairFailureCode::InvalidExport)?;
-            if !projection.citation_identity_only {
-                ensure!(
-                    old.normalized_text == projection.text,
-                    RepairFailureCode::PrefixDivergence
-                );
-            }
         }
-        incoming.text = old.normalized_text.clone();
-        incoming.raw = old.raw_message_json.clone();
-        incoming.create_time = old.create_time;
     }
-    let old = &detail.conversation;
-    Ok(NormalizedConversation {
-        source: old.source.clone(),
-        source_instance: old.source_instance.clone(),
-        source_conversation_id: old.source_conversation_id.clone(),
-        title: export
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or(&old.title)
-            .to_string(),
-        create_time: old.create_time,
-        update_time: Some(revision),
-        model: old.default_model_slug.clone(),
-        source_url: old.source_url.clone(),
-        source_path: old.source_path.clone(),
-        messages,
-        raw: export,
-    })
+    Ok(())
 }
 
 /// Validate the entire mapping, but publish only the explicitly selected active path.
@@ -145,6 +156,16 @@ fn active_lineage(export: &Value) -> anyhow::Result<Vec<&Value>> {
         .get("current_node")
         .and_then(Value::as_str)
         .ok_or(InvalidExport)?;
+    let children_present = mapping
+        .values()
+        .filter(|node| node.get("children").is_some())
+        .count();
+    ensure!(
+        children_present == 0 || children_present == mapping.len(),
+        InvalidExport
+    );
+    let explicit_children = children_present == mapping.len();
+    let mut derived_children: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut roots = Vec::new();
     let mut ids = HashSet::new();
     for (key, node) in mapping {
@@ -152,32 +173,41 @@ fn active_lineage(export: &Value) -> anyhow::Result<Vec<&Value>> {
             !key.trim().is_empty() && node.get("id").and_then(Value::as_str) == Some(key),
             AmbiguousIdentity
         );
-        let children = node
-            .get("children")
-            .and_then(Value::as_array)
-            .ok_or(InvalidExport)?;
-        let mut unique_children = HashSet::new();
-        for child in children {
-            let child = child.as_str().ok_or(InvalidExport)?;
-            ensure!(unique_children.insert(child), InvalidExport);
-            let next = mapping.get(child).ok_or(InvalidExport)?;
-            ensure!(
-                next.get("parent").and_then(Value::as_str) == Some(key),
-                InvalidExport
-            );
+        if explicit_children {
+            let children = node
+                .get("children")
+                .and_then(Value::as_array)
+                .ok_or(InvalidExport)?;
+            let mut unique_children = HashSet::new();
+            for child in children {
+                let child = child.as_str().ok_or(InvalidExport)?;
+                ensure!(unique_children.insert(child), InvalidExport);
+                let next = mapping.get(child).ok_or(InvalidExport)?;
+                ensure!(
+                    next.get("parent").and_then(Value::as_str) == Some(key),
+                    InvalidExport
+                );
+            }
         }
         match node.get("parent") {
             Some(Value::Null) => roots.push(key.as_str()),
             Some(Value::String(parent)) => {
-                let siblings = mapping
-                    .get(parent)
-                    .and_then(|n| n.get("children"))
-                    .and_then(Value::as_array)
-                    .ok_or(InvalidExport)?;
-                ensure!(
-                    siblings.iter().any(|id| id.as_str() == Some(key)),
-                    InvalidExport
-                );
+                ensure!(mapping.contains_key(parent), InvalidExport);
+                derived_children
+                    .entry(parent.as_str())
+                    .or_default()
+                    .push(key.as_str());
+                if explicit_children {
+                    let siblings = mapping
+                        .get(parent)
+                        .and_then(|n| n.get("children"))
+                        .and_then(Value::as_array)
+                        .ok_or(InvalidExport)?;
+                    ensure!(
+                        siblings.iter().any(|id| id.as_str() == Some(key)),
+                        InvalidExport
+                    );
+                }
             }
             _ => return Err(InvalidExport.into()),
         }
@@ -200,13 +230,17 @@ fn active_lineage(export: &Value) -> anyhow::Result<Vec<&Value>> {
     let mut stack = vec![roots[0]];
     while let Some(id) = stack.pop() {
         ensure!(visited.insert(id), InvalidExport);
-        stack.extend(
-            mapping[id]["children"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|id| id.as_str().unwrap()),
-        );
+        if explicit_children {
+            stack.extend(
+                mapping[id]["children"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|id| id.as_str().unwrap()),
+            );
+        } else if let Some(children) = derived_children.get(id) {
+            stack.extend(children.iter().copied());
+        }
     }
     ensure!(visited.len() == mapping.len(), InvalidExport);
     ensure!(mapping.contains_key(end), InvalidExport);

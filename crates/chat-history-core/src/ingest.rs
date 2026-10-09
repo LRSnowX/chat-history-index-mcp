@@ -548,13 +548,31 @@ impl IndexService {
         let conn = open_database(&self.managed_db_path())?;
         let tx = conn.unchecked_transaction()?;
         let canonical = canonical_detail(&tx, conversation_id)?;
-        crate::continuation::baseline(&canonical.detail, canonical.native_export_provenance)
+        crate::continuation::baseline(&canonical.detail, canonical.trusted_export_provenance)
     }
 
     pub fn native_export_provenance_for_detail(
         &self,
         conversation_id: &str,
         raw_json: Option<&Value>,
+    ) -> anyhow::Result<bool> {
+        self.export_provenance_for_detail(conversation_id, raw_json, false)
+    }
+
+    /// Includes audited historical restoration, anchored in DB mode and raw hash.
+    pub fn trusted_export_provenance_for_detail(
+        &self,
+        conversation_id: &str,
+        raw_json: Option<&Value>,
+    ) -> anyhow::Result<bool> {
+        self.export_provenance_for_detail(conversation_id, raw_json, true)
+    }
+
+    fn export_provenance_for_detail(
+        &self,
+        conversation_id: &str,
+        raw_json: Option<&Value>,
+        historical: bool,
     ) -> anyhow::Result<bool> {
         let Some(raw_json) = raw_json else {
             return Ok(false);
@@ -574,7 +592,9 @@ impl IndexService {
             )
             .optional()?;
         Ok(provenance.is_some_and(|(stored_sha256, import_mode)| {
-            stored_sha256 == raw_sha256 && matches!(import_mode.as_str(), "adopt" | "copy")
+            stored_sha256 == raw_sha256
+                && (matches!(import_mode.as_str(), "adopt" | "copy")
+                    || historical && import_mode == "historical_restore")
         }))
     }
 
@@ -589,7 +609,7 @@ impl IndexService {
         let normalized = crate::continuation::verify_replay(
             detail,
             request,
-            canonical.native_export_provenance,
+            canonical.trusted_export_provenance,
         )?;
         let check_observation = || -> anyhow::Result<()> {
             let state = crate::ChatGptSyncState::load(&self.data_home)?;
@@ -615,7 +635,8 @@ impl IndexService {
         );
         let run_id = self.insert_run(&tx, "verified_continuation", Some(Path::new(label)))?;
         ensure!(
-            write_conversation_in_transaction(&tx, &prepared)? == ConversationWriteOutcome::Written,
+            write_conversation_in_transaction_verified(&tx, &prepared, true)?
+                == ConversationWriteOutcome::Written,
             "Continuation publication rejected"
         );
         // Same derived-index/job invalidation as normal imports, with FTS updated atomically.
@@ -634,6 +655,40 @@ impl IndexService {
         check_observation()?;
         tx.commit()?;
         // Sync-state is deliberately not cleared here: caller does so ONLY after publication.
+        Ok(report)
+    }
+
+    pub(crate) fn publish_history_restore(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        normalized: NormalizedConversation,
+        evidence: &ManagedArchive,
+        source: &Path,
+    ) -> anyhow::Result<ImportReport> {
+        use crate::history_restore::RestoreCode;
+        tx.execute("INSERT INTO archives (archive_path,source_path,sha256_hex,size_bytes,import_mode) VALUES (?1,?2,?3,?4,'historical_restore')",params![evidence.path.display().to_string(),source.display().to_string(),evidence.sha256_hex,evidence.size_bytes as i64])?;
+        let notes = normalized.raw["chim_historical_restore"].clone();
+        let mut prepared =
+            PreparedConversation::from_normalized(tx.last_insert_rowid(), normalized)?;
+        prepared.archive_member = "chim-historical-transcript-evidence-v1".to_string();
+        prepared.source_member = "source-files.json".to_string();
+        let run = self.insert_run(tx, "historical_restore", Some(&evidence.path))?;
+        ensure!(
+            write_conversation_in_transaction(tx, &prepared)? == ConversationWriteOutcome::Written,
+            RestoreCode::PublicationFailed
+        );
+        tx.execute(
+            "DELETE FROM conversation_fts WHERE conversation_id=?1",
+            params![prepared.conversation_id],
+        )?;
+        tx.execute("INSERT INTO conversation_fts (conversation_id,title,transcript_text,summary_text,topic_tags) SELECT conversation_id,title,transcript_text,COALESCE(json_extract(summary_json,'$.abstract_text'),''),COALESCE(topic_tags_json,'[]') FROM conversations WHERE conversation_id=?1",params![prepared.conversation_id])?;
+        let report = ImportReport {
+            archive_path: evidence.path.clone(),
+            conversations_indexed: 1,
+            messages_indexed: prepared.messages.len(),
+            ..ImportReport::default()
+        };
+        tx.execute("UPDATE runs SET status='complete',completed_at=CURRENT_TIMESTAMP,counters_json=?2,notes_json=?3 WHERE id=?1",params![run,serde_json::to_string(&report)?,notes.to_string()])?;
         Ok(report)
     }
 
@@ -665,7 +720,7 @@ impl IndexService {
         let mut normalized = crate::export_continuation::verify_export(
             &canonical.detail,
             expected,
-            canonical.native_export_provenance,
+            canonical.trusted_export_provenance,
             export,
         )?;
         let require_live_block = || -> anyhow::Result<()> {
@@ -1376,6 +1431,39 @@ fn write_conversation_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     prepared: &PreparedConversation,
 ) -> anyhow::Result<ConversationWriteOutcome> {
+    write_conversation_in_transaction_verified(tx, prepared, false)
+}
+
+fn write_conversation_in_transaction_verified(
+    tx: &rusqlite::Transaction<'_>,
+    prepared: &PreparedConversation,
+    verified_live: bool,
+) -> anyhow::Result<ConversationWriteOutcome> {
+    // Only the validated G-B publication path may resolve a pending restoration.
+    // Ordinary imports must not erase the marker and manufacture verified proof.
+    let pending: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT raw_conversation_zstd FROM conversations WHERE conversation_id=?1",
+            params![prepared.conversation_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if !verified_live && let Some(blob) = pending {
+        let old: Value = serde_json::from_slice(&decode_all(blob.as_slice())?)?;
+        if old.get("chim_historical_restore").is_some_and(|m| {
+            m.get("requires_live_verification").and_then(Value::as_bool) != Some(false)
+        }) {
+            let incoming: Value =
+                serde_json::from_slice(&decode_all(prepared.raw_conversation_zstd.as_slice())?)?;
+            ensure!(
+                incoming.get("chim_historical_restore").is_some_and(|m| m
+                    .get("requires_live_verification")
+                    .and_then(Value::as_bool)
+                    == Some(true)),
+                crate::history_restore::RestoreCode::PublicationFailed
+            );
+        }
+    }
     let existing: Option<(String, String, Option<String>)> = tx
         .query_row(
             "SELECT title, transcript_text, parent_conversation_id FROM conversations WHERE conversation_id = ?1",
@@ -2188,36 +2276,55 @@ fn load_conversation(
     .map_err(Into::into)
 }
 
-struct CanonicalContinuationDetail {
-    detail: ConversationDetail,
-    native_export_provenance: bool,
+pub(crate) struct CanonicalContinuationDetail {
+    pub(crate) detail: ConversationDetail,
+    pub(crate) trusted_export_provenance: bool,
+    pub(crate) provenance: crate::history_restore::Provenance,
 }
 
-fn canonical_detail(
+pub(crate) fn canonical_detail(
     conn: &Connection,
     conversation_id: &str,
 ) -> anyhow::Result<CanonicalContinuationDetail> {
     let conversation = load_conversation(conn, conversation_id)?
         .ok_or_else(|| anyhow!("Canonical conversation not found"))?;
-    let (blob, import_mode): (Vec<u8>, String) = conn.query_row(
+    let (blob, import_mode, stored_hash): (Vec<u8>, String, String) = conn.query_row(
         r#"
-        SELECT c.raw_conversation_zstd, a.import_mode
+        SELECT c.raw_conversation_zstd, a.import_mode, c.raw_json_sha256_hex
         FROM conversations c
         JOIN archives a ON a.id = c.archive_id
         WHERE c.conversation_id = ?1
         "#,
         params![conversation_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
+    let raw: Value = serde_json::from_slice(&decode_all(blob.as_slice())?)?;
+    ensure!(
+        hex::encode(Sha256::digest(serde_json::to_vec(&raw)?)) == stored_hash,
+        "Canonical raw hash mismatch"
+    );
+    let provenance = match import_mode.as_str() {
+        "copy" | "adopt" => crate::history_restore::Provenance::NativeExport,
+        "historical_restore" => crate::history_restore::Provenance::HistoricalRestore,
+        _ if raw.get("collector").and_then(Value::as_str) == Some("chatgpt-app-bridge-v1") => {
+            crate::history_restore::Provenance::Bridge
+        }
+        _ => crate::history_restore::Provenance::Unknown,
+    };
     Ok(CanonicalContinuationDetail {
         detail: ConversationDetail {
             conversation,
             messages: load_messages(conn, conversation_id)?,
-            raw_json: Some(serde_json::from_slice(&decode_all(blob.as_slice())?)?),
+            raw_json: Some(raw),
             summary_json: None,
             attachments: Vec::new(),
         },
-        native_export_provenance: matches!(import_mode.as_str(), "adopt" | "copy"),
+        trusted_export_provenance: matches!(
+            provenance,
+            crate::history_restore::Provenance::NativeExport
+                | crate::history_restore::Provenance::HistoricalRestore
+        ),
+        provenance,
     })
 }
 
@@ -2378,7 +2485,7 @@ where
     }
 }
 
-fn stream_json_array<R, F, T>(reader: R, callback: &mut F) -> anyhow::Result<()>
+pub(crate) fn stream_json_array<R, F, T>(reader: R, callback: &mut F) -> anyhow::Result<()>
 where
     R: Read,
     F: FnMut(T) -> anyhow::Result<()>,

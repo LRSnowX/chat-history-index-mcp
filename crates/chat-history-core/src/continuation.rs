@@ -94,7 +94,7 @@ impl RepairDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ContinuationBaseline {
     pub conversation_id: String,
     pub source_thread_id: String,
@@ -113,7 +113,7 @@ pub struct ContinuationImport {
 
 pub fn baseline(
     detail: &ConversationDetail,
-    native_export_provenance: bool,
+    trusted_export_provenance: bool,
 ) -> anyhow::Result<ContinuationBaseline> {
     let c = &detail.conversation;
     ensure!(
@@ -135,7 +135,7 @@ pub fn baseline(
     let trusted_bridge =
         raw.get("collector").and_then(serde_json::Value::as_str) == Some("chatgpt-app-bridge-v1");
     ensure!(
-        trusted_bridge || native_export_provenance,
+        trusted_bridge || trusted_export_provenance,
         "Canonical snapshot has no trusted complete-import provenance"
     );
     let mut ids = std::collections::HashSet::new();
@@ -158,9 +158,9 @@ pub fn baseline(
 pub(crate) fn verify_baseline(
     detail: &ConversationDetail,
     expected: &ContinuationBaseline,
-    native_export_provenance: bool,
+    trusted_export_provenance: bool,
 ) -> anyhow::Result<ContinuationBaseline> {
-    let current = baseline(detail, native_export_provenance)?;
+    let current = baseline(detail, trusted_export_provenance)?;
     ensure!(
         current.baseline_token == expected.baseline_token
             && current.conversation_id == expected.conversation_id
@@ -175,9 +175,9 @@ pub(crate) fn verify_baseline(
 pub fn verify_replay(
     detail: &ConversationDetail,
     request: &ContinuationImport,
-    native_export_provenance: bool,
+    trusted_export_provenance: bool,
 ) -> anyhow::Result<NormalizedConversation> {
-    let current = verify_baseline(detail, &request.baseline, native_export_provenance)?;
+    let current = verify_baseline(detail, &request.baseline, trusted_export_provenance)?;
     let before = &request.provider_before;
     let after = &request.provider_after;
     let provider_revision = before
@@ -287,6 +287,12 @@ pub fn verify_replay(
     // A successful full identity replay is a complete bridge publication even
     // when its trusted historical prefix originally came from a native export.
     normalized.raw["collector"] = serde_json::json!("chatgpt-app-bridge-v1");
+    if let Some(marker) = normalized.raw.get_mut("chim_historical_restore") {
+        ensure!(marker.is_object(), RepairFailureCode::ReplayIncomplete);
+        marker["requires_live_verification"] = serde_json::json!(false);
+        marker["verified_by"] = serde_json::json!(CONTINUATION_METHOD);
+        marker["verification_provider_revision"] = serde_json::json!(provider_revision);
+    }
     normalized.raw["chim_continuation"] = serde_json::json!({"method":CONTINUATION_METHOD,"baseline_token":current.baseline_token,"provider_before":before,"provider_after":after,"appended_messages":normalized.messages.len()-detail.messages.len()});
     Ok(normalized)
 }
@@ -309,7 +315,7 @@ pub fn continuation_proof(
     health: &ConversationSourceHealth,
     offset: usize,
     returned: usize,
-    native_export_provenance: bool,
+    trusted_export_provenance: bool,
 ) -> ContinuationProof {
     let final_message = detail.messages.last();
     let reaches_end = returned > 0 && offset.checked_add(returned) == Some(detail.messages.len());
@@ -324,8 +330,18 @@ pub fn continuation_proof(
             && m.message_id.len() <= 256
             && m.turn_index == detail.messages.len() as i64 - 1
     });
-    let trusted = baseline(detail, native_export_provenance).is_ok();
-    let verified = eligible && reaches_end && bounded_identity && trusted;
+    let trusted = baseline(detail, trusted_export_provenance).is_ok();
+    let unresolved_restore = detail
+        .raw_json
+        .as_ref()
+        .and_then(|raw| raw.get("chim_historical_restore"))
+        .is_some_and(|marker| {
+            marker
+                .get("requires_live_verification")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+        });
+    let verified = eligible && reaches_end && bounded_identity && trusted && !unresolved_restore;
     ContinuationProof {
         state: if verified { "verified" } else { "unverified" }.to_string(),
         indexed_revision: health.indexed_revision, provider_revision: health.provider_revision, observed_at: health.observed_at,

@@ -660,16 +660,19 @@ impl ChatHistoryMcp {
             .collect::<Vec<_>>();
         let summary = detail.conversation.summary.clone();
         let source_health = self.conversation_source_health(&detail.conversation);
-        let native_export_provenance = self
+        let trusted_export_provenance = self
             .service
-            .native_export_provenance_for_detail(&request.conversation_id, detail.raw_json.as_ref())
+            .trusted_export_provenance_for_detail(
+                &request.conversation_id,
+                detail.raw_json.as_ref(),
+            )
             .map_err(|error| error.to_string())?;
         let continuation_proof = chat_history_core::continuation::continuation_proof(
             &detail,
             &source_health,
             offset,
             messages.len(),
-            native_export_provenance,
+            trusted_export_provenance,
         );
         Ok(Json(MemoryThreadResponse {
             thread: Some(MemoryThread {
@@ -992,9 +995,9 @@ impl ChatHistoryMcp {
                     })
                     .collect::<Vec<_>>();
                 let source_health = self.conversation_source_health(&detail.conversation);
-                let native_export_provenance = self
+                let trusted_export_provenance = self
                     .service
-                    .native_export_provenance_for_detail(
+                    .trusted_export_provenance_for_detail(
                         &candidate.conversation_id,
                         detail.raw_json.as_ref(),
                     )
@@ -1004,7 +1007,7 @@ impl ChatHistoryMcp {
                     &source_health,
                     offset,
                     messages.len(),
-                    native_export_provenance,
+                    trusted_export_provenance,
                 );
                 let continuation = MemoryContinuation {
                     conversation_id: detail.conversation.conversation_id,

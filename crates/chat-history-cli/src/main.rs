@@ -121,6 +121,20 @@ enum Command {
         #[arg(long, default_value_t = true, action = ArgAction::Set)]
         embed: bool,
     },
+    /// Read-only, digest-bound historical gap restoration plan (no provider calls).
+    ChatgptHistoryRestorePlan {
+        #[arg(long = "source", required = true)]
+        sources: Vec<PathBuf>,
+        #[arg(long)]
+        title_prefix: String,
+    },
+    /// Apply exactly one previously planned conversation; never clears live state.
+    ChatgptHistoryRestoreApply {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        conversation_id: String,
+    },
     /// Record one bounded content-free failure without removing the original blocker.
     ChatgptRecordRepairFailure {
         thread_id: String,
@@ -731,6 +745,32 @@ async fn main() -> anyhow::Result<()> {
             };
             print_json(
                 &serde_json::json!({"status":"awaiting_live_verification","import":report,"embeddings_completed":embeddings_completed}),
+            )?;
+        }
+        Command::ChatgptHistoryRestorePlan {
+            sources,
+            title_prefix,
+        } => {
+            let plan = service
+                .history_restore_plan(&sources, &title_prefix)
+                .map_err(|error| {
+                    error
+                        .downcast_ref::<chat_history_core::history_restore::RestoreCode>()
+                        .copied()
+                        .unwrap_or(chat_history_core::history_restore::RestoreCode::InvalidPlan)
+                })?;
+            print_json(&plan)?;
+        }
+        Command::ChatgptHistoryRestoreApply {
+            plan,
+            conversation_id,
+        } => {
+            let plan: chat_history_core::history_restore::RestorePlan =
+                read_json_document(&plan, None)
+                    .map_err(|_| chat_history_core::history_restore::RestoreCode::InvalidPlan)?;
+            let report = service.apply_history_restore(&plan, &conversation_id)?;
+            print_json(
+                &serde_json::json!({"status":"awaiting_live_verification","import":report}),
             )?;
         }
         Command::ChatgptRecordRepairFailure { thread_id, code } => {
