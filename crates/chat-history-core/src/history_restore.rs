@@ -103,6 +103,13 @@ pub struct RestorePlan {
     pub entries: Vec<RestoreEntry>,
     pub truncated: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PendingHistoryRestore {
+    pub conversation_id: String,
+    pub title: String,
+    pub update_time: Option<f64>,
+}
 struct EvidenceFile {
     name: String,
     bytes: Vec<u8>,
@@ -496,6 +503,35 @@ fn reconcile(
 }
 
 impl IndexService {
+    pub fn pending_history_restores(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PendingHistoryRestore>> {
+        ensure!((1..=64).contains(&limit), RestoreCode::InvalidPlan);
+        let conn = Connection::open_with_flags(
+            self.managed_db_path(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT c.conversation_id, c.title, c.update_time
+            FROM conversations c
+            JOIN archives a ON a.id = c.archive_id
+            WHERE c.source = 'chatgpt' AND a.import_mode = 'historical_restore'
+            ORDER BY c.update_time DESC, c.conversation_id
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok(PendingHistoryRestore {
+                conversation_id: row.get(0)?,
+                title: row.get(1)?,
+                update_time: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn history_restore_plan(
         &self,
         paths: &[PathBuf],

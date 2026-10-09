@@ -391,26 +391,78 @@ function markBlocked(threadId, reason) {
   return cliJson(["chatgpt-block", threadId, "--reason", reason]);
 }
 
-async function repairContinuation(client, threadId, contextThreadId) {
+function pendingHistoricalRestores(limit = 16) {
+  const result = cliJson(["chatgpt-history-restore-pending", "--limit", String(limit)]);
+  return Array.isArray(result.pending) ? result.pending : [];
+}
+
+function recordProviderObservation(thread) {
+  const input = JSON.stringify(thread);
+  return cliJson([
+    "chatgpt-observe-thread",
+    "--path", "-",
+    "--stdin-bytes", String(Buffer.byteLength(input)),
+  ], input);
+}
+
+async function observeReadThread(client, threadId, contextThreadId, fallbackProviderState) {
+  const payload = toolText(await client.callTool("read_thread", {
+    threadId,
+    turnLimit: 1,
+    includeOutputs: false,
+    maxOutputCharsPerItem: 256,
+  }, contextThreadId));
+  const metadata = payload.thread ?? {};
+  if (metadata.id !== threadId || !Number.isFinite(metadata.updatedAt)) {
+    throw new PermanentIncompleteError(
+      "read_thread provider identity or revision is unavailable",
+      "PROVIDER_CHANGED",
+    );
+  }
+  const directStatus = typeof metadata.status === "string" ? metadata.status : null;
+  const fallbackStatus = fallbackProviderState?.conflicted === false
+    && fallbackProviderState?.status === "idle"
+    ? "idle"
+    : null;
+  const status = directStatus ?? fallbackStatus;
+  if (status !== "idle") {
+    throw new PermanentIncompleteError(
+      "read_thread provider is not proven idle",
+      "PROVIDER_CHANGED",
+    );
+  }
+  return bridgeThread({
+    id: threadId,
+    kind: "chatgpt",
+    title: metadata.title ?? "",
+    createdAt: metadata.createdAt,
+    updatedAt: metadata.updatedAt,
+    status,
+  }, Date.now() / 1000);
+}
+
+async function repairContinuation(client, threadId, contextThreadId, fallbackProviderState = null) {
   const baseline = cliJson(["chatgpt-continuation-baseline", threadId]);
-  const observe = async () => {
-    const catalog = toolText(await client.callTool("list_threads", { limit: DISCOVERY_LIMIT }, contextThreadId));
-    const observedAt = Date.now() / 1000;
-    const entries = [...(catalog.threads ?? []), ...(catalog.pinnedThreads ?? [])].filter((entry) => entry.id === threadId);
-    const snapshot = { requested_limit: DISCOVERY_LIMIT,
-      threads: (catalog.threads ?? []).map((entry) => bridgeThread(entry, observedAt)),
-      pinned_threads: (catalog.pinnedThreads ?? []).map((entry) => bridgeThread(entry, observedAt)) };
-    const input = JSON.stringify(snapshot);
-    cliJson(["chatgpt-plan-recent", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))], input);
-    if (!entries.length || entries.some((entry) => entry.kind !== "chatgpt" || entry.status !== "idle" || !Number.isFinite(entry.updatedAt) || entry.updatedAt !== entries[0].updatedAt)) {
-      throw new PermanentIncompleteError("continuation provider is absent, contradictory or non-idle", "PROVIDER_CHANGED");
-    }
-    return bridgeThread(entries[0], observedAt);
-  };
-  const providerBefore = await observe();
+  const providerBefore = await observeReadThread(
+    client,
+    threadId,
+    contextThreadId,
+    fallbackProviderState,
+  );
   const transcript = await readCompleteThread(client, threadId, contextThreadId, providerBefore.update_time);
-  const providerAfter = await observe();
-  if (providerBefore.update_time !== providerAfter.update_time) throw new PermanentIncompleteError("provider changed across continuation replay", "PROVIDER_CHANGED");
+  const providerAfter = await observeReadThread(
+    client,
+    threadId,
+    contextThreadId,
+    fallbackProviderState,
+  );
+  if (providerBefore.update_time !== providerAfter.update_time) {
+    throw new PermanentIncompleteError(
+      "provider changed across continuation replay",
+      "PROVIDER_CHANGED",
+    );
+  }
+  recordProviderObservation(providerAfter);
   const input = JSON.stringify({ baseline, provider_before: providerBefore, provider_after: providerAfter, transcript });
   cliJson(["chatgpt-repair-continuation", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))], input);
   return transcript;
@@ -1008,6 +1060,18 @@ async function syncWithClient(client, contextThreadId) {
     const selected = planned.plan?.selected ?? [];
     const repairIds = planned.plan?.skipped_blocked_ids ?? [];
     for (const threadId of repairIds) selected.push({ thread_id: threadId, continuation_repair: true });
+    const selectedIds = new Set(selected.map((entry) => entry.thread_id));
+    for (const restore of pendingHistoricalRestores(16)) {
+      if (selectedIds.has(restore.conversation_id)) continue;
+      selected.push({
+        thread_id: restore.conversation_id,
+        title: restore.title,
+        update_time: restore.update_time,
+        continuation_repair: true,
+        historical_restore_verification: true,
+      });
+      selectedIds.add(restore.conversation_id);
+    }
     if (selected.length === 0) {
       return {
         event: "chatgpt_live_sync",
@@ -1026,13 +1090,20 @@ async function syncWithClient(client, contextThreadId) {
     const importedConversationIds = [];
     for (const pending of selected) {
       const providerState = providerStateById.get(pending.thread_id);
-      if (providerState == null || providerState.conflicted || providerState.status !== "idle") {
+      const restoreVerification = pending.historical_restore_verification === true;
+      if (
+        (!restoreVerification && (providerState == null || providerState.conflicted || providerState.status !== "idle"))
+        || (restoreVerification && (
+          providerState?.conflicted === true
+          || (providerState?.status != null && providerState.status !== "idle")
+        ))
+      ) {
         deferredActive += 1;
         continue;
       }
       try {
         const transcript = pending.continuation_repair
-          ? await repairContinuation(client, pending.thread_id, contextThreadId)
+          ? await repairContinuation(client, pending.thread_id, contextThreadId, providerState)
           : await readCompleteThread(client, pending.thread_id, contextThreadId);
         if (!pending.continuation_repair) importTranscript(transcript);
         imported += 1;
@@ -1044,6 +1115,16 @@ async function syncWithClient(client, contextThreadId) {
             event: "chatgpt_live_rate_limited", imported, pending: pending.thread_id,
             conversation_ids: importedConversationIds,
           };
+          if (restoreVerification && !providerStateById.has(pending.thread_id)) {
+            appendLog(ERROR_LOG_PATH, {
+              event: "chatgpt_live_restore_verification_deferred",
+              thread_id: pending.thread_id.slice(0, 256),
+              code: repairFailureCode(error),
+              reason: "Historical restore live verification was not proven",
+            });
+            blocked += 1;
+            continue;
+          }
           const diagnostic = recordRepairFailure(pending.thread_id, error);
           appendLog(ERROR_LOG_PATH, {
             event: "chatgpt_live_repair_rejected", thread_id: pending.thread_id.slice(0, 256),

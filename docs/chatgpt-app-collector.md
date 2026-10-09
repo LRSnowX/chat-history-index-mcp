@@ -230,9 +230,16 @@ provider-truncated old item can prove identity/order only and its trusted body,
 raw message and timestamp are retained. Every new item must have a stable
 provider ID and complete accessible body. Synthetic fallback IDs, missing or
 reordered overlap, duplicates, edits, inaccessible items and incomplete cursor
-chains fail closed. Pre/post `list_threads` observations must agree on idle
-status and revision; every replay page must carry the same thread identity and
-revision. Missing/contradictory/unknown statuses are not reinterpreted as safe.
+chains fail closed. Transcript revision stability is established on one provider
+surface: a bounded `read_thread` pre-observation, the full paginated replay and a
+second bounded `read_thread` post-observation must agree on thread identity,
+eligible idle status and revision, and every replay page must carry that same
+revision. `list_threads` remains discovery/status evidence but its `updatedAt`
+is not required to equal `read_thread.updatedAt`; the two App Tools surfaces can
+lag by sub-second or multi-second intervals. After the stable post-observation,
+the collector persists that exact `read_thread` revision through the existing
+G-A provider-observation structure without changing discovery cursor, pending or
+blocked state. Missing/contradictory/unknown statuses are not reinterpreted as safe.
 
 An immediate SQLite transaction rechecks the baseline and durable observation,
 publishes the canonical append, snapshots/audit run, FTS and normal derivative
@@ -437,7 +444,10 @@ this marker is unresolved. Ordinary imports cannot erase/resolve it; a successfu
 normal full G-B identity/order replay alone resolves it while preserving restored
 bodies (including oversized/truncated live overlaps). MCP thread/continuation
 responses consume the audited provenance and retain their existing read-only schema.
-No MCP write tool, model compilation, live-provider call or deployment is added.
+The live collector reads a bounded list of current `historical_restore` canonicals
+whose marker still requires verification and feeds them through the same G-B replay;
+this is proof completion, not another historical restore or a discovery-state
+mutation. No MCP write tool or model compilation is added.
 Real private-export planning/restoration and provider acceptance remain separate
 operator review steps.
 

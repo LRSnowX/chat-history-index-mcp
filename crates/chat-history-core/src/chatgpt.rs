@@ -221,6 +221,45 @@ impl ChatGptSyncState {
         Ok(target)
     }
 
+    pub fn observe_thread(&mut self, thread: &ChatGptBridgeThread) -> anyhow::Result<()> {
+        ensure!(
+            thread.kind == "chatgpt",
+            "provider observation must be ChatGPT"
+        );
+        ensure!(
+            !thread.thread_id.is_empty() && thread.thread_id.len() <= 256,
+            "provider observation has invalid thread id"
+        );
+        ensure!(
+            thread.update_time.is_some_and(|value| value.is_finite()),
+            "provider observation is missing a finite update_time"
+        );
+        ensure!(
+            thread.observed_at.is_some_and(|value| value.is_finite()),
+            "provider observation is missing observed_at"
+        );
+        if let Some(status) = thread.status.as_deref() {
+            ensure!(
+                status.len() <= 64,
+                "provider observation status is too long"
+            );
+        }
+        let observation = ChatGptProviderObservation {
+            provider_title: if thread.title.len() <= 512 {
+                Some(thread.title.clone())
+            } else {
+                None
+            },
+            provider_revision: thread.update_time,
+            provider_status: thread.status.clone(),
+            observed_at: thread.observed_at,
+        };
+        self.provider_observations
+            .insert(thread.thread_id.clone(), observation);
+        self.bound_observations();
+        Ok(())
+    }
+
     pub fn plan_recent(
         &mut self,
         snapshot: ChatGptThreadListSnapshot,
@@ -846,6 +885,52 @@ mod tests {
             ConversationSourceHealthState::Unknown
         );
         assert_eq!(state.provider_observations.len(), MAX_PROVIDER_OBSERVATIONS);
+    }
+
+    #[test]
+    fn direct_provider_observation_does_not_mutate_discovery_lifecycle() {
+        let mut state = ChatGptSyncState {
+            last_successful_update_time: Some(100.0),
+            active_high_watermark: Some(120.0),
+            discovery_overflow: true,
+            ..ChatGptSyncState::default()
+        };
+        state.pending.insert(
+            "pending".to_string(),
+            ChatGptPendingThread {
+                thread_id: "pending".to_string(),
+                title: "pending".to_string(),
+                create_time: None,
+                update_time: 110.0,
+            },
+        );
+        state.mark_blocked("blocked", "existing blocker");
+        state
+            .completed_since_cursor
+            .insert("done".to_string(), 90.0);
+        let pending = state.pending.clone();
+        let blocked = state.blocked.clone();
+        let completed = state.completed_since_cursor.clone();
+
+        state
+            .observe_thread(&thread("direct", "chatgpt", 130.0))
+            .unwrap();
+        assert_eq!(state.last_successful_update_time, Some(100.0));
+        assert_eq!(state.active_high_watermark, Some(120.0));
+        assert!(state.discovery_overflow);
+        assert_eq!(state.pending, pending);
+        assert_eq!(state.blocked, blocked);
+        assert_eq!(state.completed_since_cursor, completed);
+        let observation = &state.provider_observations["direct"];
+        assert_eq!(observation.provider_revision, Some(130.0));
+        assert_eq!(observation.provider_status.as_deref(), Some("idle"));
+
+        assert!(
+            state
+                .observe_thread(&thread("wrong-source", "codex", 140.0))
+                .is_err()
+        );
+        assert!(!state.provider_observations.contains_key("wrong-source"));
     }
 
     fn thread(id: &str, kind: &str, updated: f64) -> ChatGptBridgeThread {

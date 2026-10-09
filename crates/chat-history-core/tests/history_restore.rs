@@ -406,6 +406,14 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
         state_before
     );
     let restored = service.get_conversation(ID, true).unwrap().unwrap();
+    assert_eq!(
+        service.pending_history_restores(16).unwrap(),
+        vec![chat_history_core::history_restore::PendingHistoryRestore {
+            conversation_id: ID.to_string(),
+            title: TITLE.to_string(),
+            update_time: Some(20.0),
+        }]
+    );
     let health = state.source_health("chatgpt", ID, Some(20.0));
     assert_eq!(
         health.state,
@@ -439,6 +447,7 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
         true
     );
     service.import_verified_continuation(&request).unwrap();
+    assert!(service.pending_history_restores(16).unwrap().is_empty());
     let verified = service.get_conversation(ID, true).unwrap().unwrap();
     assert_eq!(
         serde_json::to_value(&verified.messages).unwrap(),

@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, ensure};
 use chat_history_core::{
-    ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot,
+    ChatGptBridgeThread, ChatGptBridgeTranscript, ChatGptSyncState, ChatGptThreadListSnapshot,
     CollaborationMemoryAuthoringInput, CollaborationMemoryRetirementInput,
     DEFAULT_MEMORY_COMPILER_MESSAGES, DEFAULT_MEMORY_PROJECT_MAX_CONVERSATIONS,
     DEFAULT_MEMORY_PROJECT_SCAN_LIMIT, DataHome, ImportMode, ImportOptions, IndexService,
@@ -134,6 +134,18 @@ enum Command {
         plan: PathBuf,
         #[arg(long)]
         conversation_id: String,
+    },
+    /// List unresolved historical restores awaiting live verification.
+    ChatgptHistoryRestorePending {
+        #[arg(long, default_value_t = 16)]
+        limit: usize,
+    },
+    /// Record one provider observation without changing discovery cursor or pending state.
+    ChatgptObserveThread {
+        #[arg(long, default_value = "-")]
+        path: PathBuf,
+        #[arg(long)]
+        stdin_bytes: Option<u64>,
     },
     /// Record one bounded content-free failure without removing the original blocker.
     ChatgptRecordRepairFailure {
@@ -772,6 +784,23 @@ async fn main() -> anyhow::Result<()> {
             print_json(
                 &serde_json::json!({"status":"awaiting_live_verification","import":report}),
             )?;
+        }
+        Command::ChatgptHistoryRestorePending { limit } => {
+            let pending = service.pending_history_restores(limit)?;
+            print_json(&serde_json::json!({"pending":pending}))?;
+        }
+        Command::ChatgptObserveThread { path, stdin_bytes } => {
+            let thread: ChatGptBridgeThread = read_json_document(&path, stdin_bytes)?;
+            let mut state = ChatGptSyncState::load(&data_home)?;
+            state.observe_thread(&thread)?;
+            let state_path = state.save(&data_home)?;
+            print_json(&serde_json::json!({
+                "conversation_id": thread.thread_id,
+                "provider_revision": thread.update_time,
+                "provider_status": thread.status,
+                "observed_at": thread.observed_at,
+                "state_path": state_path
+            }))?;
         }
         Command::ChatgptRecordRepairFailure { thread_id, code } => {
             let code: chat_history_core::continuation::RepairFailureCode =

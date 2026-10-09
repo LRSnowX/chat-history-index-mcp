@@ -151,6 +151,7 @@ import fs from 'node:fs';
 const input = fs.readFileSync(0, 'utf8');
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),input:input ? JSON.parse(input) : null})+'\\n');
 if (process.argv[2] === 'chatgpt-plan-recent') console.log(JSON.stringify({plan:{selected:JSON.parse(input).threads.map(t=>({...t}))}}));
+else if (process.argv[2] === 'chatgpt-history-restore-pending') console.log(JSON.stringify({pending:[]}));
 else console.log('{}');
 `;
     // .mjs target plus a shell-free executable wrapper at the normal CLI path.
@@ -180,8 +181,9 @@ else console.log('{}');
     const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
     assert.deepEqual(calls[0].input.threads.map((thread) => thread.status), ["idle", "active", "unknown", null]);
     assert.ok(calls[0].input.threads.every((thread) => Number.isFinite(thread.observed_at)));
-    assert.equal(calls[1].args[0], "chatgpt-block");
-    assert.match(calls[1].args.at(-1), /safety limit/);
+    const block = calls.find((call) => call.args[0] === "chatgpt-block");
+    assert.ok(block);
+    assert.match(block.args.at(-1), /safety limit/);
     assert.equal(calls.some((call) => call.args[0] === "chatgpt-import-thread"), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -193,7 +195,7 @@ test("collector fails closed when recent and pinned metadata conflict for one th
   try {
     fs.mkdirSync(path.join(root, "bin"), { recursive: true });
     const callsPath = path.join(root, "calls.jsonl");
-    const cli = `#!${process.execPath}\nimport fs from 'node:fs';\nconst input = fs.readFileSync(0, 'utf8');\nfs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),input:JSON.parse(input)})+'\\n');\nconsole.log(JSON.stringify({plan:{selected:[JSON.parse(input).threads[0]]}}));\n`;
+    const cli = `#!${process.execPath}\nimport fs from 'node:fs';\nconst input = fs.readFileSync(0, 'utf8');\nconst parsed=input ? JSON.parse(input) : null;\nfs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),input:parsed})+'\\n');\nif(process.argv[2]==='chatgpt-history-restore-pending') console.log(JSON.stringify({pending:[]})); else console.log(JSON.stringify({plan:{selected:[parsed.threads[0]]}}));\n`;
     fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
     fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), cli, { mode: 0o755 });
     const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
@@ -216,7 +218,9 @@ test("collector fails closed when recent and pinned metadata conflict for one th
     assert.deepEqual(output.reads, []);
     assert.equal(output.result.imported, 0);
     assert.equal(output.result.deferred_active, 1);
-    const call = JSON.parse(fs.readFileSync(callsPath, "utf8").trim());
+    const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
+    const call = calls.find((entry) => entry.args[0] === "chatgpt-plan-recent");
+    assert.ok(call);
     assert.equal(call.input.threads[0].observed_at, call.input.pinned_threads[0].observed_at);
     assert.ok(Number.isFinite(call.input.threads[0].observed_at));
   } finally {
@@ -246,33 +250,46 @@ test("continuation collector uses an auditable repair path with pre/post idle ob
 import fs from 'node:fs';
 const input = fs.readFileSync(0, 'utf8');
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),input:input ? JSON.parse(input) : null})+'\\n');
-console.log(JSON.stringify(process.argv[2] === 'chatgpt-continuation-baseline' ? {conversation_id:'thread',baseline_token:'test-baseline'} : {plan:{selected:[],skipped_blocked_ids:['thread']}}));
+const command=process.argv[2];
+console.log(JSON.stringify(command === 'chatgpt-continuation-baseline'
+  ? {conversation_id:'thread',baseline_token:'test-baseline'}
+  : command === 'chatgpt-history-restore-pending'
+    ? {pending:[]}
+    : command === 'chatgpt-observe-thread'
+      ? {}
+      : {plan:{selected:[],skipped_blocked_ids:['thread']}}));
 `, { mode: 0o755 });
     const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
-    for (const scenario of ["success", "sync", "revision", "active", "unknown", "missing", "page_changed", "contradictory"]) {
+    for (const scenario of ["success", "sync", "revision", "active", "unknown", "missing", "page_changed"]) {
       fs.writeFileSync(callsPath, "");
       const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
         import { repairContinuation, syncWithClient } from ${JSON.stringify(collector)};
         const scenario = ${JSON.stringify(scenario)};
-        let observations = 0;
+        let readsSeen = 0;
         const reads = [];
         const client = { async callTool(name,args) {
           let payload;
           if (name === 'list_threads') {
-            observations++;
-            const entry = {id:'thread',kind:'chatgpt',title:'synthetic',updatedAt:20,status:'idle'};
-            if (observations === 2) {
-              if (scenario === 'revision') entry.updatedAt=21;
-              if (scenario === 'active' || scenario === 'unknown') entry.status=scenario;
-            }
-            payload={threads:observations === 2 && scenario === 'missing' ? [] : [entry]};
-            if (observations === 2 && scenario === 'contradictory') payload.pinnedThreads=[{...entry,updatedAt:21}];
+            payload={threads:[{id:'thread',kind:'chatgpt',title:'synthetic',updatedAt:19.5,status:'idle'}]};
           } else {
             reads.push(args);
-            payload={thread:{id:'thread',title:'synthetic',updatedAt:scenario === 'page_changed' ? 21 : 20},
-              page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[
-                {type:'userMessage',id:'old',content:[{type:'text',text:'x'.repeat(19990)}]},
-                {type:'agentMessage',id:'new',text:'complete new tail'}]}]};
+            readsSeen++;
+            const observationRead = args.includeOutputs === false;
+            const postObservation = observationRead && readsSeen >= 3;
+            const thread={id:'thread',title:'synthetic',updatedAt:20,status:'idle'};
+            if (scenario === 'missing' && observationRead) delete thread.id;
+            if (scenario === 'revision' && postObservation) thread.updatedAt=21;
+            if (scenario === 'active' && postObservation) thread.status='active';
+            if (scenario === 'unknown' && postObservation) thread.status='unknown';
+            if (observationRead) {
+              payload={thread,page:{order:'newest_first',hasMore:true,nextCursor:'unused'},turns:[]};
+            } else {
+              if (scenario === 'page_changed') thread.updatedAt=21;
+              payload={thread,
+                page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[
+                  {type:'userMessage',id:'old',content:[{type:'text',text:'x'.repeat(19990)}]},
+                  {type:'agentMessage',id:'new',text:'complete new tail'}]}]};
+            }
           }
           return {content:[{type:'text',text:JSON.stringify(payload)}]};
         }};
@@ -280,7 +297,7 @@ console.log(JSON.stringify(process.argv[2] === 'chatgpt-continuation-baseline' ?
           if (scenario === 'sync') {
             const result=await syncWithClient(client,'context');
             if (result.imported !== 1) throw new Error('blocked thread did not reach repair');
-          } else await repairContinuation(client,'thread','context');
+          } else await repairContinuation(client,'thread','context',{status:'idle',revision:19.5,conflicted:false});
           console.log(JSON.stringify({ok:true,reads}));
         }
         catch(error) { console.log(JSON.stringify({ok:false,message:error.message,reads})); }
@@ -289,21 +306,24 @@ console.log(JSON.stringify(process.argv[2] === 'chatgpt-continuation-baseline' ?
       const output = JSON.parse(child.stdout);
       const successful = scenario === "success" || scenario === "sync";
       assert.equal(output.ok, successful, scenario);
-      assert.equal(output.reads[0].maxOutputCharsPerItem, 20_000);
-      assert.equal(output.reads[0].includeOutputs, true);
+      const fullRead = output.reads.find((read) => read.includeOutputs === true);
+      if (scenario !== "missing") {
+        assert.equal(fullRead?.maxOutputCharsPerItem, 20_000);
+      }
       const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
-      assert.equal(calls[0].args[0], scenario === "sync" ? "chatgpt-plan-recent" : "chatgpt-continuation-baseline");
       const repair = calls.find((call) => call.args[0] === "chatgpt-repair-continuation");
       assert.equal(Boolean(repair), successful, scenario);
       assert.equal(calls.some((call) => call.args[0] === "chatgpt-import-thread" || call.args[0] === "chatgpt-unblock"), false);
       if (repair) {
         assert.equal(repair.input.provider_before.status, "idle");
         assert.equal(repair.input.provider_after.update_time, 20);
+        assert.equal(repair.input.transcript.update_time, 20);
         assert.ok(repair.input.provider_after.observed_at >= repair.input.provider_before.observed_at);
         assert.equal(repair.input.transcript.pages[0].messages[1].truncated, true);
         assert.ok(repair.input.transcript.pages[0].messages.every((message) => message.stable_identity));
+        assert.equal(calls.some((call) => call.args[0] === "chatgpt-observe-thread"), true);
       }
-      if (scenario !== "page_changed") assert.equal(calls.filter((call) => call.args[0] === "chatgpt-plan-recent").length, scenario === "sync" ? 3 : 2);
+      assert.equal(calls.filter((call) => call.args[0] === "chatgpt-plan-recent").length, scenario === "sync" ? 1 : 0);
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
