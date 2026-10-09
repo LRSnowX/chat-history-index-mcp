@@ -287,9 +287,13 @@ and publish **only** its active visible messages. Off-selection siblings or
 descendants are not flattened into canonical history or validated as active
 transcript content. Their structure and identities must still be coherent.
 
-Active messages must be complete (`finished_successfully`). Recognized assistant
-`thoughts` and `reasoning_recap` nodes, the null root, and existing empty system
-scaffold are non-visible; unknown internal/visible types are not silently skipped.
+Completion metadata is schema-sensitive but fail-closed. Legacy exports that carry
+message `status` fields require every active message to be
+`finished_successfully`. Newer official exports may omit `status` only when the
+entire mapping is statusless; a mixed mapping cannot use a missing active status
+as a completeness bypass. Recognized assistant `thoughts` and
+`reasoning_recap` nodes, the null root, and existing empty system scaffold are
+non-visible; unknown internal/visible types are not silently skipped.
 Supported visible content is user/assistant `text`, user text with file-attachment
 metadata, and user `multimodal_text` containing image asset pointers plus text.
 Unsupported active tool/audio/video content, mixed image/file payloads, malformed

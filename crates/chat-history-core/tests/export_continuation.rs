@@ -536,6 +536,48 @@ fn current_node_is_an_active_selection_boundary_not_a_graph_leaf() {
 }
 
 #[test]
+fn statusless_modern_export_is_accepted_but_mixed_completion_schema_is_rejected() {
+    let (temp, service, mut export) = modern_fixture();
+    for node in export["mapping"].as_object_mut().unwrap().values_mut() {
+        if let Some(message) = node.get_mut("message").and_then(Value::as_object_mut) {
+            message.remove("status");
+        }
+    }
+    let archive = temp.path().join("modern-statusless.zip");
+    write_archive(&archive, &json!([export]).to_string());
+    service
+        .import_export_continuation(&service.continuation_baseline(ID).unwrap(), &archive)
+        .unwrap();
+    assert_eq!(
+        service
+            .get_conversation(ID, false)
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        15
+    );
+
+    let (temp, service, mut mixed) = modern_fixture();
+    mixed["mapping"]["node-12"]["message"]
+        .as_object_mut()
+        .unwrap()
+        .remove("status");
+    let before = serde_json::to_value(service.get_conversation(ID, true).unwrap()).unwrap();
+    let archive = temp.path().join("modern-mixed-status.zip");
+    write_archive(&archive, &json!([mixed]).to_string());
+    assert!(
+        service
+            .import_export_continuation(&service.continuation_baseline(ID).unwrap(), &archive)
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(service.get_conversation(ID, true).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn modern_graph_and_visible_content_failures_cannot_mutate_canonical() {
     for case in 0..20 {
         let (temp, service, mut export) = modern_fixture();

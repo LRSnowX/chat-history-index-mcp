@@ -42,15 +42,32 @@ pub(crate) fn verify_export(
         revision > current.indexed_revision,
         RepairFailureCode::StaleExport
     );
+    let lineage = active_lineage(&export)?;
+    let mapping = export
+        .get("mapping")
+        .and_then(Value::as_object)
+        .ok_or(RepairFailureCode::InvalidExport)?;
+    // OpenAI's newer official export schema omits message.status globally.
+    // Treat that as one explicit export-wide mode, not as a per-message escape
+    // hatch: if any message in the mapping carries a status field, every active
+    // message must retain the legacy finished_successfully marker.
+    let statusless_export = mapping.values().all(|node| match node.get("message") {
+        Some(Value::Null) | None => true,
+        Some(Value::Object(message)) => !message.contains_key("status"),
+        Some(_) => false,
+    });
     let mut messages = Vec::new();
-    for node in active_lineage(&export)? {
+    for node in lineage {
         match node.get("message") {
             Some(Value::Null) if node["parent"].is_null() => {}
             Some(message @ Value::Object(_)) => {
-                ensure!(
-                    message.get("status").and_then(Value::as_str) == Some("finished_successfully"),
-                    RepairFailureCode::InvalidExport
-                );
+                if !statusless_export {
+                    ensure!(
+                        message.get("status").and_then(Value::as_str)
+                            == Some("finished_successfully"),
+                        RepairFailureCode::InvalidExport
+                    );
+                }
                 let Some(projection) = visible_projection(message)? else {
                     continue;
                 };
