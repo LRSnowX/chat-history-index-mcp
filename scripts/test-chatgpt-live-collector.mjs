@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   NativeAppToolsClient,
+  acquirePidLock,
   appendMemoryCompilerHistory,
   bridgeMessages,
   bridgeThread,
@@ -20,6 +21,63 @@ import {
   readMemoryCompilerHistory,
   safeScheduleMemoryCompiler,
 } from "./chatgpt-live-collector.mjs";
+
+test("pid lock release cannot delete successor ownership", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-pid-lock-owner-"));
+  const lock = path.join(root, "daemon.lock");
+  try {
+    const release = acquirePidLock(lock);
+    assert.equal(typeof release, "function");
+    fs.writeFileSync(path.join(lock, "pid"), `${process.pid + 1}\n`);
+    release();
+    assert.equal(fs.existsSync(lock), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon bootstrap fails closed while a predecessor remains alive", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-daemon-predecessor-"));
+  const stubborn = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"], {
+    stdio: "ignore",
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      stubborn.once("spawn", resolve);
+      stubborn.once("error", reject);
+    });
+    const lock = path.join(root, "cache", "chatgpt-live-collector-daemon.lock");
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "pid"), `${stubborn.pid}\n`);
+    const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+    const probe = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { ensureDaemonReady } from ${JSON.stringify(collector)};
+      try {
+        await ensureDaemonReady();
+        console.log("unexpected-success");
+        process.exitCode = 2;
+      } catch (error) {
+        console.log(String(error?.message ?? error));
+      }
+    `], {
+      encoding: "utf8",
+      timeout: 6_000,
+      env: {
+        ...process.env,
+        CHAT_HISTORY_DATA_HOME: root,
+        CODEX_APP_TOOLS_PIPE_PATH: path.join(root, "synthetic-app-tools.sock"),
+      },
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.match(probe.stdout, /did not stop cleanly/);
+    assert.equal(Number(fs.readFileSync(path.join(lock, "pid"), "utf8").trim()), stubborn.pid);
+    assert.doesNotThrow(() => process.kill(stubborn.pid, 0));
+  } finally {
+    stubborn.kill("SIGKILL");
+    await new Promise((resolve) => stubborn.once("exit", resolve));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function encodeNativeFrame(message) {
   const body = Buffer.from(JSON.stringify(message), "utf8");

@@ -943,7 +943,15 @@ function acquirePidLock(lock) {
     try {
       fs.mkdirSync(lock);
       fs.writeFileSync(path.join(lock, "pid"), `${process.pid}\n`, { mode: 0o600 });
-      return () => fs.rmSync(lock, { recursive: true, force: true });
+      return () => {
+        let ownerPid = null;
+        try {
+          ownerPid = Number(fs.readFileSync(path.join(lock, "pid"), "utf8").trim());
+        } catch {}
+        if (ownerPid === process.pid) {
+          fs.rmSync(lock, { recursive: true, force: true });
+        }
+      };
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       let existingPid = null;
@@ -1203,30 +1211,35 @@ async function ensureDaemonReady() {
   const pipePath = process.env.CODEX_APP_TOOLS_PIPE_PATH?.trim();
   if (!pipePath) throw new Error("CODEX_APP_TOOLS_PIPE_PATH is not available to the collector bootstrap");
   const expectedPipeIdentity = pipeIdentity(pipePath);
+  let pid = null;
   try {
-    const pid = Number(fs.readFileSync(path.join(DAEMON_LOCK, "pid"), "utf8").trim());
-    if (pidAlive(pid)) {
-      let status = null;
-      try {
-        status = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8"));
-      } catch {}
-      if (
-        status?.pid === pid
-        && status?.state === "running"
-        && status?.pipe_connected === true
-        && status?.pipe_identity === expectedPipeIdentity
-      ) {
-        return pid;
-      }
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {}
-      const deadline = Date.now() + 2_000;
-      while (Date.now() < deadline && pidAlive(pid)) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-    }
+    pid = Number(fs.readFileSync(path.join(DAEMON_LOCK, "pid"), "utf8").trim());
   } catch {}
+
+  if (pidAlive(pid)) {
+    let status = null;
+    try {
+      status = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8"));
+    } catch {}
+    if (
+      status?.pid === pid
+      && status?.state === "running"
+      && status?.pipe_connected === true
+      && status?.pipe_identity === expectedPipeIdentity
+    ) {
+      return pid;
+    }
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && pidAlive(pid)) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (pidAlive(pid)) {
+      throw new Error(`existing collector daemon ${pid} did not stop cleanly`);
+    }
+  }
   fs.rmSync(DAEMON_LOCK, { recursive: true, force: true });
   const child = spawn(process.execPath, [process.argv[1], "--daemon"], {
     detached: true,
@@ -1402,6 +1415,7 @@ if (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]
 
 export {
   NativeAppToolsClient,
+  acquirePidLock,
   bridgeMessages,
   bridgeThread,
   ensureDaemonReady,
