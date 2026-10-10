@@ -269,6 +269,7 @@ function toolText(result) {
 function classifyToolResultError(message) {
   const text = String(message ?? "");
   if (/too many requests|rate.?limit|\b429\b/iu.test(text)) return "rate_limited";
+  if (/chat history.*(?:still )?loading|history is still loading/iu.test(text)) return "loading";
   if (/not found|does not exist|unknown thread|missing thread/iu.test(text)) return "not_found";
   if (/archiv|unavailable|cannot be read|not accessible|inaccessible/iu.test(text)) return "unavailable";
   if (/invalid.*argument|invalid.*request|bad request|malformed/iu.test(text)) return "invalid_arguments";
@@ -1377,13 +1378,17 @@ async function syncWithClient(client, contextThreadId) {
             .has(error.verificationStage)
           ? error.verificationStage
           : "UNKNOWN";
-        if (/App Tools request timed out:/u.test(String(error?.message ?? ""))) {
+        if (
+          /App Tools request timed out:/u.test(String(error?.message ?? ""))
+          || error?.toolResultCategory === "loading"
+        ) {
           appendLog(ERROR_LOG_PATH, {
             event: "chatgpt_live_restore_verification_deferred",
             thread_id: restore.thread_id.slice(0, 256),
             code: repairFailureCode(error),
+            error_class: verificationErrorClass(error),
             stage,
-            reason: "Historical restore verification hit a transient App Tools timeout",
+            reason: "Historical restore verification hit a transient App Tools availability state",
           });
           return {
             event: "chatgpt_live_restore_verification_deferred",
@@ -1870,6 +1875,7 @@ export {
   bridgeMessages,
   bridgeThread,
   buildSelectedQueue,
+  classifyToolResultError,
   historicalRestoreCandidate,
   ensureDaemonReady,
   memoryAutoConfig,

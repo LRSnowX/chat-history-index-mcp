@@ -13,6 +13,7 @@ import {
   bridgeMessages,
   bridgeThread,
   buildSelectedQueue,
+  classifyToolResultError,
   historicalRestoreCandidate,
   memoryCompilerHistorySummary,
   memoryAutoConfig,
@@ -63,6 +64,10 @@ test("verification diagnostics classify failures without exposing message text",
     verificationErrorClass(new Error("thread not found: PRIVATE_TITLE")),
     "tool_result_not_found",
   );
+  assert.equal(classifyToolResultError("Chat history is still loading."), "loading");
+  const loading = new Error("generic");
+  loading.toolResultCategory = "loading";
+  assert.equal(verificationErrorClass(loading), "tool_result_loading");
   const bounded = new Error("PRIVATE_TITLE");
   bounded.verificationDetail = "revision_mismatch";
   assert.equal(verificationDetailClass(bounded), "revision_mismatch");
@@ -454,6 +459,22 @@ else console.log('{}');
     assert.equal(repair.input.transcript_before.status,null);
     assert.equal(repair.input.transcript_after.status,null);
     assert.equal(calls.some((call)=>call.args[0]==="chatgpt-observe-thread"),false);
+
+    const loadingChild = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { syncWithClient } from ${JSON.stringify(collector)};
+      const client={async callTool(name,args){
+        if(name==='read_thread') return {isError:true,content:[{type:'text',text:'Chat history is still loading.'}]};
+        return {content:[{type:'text',text:JSON.stringify({threads:[]})}]};
+      }};
+      const result=await syncWithClient(client,'context');
+      console.log(JSON.stringify(result));
+    `], { encoding:"utf8", env:{...process.env,CHAT_HISTORY_DATA_HOME:root} });
+    assert.equal(loadingChild.status,0,loadingChild.stderr);
+    const loadingResult=JSON.parse(loadingChild.stdout);
+    assert.equal(loadingResult.event,"chatgpt_live_restore_verification_deferred");
+    assert.equal(loadingResult.imported,0);
+    assert.equal(loadingResult.blocked,0);
+    assert.equal(loadingResult.deferred_active,1);
   } finally {
     fs.rmSync(root,{recursive:true,force:true});
   }
