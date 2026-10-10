@@ -459,6 +459,49 @@ else console.log('{}');
   }
 });
 
+test("rejected historical restore rotates to the next candidate on the following poll", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-historical-rotate-"));
+  try {
+    fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+    fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
+    fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), `#!${process.execPath}
+import fs from 'node:fs';
+const command=process.argv[2];
+if(command==='chatgpt-history-restore-pending') console.log(JSON.stringify({pending:[
+  {conversation_id:'restore-a',title:'A',update_time:20},
+  {conversation_id:'restore-b',title:'B',update_time:19}
+]}));
+else if(command==='chatgpt-continuation-baseline') console.log(JSON.stringify({conversation_id:process.argv[3],source_thread_id:process.argv[3],indexed_revision:20,total_messages:1,baseline_token:'test'}));
+else if(command==='chatgpt-plan-recent') console.log(JSON.stringify({plan:{selected:[],skipped_blocked_ids:[]}}));
+else console.log('{}');
+`, { mode: 0o755 });
+    const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import fs from 'node:fs';
+      import { syncWithClient } from ${JSON.stringify(collector)};
+      const calls=[];
+      const client={async callTool(name,args){
+        calls.push({name,id:args.threadId??null});
+        if(name==='read_thread') return {isError:true,resultShape:{keys:['contentItems','success'],content_types:['inputText']},content:[{type:'text',text:'synthetic refusal'}]};
+        return {content:[{type:'text',text:JSON.stringify({threads:[]})}]};
+      }};
+      const first=await syncWithClient(client,'context');
+      fs.mkdirSync(${JSON.stringify(path.join(root,"cache"))},{recursive:true});
+      fs.writeFileSync(${JSON.stringify(path.join(root,"cache/chatgpt-live-collector-status.json"))},JSON.stringify({last_result:first}));
+      const second=await syncWithClient(client,'context');
+      console.log(JSON.stringify({first,second,calls}));
+    `], { encoding:"utf8", env:{...process.env,CHAT_HISTORY_DATA_HOME:root} });
+    assert.equal(child.status,0,child.stderr);
+    const output=JSON.parse(child.stdout);
+    assert.equal(output.first.pending,"restore-a");
+    assert.equal(output.second.pending,"restore-b");
+    assert.equal(output.first.blocked,1);
+    assert.equal(output.second.blocked,1);
+  } finally {
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
 test("synthetic fallback item identities cannot prove continuation", () => {
   const messages = bridgeMessages({ id: "turn", status: "completed", items: [{ type: "agentMessage", text: "no source ID" }] });
   assert.equal(messages[0].stable_identity, false);

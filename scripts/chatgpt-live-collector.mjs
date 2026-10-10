@@ -540,12 +540,11 @@ function pendingHistoricalRestores(limit = 16) {
   return Array.isArray(result.pending) ? result.pending : [];
 }
 
-function priorRateLimitedThread() {
+function priorAttemptedThread() {
   try {
     const status = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8"));
     const result = status?.last_result;
-    return result?.event === "chatgpt_live_rate_limited"
-      && typeof result.pending === "string"
+    return typeof result?.pending === "string"
       && result.pending.length <= 256
       ? result.pending
       : null;
@@ -1342,10 +1341,10 @@ async function syncWithClient(client, contextThreadId) {
   const releaseLock = acquireLock();
   if (releaseLock == null) return { event: "chatgpt_live_sync_skipped", reason: "locked" };
   try {
-    const previousRateLimited = priorRateLimitedThread();
+    const previousAttempted = priorAttemptedThread();
     const restore = historicalRestoreCandidate(
       pendingHistoricalRestores(16),
-      previousRateLimited,
+      previousAttempted,
     );
     if (restore != null) {
       try {
@@ -1413,6 +1412,7 @@ async function syncWithClient(client, contextThreadId) {
           imported: 0,
           blocked: 1,
           deferred_active: 0,
+          pending: restore.thread_id,
           titles: [],
           conversation_ids: [],
         };
@@ -1451,7 +1451,7 @@ async function syncWithClient(client, contextThreadId) {
     const selected = buildSelectedQueue(
       ordinarySelected,
       repairIds,
-      previousRateLimited,
+      previousAttempted,
     );
     if (selected.length === 0) {
       return {
