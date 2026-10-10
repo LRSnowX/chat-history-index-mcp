@@ -417,8 +417,8 @@ function rotateAfterThread(entries, threadId) {
   return [...entries.slice(index + 1), ...entries.slice(0, index + 1)];
 }
 
-function buildSelectedQueue(ordinarySelected, repairIds, restores, previousRateLimited) {
-  const restoreCandidates = rotateAfterThread(
+function historicalRestoreCandidate(restores, previousRateLimited) {
+  return rotateAfterThread(
     restores.map((restore) => ({
       thread_id: restore.conversation_id,
       title: restore.title,
@@ -427,9 +427,12 @@ function buildSelectedQueue(ordinarySelected, repairIds, restores, previousRateL
       historical_restore_verification: true,
     })),
     previousRateLimited,
-  );
-  const selected = restoreCandidates.slice(0, 1);
-  const selectedIds = new Set(selected.map((entry) => entry.thread_id));
+  )[0] ?? null;
+}
+
+function buildSelectedQueue(ordinarySelected, repairIds, previousRateLimited) {
+  const selected = [];
+  const selectedIds = new Set();
   const repairEntries = rotateAfterThread(
     repairIds.map((threadId) => ({ thread_id: threadId, continuation_repair: true })),
     previousRateLimited,
@@ -1194,6 +1197,77 @@ async function syncWithClient(client, contextThreadId) {
   const releaseLock = acquireLock();
   if (releaseLock == null) return { event: "chatgpt_live_sync_skipped", reason: "locked" };
   try {
+    const previousRateLimited = priorRateLimitedThread();
+    const restore = historicalRestoreCandidate(
+      pendingHistoricalRestores(16),
+      previousRateLimited,
+    );
+    if (restore != null) {
+      try {
+        const transcript = await repairContinuation(
+          client,
+          restore.thread_id,
+          contextThreadId,
+          null,
+          true,
+        );
+        return {
+          event: "chatgpt_live_sync",
+          imported: 1,
+          blocked: 0,
+          deferred_active: 0,
+          titles: [transcript.title],
+          conversation_ids: [restore.thread_id],
+        };
+      } catch (error) {
+        if (isRateLimit(error)) {
+          return {
+            event: "chatgpt_live_rate_limited",
+            imported: 0,
+            pending: restore.thread_id,
+            conversation_ids: [],
+          };
+        }
+        const stage = typeof error?.verificationStage === "string"
+          && new Set(["BASELINE", "READ_PRE", "FULL_REPLAY", "READ_POST", "PUBLICATION"])
+            .has(error.verificationStage)
+          ? error.verificationStage
+          : "UNKNOWN";
+        if (/App Tools request timed out:/u.test(String(error?.message ?? ""))) {
+          appendLog(ERROR_LOG_PATH, {
+            event: "chatgpt_live_restore_verification_deferred",
+            thread_id: restore.thread_id.slice(0, 256),
+            code: repairFailureCode(error),
+            stage,
+            reason: "Historical restore verification hit a transient App Tools timeout",
+          });
+          return {
+            event: "chatgpt_live_restore_verification_deferred",
+            imported: 0,
+            blocked: 0,
+            deferred_active: 1,
+            pending: restore.thread_id,
+            conversation_ids: [],
+          };
+        }
+        appendLog(ERROR_LOG_PATH, {
+          event: "chatgpt_live_restore_verification_rejected",
+          thread_id: restore.thread_id.slice(0, 256),
+          code: repairFailureCode(error),
+          stage,
+          reason: "Historical restore direct transcript verification was not proven",
+        });
+        return {
+          event: "chatgpt_live_sync",
+          imported: 0,
+          blocked: 1,
+          deferred_active: 0,
+          titles: [],
+          conversation_ids: [],
+        };
+      }
+    }
+
     const catalog = toolText(await client.callTool("list_threads", { limit: DISCOVERY_LIMIT }, contextThreadId));
     const observedAt = Date.now() / 1000;
     const providerStateById = new Map();
@@ -1223,15 +1297,9 @@ async function syncWithClient(client, contextThreadId) {
     ], snapshotText);
     const ordinarySelected = planned.plan?.selected ?? [];
     const repairIds = planned.plan?.skipped_blocked_ids ?? [];
-    const previousRateLimited = priorRateLimitedThread();
-    // Historical verification is intentionally throttled to one candidate per
-    // poll. This guarantees progress without turning a single daemon cycle into
-    // a burst of large read_thread replays that immediately re-triggers App
-    // Tools rate limits.
     const selected = buildSelectedQueue(
       ordinarySelected,
       repairIds,
-      pendingHistoricalRestores(16),
       previousRateLimited,
     );
     if (selected.length === 0) {
@@ -1252,14 +1320,7 @@ async function syncWithClient(client, contextThreadId) {
     const importedConversationIds = [];
     for (const pending of selected) {
       const providerState = providerStateById.get(pending.thread_id);
-      const restoreVerification = pending.historical_restore_verification === true;
-      if (
-        (!restoreVerification && (providerState == null || providerState.conflicted || providerState.status !== "idle"))
-        || (restoreVerification && (
-          providerState?.conflicted === true
-          || (providerState?.status != null && providerState.status !== "idle")
-        ))
-      ) {
+      if (providerState == null || providerState.conflicted || providerState.status !== "idle") {
         deferredActive += 1;
         continue;
       }
@@ -1270,7 +1331,7 @@ async function syncWithClient(client, contextThreadId) {
             pending.thread_id,
             contextThreadId,
             providerState,
-            restoreVerification,
+            false,
           )
           : await readCompleteThread(client, pending.thread_id, contextThreadId);
         if (!pending.continuation_repair) importTranscript(transcript);
@@ -1283,22 +1344,6 @@ async function syncWithClient(client, contextThreadId) {
             event: "chatgpt_live_rate_limited", imported, pending: pending.thread_id,
             conversation_ids: importedConversationIds,
           };
-          if (restoreVerification) {
-            const stage = typeof error?.verificationStage === "string"
-              && new Set(["BASELINE", "READ_PRE", "FULL_REPLAY", "READ_POST", "PUBLICATION"])
-                .has(error.verificationStage)
-              ? error.verificationStage
-              : "UNKNOWN";
-            appendLog(ERROR_LOG_PATH, {
-              event: "chatgpt_live_restore_verification_rejected",
-              thread_id: pending.thread_id.slice(0, 256),
-              code: repairFailureCode(error),
-              stage,
-              reason: "Historical restore direct transcript verification was not proven",
-            });
-            blocked += 1;
-            continue;
-          }
           const diagnostic = recordRepairFailure(pending.thread_id, error);
           appendLog(ERROR_LOG_PATH, {
             event: "chatgpt_live_repair_rejected", thread_id: pending.thread_id.slice(0, 256),
@@ -1674,6 +1719,7 @@ export {
   bridgeMessages,
   bridgeThread,
   buildSelectedQueue,
+  historicalRestoreCandidate,
   ensureDaemonReady,
   memoryAutoConfig,
   memoryAutoHealthGate,

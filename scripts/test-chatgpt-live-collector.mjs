@@ -13,6 +13,7 @@ import {
   bridgeMessages,
   bridgeThread,
   buildSelectedQueue,
+  historicalRestoreCandidate,
   memoryCompilerHistorySummary,
   memoryAutoConfig,
   memoryAutoHealthGate,
@@ -33,21 +34,15 @@ test("collector scheduling prioritizes one restore and rotates a rate-limited pe
     { thread_id: "ordinary-a" },
     { thread_id: "ordinary-b" },
   ];
+  assert.equal(historicalRestoreCandidate(restores, null)?.thread_id, "restore-a");
+  assert.equal(historicalRestoreCandidate(restores, "restore-a")?.thread_id, "restore-b");
   assert.deepEqual(
-    buildSelectedQueue(ordinary, repairs, restores, null).map((entry) => entry.thread_id),
-    ["restore-a", "repair-a", "repair-b", "ordinary-a", "ordinary-b"],
+    buildSelectedQueue(ordinary, repairs, "repair-a").map((entry) => entry.thread_id),
+    ["repair-b", "repair-a", "ordinary-a", "ordinary-b"],
   );
   assert.deepEqual(
-    buildSelectedQueue(ordinary, repairs, restores, "restore-a").map((entry) => entry.thread_id),
-    ["restore-b", "repair-a", "repair-b", "ordinary-a", "ordinary-b"],
-  );
-  assert.deepEqual(
-    buildSelectedQueue(ordinary, repairs, restores, "repair-a").map((entry) => entry.thread_id),
-    ["restore-a", "repair-b", "repair-a", "ordinary-a", "ordinary-b"],
-  );
-  assert.deepEqual(
-    buildSelectedQueue(ordinary, repairs, restores, "ordinary-a").map((entry) => entry.thread_id),
-    ["restore-a", "repair-a", "repair-b", "ordinary-b", "ordinary-a"],
+    buildSelectedQueue(ordinary, repairs, "ordinary-a").map((entry) => entry.thread_id),
+    ["repair-a", "repair-b", "ordinary-b", "ordinary-a"],
   );
 });
 
@@ -208,8 +203,10 @@ else console.log('{}');
     assert.equal(output.result.blocked, 1);
     assert.equal(output.result.imported, 0);
     const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(calls[0].input.threads.map((thread) => thread.status), ["idle", "active", "unknown", null]);
-    assert.ok(calls[0].input.threads.every((thread) => Number.isFinite(thread.observed_at)));
+    const planCall = calls.find((call) => call.args[0] === "chatgpt-plan-recent");
+    assert.ok(planCall);
+    assert.deepEqual(planCall.input.threads.map((thread) => thread.status), ["idle", "active", "unknown", null]);
+    assert.ok(planCall.input.threads.every((thread) => Number.isFinite(thread.observed_at)));
     const block = calls.find((call) => call.args[0] === "chatgpt-block");
     assert.ok(block);
     assert.match(block.args.at(-1), /safety limit/);
