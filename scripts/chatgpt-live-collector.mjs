@@ -456,6 +456,29 @@ function recordProviderObservation(thread) {
   ], input);
 }
 
+function verificationStage(error, stage) {
+  if (error != null && typeof error === "object" && error.verificationStage == null) {
+    error.verificationStage = stage;
+  }
+  return error;
+}
+
+async function atVerificationStage(stage, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    throw verificationStage(error, stage);
+  }
+}
+
+function atVerificationStageSync(stage, operation) {
+  try {
+    return operation();
+  } catch (error) {
+    throw verificationStage(error, stage);
+  }
+}
+
 async function observeListThread(client, threadId, contextThreadId) {
   const catalog = toolText(await client.callTool(
     "list_threads",
@@ -530,29 +553,44 @@ async function repairContinuation(
   fallbackProviderState = null,
   directHistorical = false,
 ) {
-  const baseline = cliJson(["chatgpt-continuation-baseline", threadId]);
+  const baseline = atVerificationStageSync(
+    "BASELINE",
+    () => cliJson(["chatgpt-continuation-baseline", threadId]),
+  );
   const providerBefore = directHistorical
     ? null
-    : (fallbackProviderState?.thread ?? await observeListThread(client, threadId, contextThreadId));
-  const transcriptBefore = await observeReadThread(
-    client,
-    threadId,
-    contextThreadId,
-    fallbackProviderState,
-    directHistorical,
+    : (fallbackProviderState?.thread ?? await atVerificationStage(
+      "DISCOVERY_PRE",
+      () => observeListThread(client, threadId, contextThreadId),
+    ));
+  const transcriptBefore = await atVerificationStage(
+    "READ_PRE",
+    () => observeReadThread(
+      client,
+      threadId,
+      contextThreadId,
+      fallbackProviderState,
+      directHistorical,
+    ),
   );
-  const transcript = await readCompleteThread(
-    client,
-    threadId,
-    contextThreadId,
-    transcriptBefore.update_time,
+  const transcript = await atVerificationStage(
+    "FULL_REPLAY",
+    () => readCompleteThread(
+      client,
+      threadId,
+      contextThreadId,
+      transcriptBefore.update_time,
+    ),
   );
-  const transcriptAfter = await observeReadThread(
-    client,
-    threadId,
-    contextThreadId,
-    fallbackProviderState,
-    directHistorical,
+  const transcriptAfter = await atVerificationStage(
+    "READ_POST",
+    () => observeReadThread(
+      client,
+      threadId,
+      contextThreadId,
+      fallbackProviderState,
+      directHistorical,
+    ),
   );
   if (transcriptBefore.update_time !== transcriptAfter.update_time) {
     throw new PermanentIncompleteError(
@@ -562,14 +600,17 @@ async function repairContinuation(
   }
   let providerAfter = null;
   if (!directHistorical) {
-    providerAfter = await observeListThread(client, threadId, contextThreadId);
+    providerAfter = await atVerificationStage(
+      "DISCOVERY_POST",
+      () => observeListThread(client, threadId, contextThreadId),
+    );
     if (providerBefore.update_time !== providerAfter.update_time) {
       throw new PermanentIncompleteError(
         "discovery provider changed across continuation replay",
         "PROVIDER_CHANGED",
       );
     }
-    recordProviderObservation(providerAfter);
+    atVerificationStageSync("OBSERVATION", () => recordProviderObservation(providerAfter));
   }
   const input = JSON.stringify({
     verification_scope: directHistorical ? "historical_transcript_direct" : "discovery_aligned",
@@ -580,7 +621,13 @@ async function repairContinuation(
     transcript_after: transcriptAfter,
     transcript,
   });
-  cliJson(["chatgpt-repair-continuation", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))], input);
+  atVerificationStageSync(
+    "PUBLICATION",
+    () => cliJson(
+      ["chatgpt-repair-continuation", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))],
+      input,
+    ),
+  );
   return transcript;
 }
 
@@ -1237,10 +1284,16 @@ async function syncWithClient(client, contextThreadId) {
             conversation_ids: importedConversationIds,
           };
           if (restoreVerification) {
+            const stage = typeof error?.verificationStage === "string"
+              && new Set(["BASELINE", "READ_PRE", "FULL_REPLAY", "READ_POST", "PUBLICATION"])
+                .has(error.verificationStage)
+              ? error.verificationStage
+              : "UNKNOWN";
             appendLog(ERROR_LOG_PATH, {
               event: "chatgpt_live_restore_verification_rejected",
               thread_id: pending.thread_id.slice(0, 256),
               code: repairFailureCode(error),
+              stage,
               reason: "Historical restore direct transcript verification was not proven",
             });
             blocked += 1;
