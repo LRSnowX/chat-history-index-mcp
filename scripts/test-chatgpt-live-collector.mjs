@@ -66,6 +66,12 @@ test("verification diagnostics classify failures without exposing message text",
   assert.equal(verificationDetailClass(bounded), "revision_mismatch");
   bounded.verificationDetail = "PRIVATE_TITLE";
   assert.equal(verificationDetailClass(bounded), null);
+  const toolResult = new Error("generic");
+  toolResult.toolResultCategory = "not_found";
+  assert.equal(verificationErrorClass(toolResult), "tool_result_not_found");
+  const payload = new Error("generic");
+  payload.toolPayloadCategory = "invalid_json";
+  assert.equal(verificationErrorClass(payload), "tool_payload_invalid_json");
 });
 
 test("pid lock release cannot delete successor ownership", () => {

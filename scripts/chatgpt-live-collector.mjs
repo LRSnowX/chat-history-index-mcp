@@ -214,12 +214,38 @@ function selectContextThread() {
 
 function toolText(result) {
   if (result?.isError === true) {
-    const message = (result.content ?? []).filter((item) => item.type === "text").map((item) => item.text).join("\n");
-    throw new Error(message || "ChatGPT App Tool returned an error");
+    const message = (result.content ?? [])
+      .filter((item) => item.type === "text")
+      .map((item) => item.text)
+      .join("\n");
+    const error = new Error("ChatGPT App Tool returned an error");
+    error.toolResultCategory = classifyToolResultError(message);
+    throw error;
   }
   const text = (result?.content ?? []).filter((item) => item.type === "text").map((item) => item.text).join("\n");
-  if (!text) throw new Error("ChatGPT App Tool returned no text payload");
-  return JSON.parse(text);
+  if (!text) {
+    const error = new Error("ChatGPT App Tool returned no text payload");
+    error.toolPayloadCategory = "empty";
+    throw error;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    const error = new Error("ChatGPT App Tool returned invalid JSON");
+    error.toolPayloadCategory = "invalid_json";
+    throw error;
+  }
+}
+
+function classifyToolResultError(message) {
+  const text = String(message ?? "");
+  if (/too many requests|rate.?limit|\b429\b/iu.test(text)) return "rate_limited";
+  if (/not found|does not exist|unknown thread|missing thread/iu.test(text)) return "not_found";
+  if (/archiv|unavailable|cannot be read|not accessible|inaccessible/iu.test(text)) return "unavailable";
+  if (/invalid.*argument|invalid.*request|bad request|malformed/iu.test(text)) return "invalid_arguments";
+  if (/permission|forbidden|unauthorized|access denied/iu.test(text)) return "permission";
+  if (/internal|server error|temporar|try again|unavailable service/iu.test(text)) return "internal";
+  return "unknown";
 }
 
 function bridgeThread(entry, observedAt = null) {
@@ -297,6 +323,12 @@ function repairFailureCode(error) {
 
 function verificationErrorClass(error) {
   const message = String(error?.message ?? "");
+  if (typeof error?.toolResultCategory === "string") {
+    return `tool_result_${error.toolResultCategory}`;
+  }
+  if (typeof error?.toolPayloadCategory === "string") {
+    return `tool_payload_${error.toolPayloadCategory}`;
+  }
   if (error instanceof PermanentIncompleteError) {
     return `permanent_${String(error.repairCode ?? "replay_incomplete").toLowerCase()}`;
   }
@@ -684,7 +716,8 @@ async function repairContinuation(
 }
 
 function isRateLimit(error) {
-  return /too many requests|rate.?limit|429/iu.test(String(error?.message ?? error));
+  return error?.toolResultCategory === "rate_limited"
+    || /too many requests|rate.?limit|429/iu.test(String(error?.message ?? error));
 }
 
 function acquireLock() {
