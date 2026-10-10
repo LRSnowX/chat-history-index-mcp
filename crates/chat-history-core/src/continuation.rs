@@ -246,14 +246,11 @@ pub fn verify_replay(
             && transcript_after.thread_id == current.source_thread_id
             && transcript_after.update_time == Some(transcript_revision)
             && if direct_historical {
-                transcript_before
-                    .status
-                    .as_deref()
-                    .is_none_or(|status| status == "idle")
-                    && transcript_after
+                transcript_after.status == transcript_before.status
+                    && transcript_before
                         .status
                         .as_deref()
-                        .is_none_or(|status| status == "idle")
+                        .is_none_or(|status| matches!(status, "idle" | "not_loaded"))
             } else {
                 transcript_before.status.as_deref() == Some("idle")
                     && transcript_after.status.as_deref() == Some("idle")

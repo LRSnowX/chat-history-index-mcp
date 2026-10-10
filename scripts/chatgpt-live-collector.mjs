@@ -203,6 +203,36 @@ class NativeAppToolsClient {
   }
 }
 
+function isTransientStartupTransportError(error) {
+  const code = String(error?.code ?? "");
+  if (new Set(["EPIPE", "ECONNRESET", "ECONNREFUSED", "ENOENT"]).has(code)) return true;
+  return /pipe closed|write EPIPE|ECONNRESET|ECONNREFUSED|socket hang up/iu
+    .test(String(error?.message ?? ""));
+}
+
+async function connectAppToolsWithRetry(
+  pipePath,
+  timeoutMs = 8_000,
+  shouldStop = () => false,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline && !shouldStop()) {
+    const candidate = new NativeAppToolsClient(pipePath);
+    try {
+      const listed = await candidate.listTools();
+      return { client: candidate, listed };
+    } catch (error) {
+      candidate.close();
+      if (!isTransientStartupTransportError(error)) throw error;
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+  if (shouldStop()) throw new Error("collector daemon stopping during App Tools bootstrap");
+  throw lastError ?? new Error("ChatGPT App Tools did not become ready before bootstrap timeout");
+}
+
 function mustExist(file) {
   if (!fs.existsSync(file)) throw new Error(`required file is missing: ${file}`);
 }
@@ -390,20 +420,35 @@ function verificationDetailClass(error) {
 }
 
 function providerStatusClass(status) {
-  if (status == null) return "missing";
-  const normalized = String(status).toLowerCase();
+  const normalized = normalizeThreadStatus(status);
+  if (normalized == null) return "missing";
   return new Set([
     "idle",
     "active",
-    "completed",
-    "finished_successfully",
-    "archived",
-    "paused",
-    "unknown",
-    "deleted",
+    "not_loaded",
+    "system_error",
   ]).has(normalized)
     ? normalized
     : "other";
+}
+
+function normalizeThreadStatus(status) {
+  if (status == null) return null;
+  const value = typeof status === "object" && typeof status.type === "string"
+    ? status.type
+    : status;
+  if (typeof value !== "string") return "other";
+  switch (value.replace(/[_-]/gu, "").toLowerCase()) {
+    case "idle": return "idle";
+    case "active": return "active";
+    case "notloaded": return "not_loaded";
+    case "systemerror": return "system_error";
+    default: return "other";
+  }
+}
+
+function historicalTranscriptStatusEligible(status) {
+  return status == null || status === "idle" || status === "not_loaded";
 }
 
 function verificationResultShape(error) {
@@ -430,7 +475,14 @@ function recordRepairFailure(threadId, error) {
   return { ...fallback, diagnostic_persisted: false };
 }
 
-async function readCompleteThread(client, threadId, contextThreadId, continuationRevision) {
+async function readCompleteThread(
+  client,
+  threadId,
+  contextThreadId,
+  continuationRevision,
+  continuationStatus = "idle",
+  directHistorical = false,
+) {
   let cursor = null;
   const seenCursors = new Set();
   const pages = [];
@@ -467,13 +519,17 @@ async function readCompleteThread(client, threadId, contextThreadId, continuatio
           "revision_mismatch",
         );
       }
-      if (payload.thread?.status != null && payload.thread.status !== "idle") {
+      const pageStatus = normalizeThreadStatus(payload.thread?.status);
+      const statusEligible = directHistorical
+        ? historicalTranscriptStatusEligible(pageStatus)
+        : pageStatus === "idle";
+      if (!statusEligible || pageStatus !== continuationStatus) {
         const error = new PermanentIncompleteError(
           "provider status changed during continuation replay",
           "PROVIDER_CHANGED",
           "status_mismatch",
         );
-        error.providerStatusClass = providerStatusClass(payload.thread.status);
+        error.providerStatusClass = providerStatusClass(payload.thread?.status);
         throw error;
       }
     }
@@ -671,13 +727,16 @@ async function observeReadThread(
       "PROVIDER_CHANGED",
     );
   }
-  const directStatus = typeof metadata.status === "string" ? metadata.status : null;
+  const directStatus = normalizeThreadStatus(metadata.status);
   const fallbackStatus = fallbackProviderState?.conflicted === false
     && fallbackProviderState?.status === "idle"
     ? "idle"
     : null;
   const status = directStatus ?? fallbackStatus;
-  if ((allowMissingStatus && status != null && status !== "idle") || (!allowMissingStatus && status !== "idle")) {
+  if (
+    (allowMissingStatus && !historicalTranscriptStatusEligible(status))
+    || (!allowMissingStatus && status !== "idle")
+  ) {
     throw new PermanentIncompleteError(
       "read_thread provider is not proven idle",
       "PROVIDER_CHANGED",
@@ -727,6 +786,8 @@ async function repairContinuation(
       threadId,
       contextThreadId,
       transcriptBefore.update_time,
+      transcriptBefore.status,
+      directHistorical,
     ),
   );
   const transcriptAfter = await atVerificationStage(
@@ -1573,19 +1634,21 @@ async function daemonLoop() {
     releaseDaemonLock();
     return;
   }
-  const client = new NativeAppToolsClient(pipePath);
+  let client = null;
   const currentPipeIdentity = pipeIdentity(pipePath);
   let stopping = false;
   let wakeSleep = null;
   const stop = () => {
     stopping = true;
-    client.close();
+    client?.close();
     wakeSleep?.();
   };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   try {
-    const listed = await client.listTools();
+    const connected = await connectAppToolsWithRetry(pipePath, 8_000, () => stopping);
+    client = connected.client;
+    const listed = connected.listed;
     const names = new Set((listed.tools ?? []).map((tool) => tool.name));
     if (!names.has("list_threads") || !names.has("read_thread")) {
       throw new Error("ChatGPT App Tools does not expose list_threads/read_thread");
@@ -1648,7 +1711,7 @@ async function daemonLoop() {
     });
     appendLog(ERROR_LOG_PATH, { event: "chatgpt_live_collector_error", error: detail });
   } finally {
-    client.close();
+    client?.close();
     releaseDaemonLock();
   }
 }
@@ -1878,6 +1941,8 @@ export {
   classifyToolResultError,
   historicalRestoreCandidate,
   ensureDaemonReady,
+  connectAppToolsWithRetry,
+  isTransientStartupTransportError,
   memoryAutoConfig,
   memoryAutoHealthGate,
   memoryAutoTriggerConversationIds,
@@ -1890,6 +1955,7 @@ export {
   readCompleteThread,
   repairContinuation,
   providerStatusClass,
+  normalizeThreadStatus,
   verificationResultShape,
   verificationErrorClass,
   verificationDetailClass,

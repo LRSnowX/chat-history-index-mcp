@@ -455,8 +455,12 @@ the normal G-B list+transcript path is used. If it has fallen outside the bounde
 `list_threads` discovery window, **only** a canonical that still carries the audited
 unresolved `historical_restore` marker may use `historical_transcript_direct`: stable
 direct `read_thread` pre/full/post observations must agree on exact thread ID and
-transcript revision, explicit non-idle status still fails closed, and missing status
-is tolerated because `read_thread` does not consistently expose it. Successful direct
+transcript revision. The app-server thread-status tagged union is normalized before
+comparison: `{type:"idle"}` maps to `idle` and `{type:"notLoaded"}` maps to
+`not_loaded`. Direct historical verification accepts a stable `idle`,
+`not_loaded`, or consistently missing status; `active`, `systemError`, unknown
+status values, or any pre/page/post status transition fail closed. Normal continuation
+still requires `idle`. Successful direct
 verification republishes the canonical under explicit DB provenance
 `archives.import_mode = verified_historical_restore`; continuation proof requires
 that DB-backed trusted provenance together with the bounded verification audit marker.

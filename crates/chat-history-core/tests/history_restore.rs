@@ -527,8 +527,8 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
     let mut direct = request.clone();
     direct.verification_scope =
         chat_history_core::continuation::ContinuationVerificationScope::HistoricalTranscriptDirect;
-    direct.transcript_before.status = None;
-    direct.transcript_after.status = None;
+    direct.transcript_before.status = Some("not_loaded".to_string());
+    direct.transcript_after.status = Some("not_loaded".to_string());
     direct.provider_before = direct.transcript_before.clone();
     direct.provider_after = direct.transcript_after.clone();
     service.import_verified_continuation(&direct).unwrap();

@@ -13,10 +13,13 @@ import {
   bridgeMessages,
   bridgeThread,
   buildSelectedQueue,
+  connectAppToolsWithRetry,
   classifyToolResultError,
   historicalRestoreCandidate,
+  isTransientStartupTransportError,
   memoryCompilerHistorySummary,
   memoryAutoConfig,
+  normalizeThreadStatus,
   memoryAutoHealthGate,
   memoryAutoTriggerConversationIds,
   maybeScheduleMemoryCompiler,
@@ -83,8 +86,10 @@ test("verification diagnostics classify failures without exposing message text",
   rpc.appToolsRpcCategory = "not_found";
   rpc.appToolsRpcCode = "-32601";
   assert.equal(verificationErrorClass(rpc), "app_tools_rpc_not_found");
-  assert.equal(providerStatusClass("completed"), "completed");
-  assert.equal(providerStatusClass("finished_successfully"), "finished_successfully");
+  assert.equal(normalizeThreadStatus({type:"notLoaded"}), "not_loaded");
+  assert.equal(normalizeThreadStatus({type:"systemError"}), "system_error");
+  assert.equal(providerStatusClass({type:"notLoaded"}), "not_loaded");
+  assert.equal(providerStatusClass({type:"active",activeFlags:[]}), "active");
   assert.equal(providerStatusClass("PRIVATE_STATUS"), "other");
   assert.equal(providerStatusClass(null), "missing");
   const shape = new Error("PRIVATE");
@@ -109,6 +114,63 @@ test("pid lock release cannot delete successor ownership", () => {
     assert.equal(fs.existsSync(lock), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startup retry is limited to transport failures", () => {
+  const epipe = new Error("write EPIPE");
+  epipe.code = "EPIPE";
+  assert.equal(isTransientStartupTransportError(epipe), true);
+  const reset = new Error("socket hang up");
+  reset.code = "ECONNRESET";
+  assert.equal(isTransientStartupTransportError(reset), true);
+  assert.equal(isTransientStartupTransportError(new Error("permission denied")), false);
+  assert.equal(isTransientStartupTransportError(new Error("invalid request")), false);
+});
+
+test("App Tools startup reconnects with a fresh client after the first pipe disconnect", async () => {
+  const socketPath = path.join(os.tmpdir(), `chat-history-app-tools-retry-${process.pid}.sock`);
+  fs.rmSync(socketPath, { force: true });
+  let connections = 0;
+  const server = net.createServer((socket) => {
+    connections += 1;
+    if (connections === 1) {
+      socket.once("data", () => socket.destroy());
+      return;
+    }
+    let pending = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      pending = Buffer.concat([pending, chunk]);
+      while (pending.length >= 4) {
+        const size = pending.readUInt32LE(0);
+        if (pending.length < size + 4) return;
+        const request = JSON.parse(pending.subarray(4, size + 4).toString("utf8"));
+        pending = pending.subarray(size + 4);
+        socket.write(encodeNativeFrame({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: request.method === "tools/list"
+            ? { tools: [{ name: "read_thread", namespace: "chatgpt", inputSchema: { type: "object" } }] }
+            : {},
+        }));
+      }
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  try {
+    const { client, listed } = await connectAppToolsWithRetry(socketPath, 2_000);
+    try {
+      assert.ok(connections >= 2);
+      assert.equal(listed.tools[0].name, "read_thread");
+    } finally {
+      client.close();
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(socketPath, { force: true });
   }
 });
 
@@ -439,7 +501,7 @@ else console.log('{}');
         if(name==='list_threads') return {content:[{type:'text',text:JSON.stringify({threads:[]})}]};
         reads++;
         const observation=args.includeOutputs===false;
-        const thread={id:'historical',title:'Archived',updatedAt:30};
+        const thread={id:'historical',title:'Archived',updatedAt:30,status:{type:'notLoaded'}};
         const payload=observation
           ? {thread,page:{order:'newest_first',hasMore:true,nextCursor:'unused'},turns:[]}
           : {thread,page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[{type:'agentMessage',id:'m1',text:'trusted'}]}]};
@@ -456,9 +518,24 @@ else console.log('{}');
     const repair=calls.find((call)=>call.args[0]==="chatgpt-repair-continuation");
     assert.ok(repair);
     assert.equal(repair.input.verification_scope,"historical_transcript_direct");
-    assert.equal(repair.input.transcript_before.status,null);
-    assert.equal(repair.input.transcript_after.status,null);
+    assert.equal(repair.input.transcript_before.status,"not_loaded");
+    assert.equal(repair.input.transcript_after.status,"not_loaded");
     assert.equal(calls.some((call)=>call.args[0]==="chatgpt-observe-thread"),false);
+
+    const activeChild = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { syncWithClient } from ${JSON.stringify(collector)};
+      const client={async callTool(name,args){
+        if(name==='list_threads') return {content:[{type:'text',text:JSON.stringify({threads:[]})}]};
+        const thread={id:'historical',title:'Archived',updatedAt:30,status:{type:'active',activeFlags:[]}};
+        return {content:[{type:'text',text:JSON.stringify({thread,page:{order:'newest_first',hasMore:false},turns:[]})}]};
+      }};
+      const result=await syncWithClient(client,'context');
+      console.log(JSON.stringify(result));
+    `], { encoding:"utf8", env:{...process.env,CHAT_HISTORY_DATA_HOME:root} });
+    assert.equal(activeChild.status,0,activeChild.stderr);
+    const activeResult=JSON.parse(activeChild.stdout);
+    assert.equal(activeResult.imported,0);
+    assert.equal(activeResult.blocked,1);
 
     const loadingChild = spawnSync(process.execPath, ["--input-type=module", "-e", `
       import { syncWithClient } from ${JSON.stringify(collector)};
@@ -552,7 +629,7 @@ console.log(JSON.stringify(args[0]==='chatgpt-continuation-baseline' ? {} : args
         const client={async callTool(name,args) {
           if(name==='read_thread' && process.env.TEST_REPAIR_CODE==='UNKNOWN_PROVIDER_FAILURE') throw new Error('PRIVATE_BODY_SENTINEL'.repeat(2000));
           const payload=name==='list_threads' ? {threads:[{id:'thread',title:'synthetic',kind:'chatgpt',status:'idle',updatedAt:30}]} :
-            {thread:{id:'thread',title:'synthetic',updatedAt:30},page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[{id:'new',type:'agentMessage',text:'complete synthetic body'}]}]};
+            {thread:{id:'thread',title:'synthetic',updatedAt:30,status:{type:'idle'}},page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[{id:'new',type:'agentMessage',text:'complete synthetic body'}]}]};
           return {content:[{type:'text',text:JSON.stringify(payload)}]};
         }};
         console.log(JSON.stringify(await syncWithClient(client,'context')));
