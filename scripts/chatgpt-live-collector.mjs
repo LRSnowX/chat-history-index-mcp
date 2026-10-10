@@ -396,6 +396,57 @@ function pendingHistoricalRestores(limit = 16) {
   return Array.isArray(result.pending) ? result.pending : [];
 }
 
+function priorRateLimitedThread() {
+  try {
+    const status = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8"));
+    const result = status?.last_result;
+    return result?.event === "chatgpt_live_rate_limited"
+      && typeof result.pending === "string"
+      && result.pending.length <= 256
+      ? result.pending
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function rotateAfterThread(entries, threadId) {
+  if (!threadId) return entries;
+  const index = entries.findIndex((entry) => entry.thread_id === threadId);
+  if (index < 0) return entries;
+  return [...entries.slice(index + 1), ...entries.slice(0, index + 1)];
+}
+
+function buildSelectedQueue(ordinarySelected, repairIds, restores, previousRateLimited) {
+  const restoreCandidates = rotateAfterThread(
+    restores.map((restore) => ({
+      thread_id: restore.conversation_id,
+      title: restore.title,
+      update_time: restore.update_time,
+      continuation_repair: true,
+      historical_restore_verification: true,
+    })),
+    previousRateLimited,
+  );
+  const selected = restoreCandidates.slice(0, 1);
+  const selectedIds = new Set(selected.map((entry) => entry.thread_id));
+  const repairEntries = rotateAfterThread(
+    repairIds.map((threadId) => ({ thread_id: threadId, continuation_repair: true })),
+    previousRateLimited,
+  );
+  for (const repair of repairEntries) {
+    if (selectedIds.has(repair.thread_id)) continue;
+    selected.push(repair);
+    selectedIds.add(repair.thread_id);
+  }
+  for (const ordinary of rotateAfterThread([...ordinarySelected], previousRateLimited)) {
+    if (selectedIds.has(ordinary.thread_id)) continue;
+    selected.push(ordinary);
+    selectedIds.add(ordinary.thread_id);
+  }
+  return selected;
+}
+
 function recordProviderObservation(thread) {
   const input = JSON.stringify(thread);
   return cliJson([
@@ -1104,21 +1155,19 @@ async function syncWithClient(client, contextThreadId) {
       "--path", "-",
       "--stdin-bytes", String(Buffer.byteLength(snapshotText)),
     ], snapshotText);
-    const selected = planned.plan?.selected ?? [];
+    const ordinarySelected = planned.plan?.selected ?? [];
     const repairIds = planned.plan?.skipped_blocked_ids ?? [];
-    for (const threadId of repairIds) selected.push({ thread_id: threadId, continuation_repair: true });
-    const selectedIds = new Set(selected.map((entry) => entry.thread_id));
-    for (const restore of pendingHistoricalRestores(16)) {
-      if (selectedIds.has(restore.conversation_id)) continue;
-      selected.push({
-        thread_id: restore.conversation_id,
-        title: restore.title,
-        update_time: restore.update_time,
-        continuation_repair: true,
-        historical_restore_verification: true,
-      });
-      selectedIds.add(restore.conversation_id);
-    }
+    const previousRateLimited = priorRateLimitedThread();
+    // Historical verification is intentionally throttled to one candidate per
+    // poll. This guarantees progress without turning a single daemon cycle into
+    // a burst of large read_thread replays that immediately re-triggers App
+    // Tools rate limits.
+    const selected = buildSelectedQueue(
+      ordinarySelected,
+      repairIds,
+      pendingHistoricalRestores(16),
+      previousRateLimited,
+    );
     if (selected.length === 0) {
       return {
         event: "chatgpt_live_sync",
@@ -1546,6 +1595,7 @@ export {
   acquirePidLock,
   bridgeMessages,
   bridgeThread,
+  buildSelectedQueue,
   ensureDaemonReady,
   memoryAutoConfig,
   memoryAutoHealthGate,

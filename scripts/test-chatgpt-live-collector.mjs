@@ -12,6 +12,7 @@ import {
   appendMemoryCompilerHistory,
   bridgeMessages,
   bridgeThread,
+  buildSelectedQueue,
   memoryCompilerHistorySummary,
   memoryAutoConfig,
   memoryAutoHealthGate,
@@ -21,6 +22,34 @@ import {
   readMemoryCompilerHistory,
   safeScheduleMemoryCompiler,
 } from "./chatgpt-live-collector.mjs";
+
+test("collector scheduling prioritizes one restore and rotates a rate-limited peer", () => {
+  const restores = [
+    { conversation_id: "restore-a", title: "A", update_time: 30 },
+    { conversation_id: "restore-b", title: "B", update_time: 20 },
+  ];
+  const repairs = ["repair-a", "repair-b"];
+  const ordinary = [
+    { thread_id: "ordinary-a" },
+    { thread_id: "ordinary-b" },
+  ];
+  assert.deepEqual(
+    buildSelectedQueue(ordinary, repairs, restores, null).map((entry) => entry.thread_id),
+    ["restore-a", "repair-a", "repair-b", "ordinary-a", "ordinary-b"],
+  );
+  assert.deepEqual(
+    buildSelectedQueue(ordinary, repairs, restores, "restore-a").map((entry) => entry.thread_id),
+    ["restore-b", "repair-a", "repair-b", "ordinary-a", "ordinary-b"],
+  );
+  assert.deepEqual(
+    buildSelectedQueue(ordinary, repairs, restores, "repair-a").map((entry) => entry.thread_id),
+    ["restore-a", "repair-b", "repair-a", "ordinary-a", "ordinary-b"],
+  );
+  assert.deepEqual(
+    buildSelectedQueue(ordinary, repairs, restores, "ordinary-a").map((entry) => entry.thread_id),
+    ["restore-a", "repair-a", "repair-b", "ordinary-b", "ordinary-a"],
+  );
+});
 
 test("pid lock release cannot delete successor ownership", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-pid-lock-owner-"));

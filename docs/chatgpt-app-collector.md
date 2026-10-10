@@ -450,7 +450,11 @@ responses consume the audited provenance and retain their existing read-only sch
 The live collector reads a bounded list of current `historical_restore` canonicals
 whose marker still requires verification and feeds them through the same G-B replay;
 this is proof completion, not another historical restore or a discovery-state
-mutation. No MCP write tool or model compilation is added.
+mutation. To avoid App Tools burst/rate-limit starvation, at most one historical
+restore verification is attempted per poll and it is scheduled ahead of blocked
+repair and ordinary live import. A thread that was transiently rate-limited on the
+previous poll is rotated behind its peers on the next poll. No MCP write tool or
+model compilation is added.
 Real private-export planning/restoration and provider acceptance remain separate
 operator review steps.
 
