@@ -551,6 +551,17 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
         .trusted_export_provenance_for_detail(ID, verified.raw_json.as_ref())
         .unwrap();
     assert!(verified_provenance);
+    {
+        let conn = rusqlite::Connection::open(service.managed_db_path()).unwrap();
+        let mode: String = conn
+            .query_row(
+                "SELECT a.import_mode FROM conversations c JOIN archives a ON a.id=c.archive_id WHERE c.conversation_id=?1",
+                [ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "verified_historical_restore");
+    }
     let proof = continuation_proof(&verified, &direct_health, 3, 1, verified_provenance);
     assert_eq!(proof.state, "verified");
     assert_eq!(proof.method, "historical-transcript-direct-v1");
@@ -560,6 +571,12 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
         !service
             .trusted_export_provenance_for_detail(ID, Some(&forged))
             .unwrap()
+    );
+    let mut forged_detail = verified.clone();
+    forged_detail.raw_json = Some(forged);
+    assert_eq!(
+        continuation_proof(&forged_detail, &direct_health, 3, 1, false).state,
+        "unverified"
     );
 }
 

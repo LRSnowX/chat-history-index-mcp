@@ -294,6 +294,25 @@ function repairFailureCode(error) {
   return REPAIR_FAILURE_CODES.has(code) ? code : "REPLAY_INCOMPLETE";
 }
 
+function verificationErrorClass(error) {
+  const message = String(error?.message ?? "");
+  if (error instanceof PermanentIncompleteError) {
+    return `permanent_${String(error.repairCode ?? "replay_incomplete").toLowerCase()}`;
+  }
+  if (/App Tools request timed out:/iu.test(message)) return "app_tools_timeout";
+  if (/^App Tools [^:]+:/iu.test(message)) return "app_tools_rpc_error";
+  if (/ChatGPT App Tool returned no text payload/iu.test(message)) return "tool_result_empty";
+  if (/ChatGPT App Tool returned an error/iu.test(message)) return "tool_result_error";
+  if (/not found|does not exist|unknown thread/iu.test(message)) return "tool_result_not_found";
+  if (/archiv/iu.test(message)) return "tool_result_archived";
+  if (/permission|forbidden|unauthorized/iu.test(message)) return "tool_result_permission";
+  if (/too many requests|rate.?limit|429/iu.test(message)) return "tool_result_rate_limited";
+  if (/Unexpected token|JSON|parse/iu.test(message)) return "tool_payload_invalid_json";
+  if (/pipe closed|ECONN|socket|client is closed/iu.test(message)) return "app_tools_transport";
+  if (/chat-history-cli .* failed:/iu.test(message)) return "cli_failure";
+  return "unknown";
+}
+
 function recordRepairFailure(threadId, error) {
   const code = repairFailureCode(error);
   const fallback = { code, reason: "Live repair rejected; inspect durable collector diagnostics" };
@@ -1254,6 +1273,7 @@ async function syncWithClient(client, contextThreadId) {
           event: "chatgpt_live_restore_verification_rejected",
           thread_id: restore.thread_id.slice(0, 256),
           code: repairFailureCode(error),
+          error_class: verificationErrorClass(error),
           stage,
           reason: "Historical restore direct transcript verification was not proven",
         });
@@ -1732,6 +1752,7 @@ export {
   readMemoryCompilerHistory,
   readCompleteThread,
   repairContinuation,
+  verificationErrorClass,
   runMemoryCompilerWorker,
   syncWithClient,
   syncOnce,

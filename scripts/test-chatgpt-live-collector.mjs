@@ -22,6 +22,7 @@ import {
   readCompleteThread,
   readMemoryCompilerHistory,
   safeScheduleMemoryCompiler,
+  verificationErrorClass,
 } from "./chatgpt-live-collector.mjs";
 
 test("collector scheduling prioritizes one restore and rotates a rate-limited peer", () => {
@@ -43,6 +44,21 @@ test("collector scheduling prioritizes one restore and rotates a rate-limited pe
   assert.deepEqual(
     buildSelectedQueue(ordinary, repairs, "ordinary-a").map((entry) => entry.thread_id),
     ["repair-a", "repair-b", "ordinary-b", "ordinary-a"],
+  );
+});
+
+test("verification diagnostics classify failures without exposing message text", () => {
+  assert.equal(
+    verificationErrorClass(new Error("ChatGPT App Tool returned an error")),
+    "tool_result_error",
+  );
+  assert.equal(
+    verificationErrorClass(new Error("App Tools request timed out: tools/call")),
+    "app_tools_timeout",
+  );
+  assert.equal(
+    verificationErrorClass(new Error("thread not found: PRIVATE_TITLE")),
+    "tool_result_not_found",
   );
 });
 
