@@ -10,6 +10,15 @@ use crate::{
 };
 
 pub const CONTINUATION_METHOD: &str = "ordered-canonical-prefix-v1";
+pub const HISTORICAL_DIRECT_METHOD: &str = "historical-transcript-direct-v1";
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationVerificationScope {
+    #[default]
+    DiscoveryAligned,
+    HistoricalTranscriptDirect,
+}
 
 /// Content-free diagnostics: never carry provider text, message IDs or parser output.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -105,6 +114,8 @@ pub struct ContinuationBaseline {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ContinuationImport {
+    #[serde(default)]
+    pub verification_scope: ContinuationVerificationScope,
     pub baseline: ContinuationBaseline,
     pub provider_before: ChatGptBridgeThread,
     pub provider_after: ChatGptBridgeThread,
@@ -180,28 +191,48 @@ pub fn verify_replay(
     trusted_export_provenance: bool,
 ) -> anyhow::Result<NormalizedConversation> {
     let current = verify_baseline(detail, &request.baseline, trusted_export_provenance)?;
+    let direct_historical =
+        request.verification_scope == ContinuationVerificationScope::HistoricalTranscriptDirect;
+    if direct_historical {
+        ensure!(
+            trusted_export_provenance
+                && detail
+                    .raw_json
+                    .as_ref()
+                    .and_then(|raw| raw.get("chim_historical_restore"))
+                    .and_then(|marker| marker.get("requires_live_verification"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true),
+            RepairFailureCode::ReplayIncomplete
+        );
+    }
     let before = &request.provider_before;
     let after = &request.provider_after;
-    let provider_revision = before
-        .update_time
-        .filter(|v| v.is_finite())
-        .ok_or(RepairFailureCode::ProviderChanged)?;
-    ensure!(
-        before.kind == "chatgpt"
-            && after.kind == "chatgpt"
-            && before.thread_id == current.source_thread_id
-            && after.thread_id == current.source_thread_id
-            && before.status.as_deref() == Some("idle")
-            && after.status.as_deref() == Some("idle")
-            && after.update_time == Some(provider_revision),
-        RepairFailureCode::ProviderChanged
-    );
-    ensure!(
-        before.observed_at.is_some_and(f64::is_finite)
-            && after.observed_at.is_some_and(f64::is_finite)
-            && before.observed_at <= after.observed_at,
-        RepairFailureCode::ProviderChanged
-    );
+    let provider_revision = if direct_historical {
+        current.indexed_revision
+    } else {
+        let revision = before
+            .update_time
+            .filter(|v| v.is_finite())
+            .ok_or(RepairFailureCode::ProviderChanged)?;
+        ensure!(
+            before.kind == "chatgpt"
+                && after.kind == "chatgpt"
+                && before.thread_id == current.source_thread_id
+                && after.thread_id == current.source_thread_id
+                && before.status.as_deref() == Some("idle")
+                && after.status.as_deref() == Some("idle")
+                && after.update_time == Some(revision),
+            RepairFailureCode::ProviderChanged
+        );
+        ensure!(
+            before.observed_at.is_some_and(f64::is_finite)
+                && after.observed_at.is_some_and(f64::is_finite)
+                && before.observed_at <= after.observed_at,
+            RepairFailureCode::ProviderChanged
+        );
+        revision
+    };
     let transcript_before = &request.transcript_before;
     let transcript_after = &request.transcript_after;
     let transcript_revision = transcript_before
@@ -213,9 +244,20 @@ pub fn verify_replay(
             && transcript_after.kind == "chatgpt"
             && transcript_before.thread_id == current.source_thread_id
             && transcript_after.thread_id == current.source_thread_id
-            && transcript_before.status.as_deref() == Some("idle")
-            && transcript_after.status.as_deref() == Some("idle")
-            && transcript_after.update_time == Some(transcript_revision),
+            && transcript_after.update_time == Some(transcript_revision)
+            && if direct_historical {
+                transcript_before
+                    .status
+                    .as_deref()
+                    .is_none_or(|status| status == "idle")
+                    && transcript_after
+                        .status
+                        .as_deref()
+                        .is_none_or(|status| status == "idle")
+            } else {
+                transcript_before.status.as_deref() == Some("idle")
+                    && transcript_after.status.as_deref() == Some("idle")
+            },
         RepairFailureCode::ProviderChanged
     );
     ensure!(
@@ -314,19 +356,30 @@ pub fn verify_replay(
     if let Some(marker) = normalized.raw.get_mut("chim_historical_restore") {
         ensure!(marker.is_object(), RepairFailureCode::ReplayIncomplete);
         marker["requires_live_verification"] = serde_json::json!(false);
-        marker["verified_by"] = serde_json::json!(CONTINUATION_METHOD);
-        marker["verification_provider_revision"] = serde_json::json!(provider_revision);
+        marker["verified_by"] = serde_json::json!(if direct_historical {
+            HISTORICAL_DIRECT_METHOD
+        } else {
+            CONTINUATION_METHOD
+        });
+        marker["verification_scope"] = serde_json::json!(request.verification_scope);
+        if !direct_historical {
+            marker["verification_provider_revision"] = serde_json::json!(provider_revision);
+        }
         marker["verification_transcript_revision"] = serde_json::json!(transcript_revision);
     }
-    normalized.raw["chim_continuation"] = serde_json::json!({
-        "method":CONTINUATION_METHOD,
+    let mut continuation_marker = serde_json::json!({
+        "method":if direct_historical { HISTORICAL_DIRECT_METHOD } else { CONTINUATION_METHOD },
+        "verification_scope":request.verification_scope,
         "baseline_token":current.baseline_token,
-        "provider_before":before,
-        "provider_after":after,
         "transcript_before":transcript_before,
         "transcript_after":transcript_after,
         "appended_messages":normalized.messages.len()-detail.messages.len()
     });
+    if !direct_historical {
+        continuation_marker["provider_before"] = serde_json::json!(before);
+        continuation_marker["provider_after"] = serde_json::json!(after);
+    }
+    normalized.raw["chim_continuation"] = continuation_marker;
     Ok(normalized)
 }
 
@@ -374,12 +427,46 @@ pub fn continuation_proof(
                 .and_then(serde_json::Value::as_bool)
                 != Some(false)
         });
-    let verified = eligible && reaches_end && bounded_identity && trusted && !unresolved_restore;
+    let direct_historical_verified = trusted_export_provenance
+        && detail.raw_json.as_ref().is_some_and(|raw| {
+            raw.get("chim_historical_restore").is_some_and(|marker| {
+                marker
+                    .get("requires_live_verification")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                    && marker
+                        .get("verified_by")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(HISTORICAL_DIRECT_METHOD)
+                    && marker
+                        .get("verification_scope")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("historical_transcript_direct")
+            }) && raw.get("chim_continuation").is_some_and(|marker| {
+                marker.get("method").and_then(serde_json::Value::as_str)
+                    == Some(HISTORICAL_DIRECT_METHOD)
+                    && marker
+                        .get("verification_scope")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("historical_transcript_direct")
+            })
+        });
+    let verified = (eligible || direct_historical_verified)
+        && reaches_end
+        && bounded_identity
+        && trusted
+        && !unresolved_restore;
     ContinuationProof {
         state: if verified { "verified" } else { "unverified" }.to_string(),
         indexed_revision: health.indexed_revision, provider_revision: health.provider_revision, observed_at: health.observed_at,
         total_messages:detail.messages.len(), final_message_id:final_message.filter(|m| m.message_id.len() <= 256).map(|m| m.message_id.clone()), final_turn_index:final_message.map(|m| m.turn_index),
-        reason: if verified { "Eligible source alignment at last observation; returned range reaches trusted canonical end" } else { "Unaligned, untrusted, ambiguous or non-terminal canonical range" }.to_string(),
-        method:CONTINUATION_METHOD.to_string(),
+        reason: if direct_historical_verified && verified {
+            "Stable direct transcript replay verified historical restoration; discovery health remains independent"
+        } else if verified {
+            "Eligible source alignment at last observation; returned range reaches trusted canonical end"
+        } else {
+            "Unaligned, untrusted, ambiguous or non-terminal canonical range"
+        }.to_string(),
+        method:if direct_historical_verified { HISTORICAL_DIRECT_METHOD } else { CONTINUATION_METHOD }.to_string(),
     }
 }

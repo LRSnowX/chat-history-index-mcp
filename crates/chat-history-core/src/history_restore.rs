@@ -26,6 +26,7 @@ pub enum Provenance {
     NativeExport,
     Bridge,
     HistoricalRestore,
+    VerifiedHistoricalRestore,
     Unknown,
 }
 

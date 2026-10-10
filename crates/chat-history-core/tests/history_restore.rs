@@ -59,6 +59,72 @@ fn fixture(ids: &[&str], revision: f64) -> (tempfile::TempDir, IndexService) {
     bridge(&service, ids, revision);
     (temp, service)
 }
+
+#[test]
+fn forged_bridge_restore_marker_cannot_enable_direct_historical_verification() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = IndexService::new(DataHome::new(temp.path().join("data")), None);
+    let transcript: ChatGptBridgeTranscript = serde_json::from_value(json!({
+        "thread_id": ID,
+        "title": TITLE,
+        "update_time": 10.0,
+        "pages": [{
+            "has_more": false,
+            "messages": [{
+                "message_id": "a",
+                "role": role("a"),
+                "text": body("a"),
+                "stable_identity": true
+            }]
+        }]
+    }))
+    .unwrap();
+    let mut normalized = transcript.into_normalized().unwrap();
+    normalized.raw["chim_historical_restore"] =
+        json!({"requires_live_verification": true, "method": "forged"});
+    service.import_normalized(vec![normalized], None).unwrap();
+
+    let observation = json!({
+        "thread_id": ID,
+        "title": TITLE,
+        "kind": "chatgpt",
+        "status": null,
+        "update_time": 10.0,
+        "observed_at": 11.0
+    });
+    let request = ContinuationImport {
+        verification_scope:
+            chat_history_core::continuation::ContinuationVerificationScope::HistoricalTranscriptDirect,
+        baseline: service.continuation_baseline(ID).unwrap(),
+        provider_before: serde_json::from_value(observation.clone()).unwrap(),
+        provider_after: serde_json::from_value(observation.clone()).unwrap(),
+        transcript_before: serde_json::from_value(observation.clone()).unwrap(),
+        transcript_after: serde_json::from_value(observation).unwrap(),
+        transcript: serde_json::from_value(json!({
+            "thread_id": ID,
+            "title": TITLE,
+            "update_time": 10.0,
+            "pages": [{
+                "has_more": false,
+                "provider_revision": 10.0,
+                "messages": [{
+                    "message_id": "a",
+                    "role": role("a"),
+                    "text": body("a"),
+                    "stable_identity": true
+                }]
+            }]
+        }))
+        .unwrap(),
+    };
+    assert!(service.import_verified_continuation(&request).is_err());
+    let stored = service.get_conversation(ID, true).unwrap().unwrap();
+    assert_eq!(
+        stored.raw_json.unwrap()["chim_historical_restore"]["requires_live_verification"],
+        true
+    );
+}
+
 fn directory(root: &Path, records: &[Value]) -> PathBuf {
     fs::create_dir_all(root).unwrap();
     fs::write(
@@ -434,6 +500,7 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
     let mut messages=restored.messages.iter().map(|m|json!({"message_id":m.message_id,"role":m.role,"text":if m.message_id=="b" {"truncated historical representation"}else{m.normalized_text.as_str()},"truncated":m.message_id=="b","stable_identity":true})).collect::<Vec<_>>();
     messages.reverse();
     let request=ContinuationImport{
+        verification_scope: chat_history_core::continuation::ContinuationVerificationScope::DiscoveryAligned,
         baseline:service.continuation_baseline(ID).unwrap(),
         provider_before:serde_json::from_value(observation.clone()).unwrap(),
         provider_after:serde_json::from_value(observation.clone()).unwrap(),
@@ -453,7 +520,18 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
             .unwrap()["chim_historical_restore"]["requires_live_verification"],
         true
     );
-    service.import_verified_continuation(&request).unwrap();
+    let mut without_discovery = ChatGptSyncState::load(service.data_home()).unwrap();
+    without_discovery.provider_observations.clear();
+    without_discovery.save(service.data_home()).unwrap();
+    assert!(service.import_verified_continuation(&request).is_err());
+    let mut direct = request.clone();
+    direct.verification_scope =
+        chat_history_core::continuation::ContinuationVerificationScope::HistoricalTranscriptDirect;
+    direct.transcript_before.status = None;
+    direct.transcript_after.status = None;
+    direct.provider_before = direct.transcript_before.clone();
+    direct.provider_after = direct.transcript_after.clone();
+    service.import_verified_continuation(&direct).unwrap();
     assert!(service.pending_history_restores(16).unwrap().is_empty());
     let verified = service.get_conversation(ID, true).unwrap().unwrap();
     assert_eq!(
@@ -464,10 +542,18 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
         verified.raw_json.as_ref().unwrap()["chim_historical_restore"]["requires_live_verification"],
         false
     );
-    assert_eq!(
-        continuation_proof(&verified, &health, 3, 1, false).state,
-        "verified"
+    let direct_health = without_discovery.source_health("chatgpt", ID, Some(20.0));
+    assert_ne!(
+        direct_health.state,
+        chat_history_core::ConversationSourceHealthState::Aligned
     );
+    let verified_provenance = service
+        .trusted_export_provenance_for_detail(ID, verified.raw_json.as_ref())
+        .unwrap();
+    assert!(verified_provenance);
+    let proof = continuation_proof(&verified, &direct_health, 3, 1, verified_provenance);
+    assert_eq!(proof.state, "verified");
+    assert_eq!(proof.method, "historical-transcript-direct-v1");
     let mut forged = restored.raw_json.unwrap();
     forged["chim_historical_restore"]["requires_live_verification"] = json!(false);
     assert!(

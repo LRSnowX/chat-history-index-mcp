@@ -705,6 +705,8 @@ async fn main() -> anyhow::Result<()> {
                     return Err(code.into());
                 }
             };
+            let direct_historical = request.verification_scope
+                == chat_history_core::continuation::ContinuationVerificationScope::HistoricalTranscriptDirect;
             let embeddings_completed = if embed {
                 service
                     .rebuild_embeddings(
@@ -717,21 +719,33 @@ async fn main() -> anyhow::Result<()> {
                 0
             };
             let mut state = ChatGptSyncState::load(&data_home)?;
-            // Newer/contradictory observation after publication must not be erased.
-            let observation = state
-                .provider_observations
-                .get(&request.baseline.source_thread_id);
-            ensure!(
-                observation.is_some_and(|o| o.provider_revision
-                    == request.provider_after.update_time
-                    && o.provider_status.as_deref() == Some("idle")
-                    && o.observed_at == request.provider_after.observed_at),
-                RepairFailureCode::ProviderChanged
-            );
-            state.mark_imported_at(
-                &request.baseline.source_thread_id,
-                request.provider_after.update_time,
-            );
+            if direct_historical {
+                if state
+                    .pending
+                    .contains_key(&request.baseline.source_thread_id)
+                    || state
+                        .blocked
+                        .contains_key(&request.baseline.source_thread_id)
+                {
+                    state.mark_imported_at(&request.baseline.source_thread_id, None);
+                }
+            } else {
+                // Newer/contradictory observation after publication must not be erased.
+                let observation = state
+                    .provider_observations
+                    .get(&request.baseline.source_thread_id);
+                ensure!(
+                    observation.is_some_and(|o| o.provider_revision
+                        == request.provider_after.update_time
+                        && o.provider_status.as_deref() == Some("idle")
+                        && o.observed_at == request.provider_after.observed_at),
+                    RepairFailureCode::ProviderChanged
+                );
+                state.mark_imported_at(
+                    &request.baseline.source_thread_id,
+                    request.provider_after.update_time,
+                );
+            }
             state.save(&data_home)?;
             print_json(
                 &serde_json::json!({"import":report,"embeddings_completed":embeddings_completed,"state":state}),

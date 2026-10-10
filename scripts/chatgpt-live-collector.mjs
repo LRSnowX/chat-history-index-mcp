@@ -481,7 +481,13 @@ async function observeListThread(client, threadId, contextThreadId) {
   return bridgeThread(entries[0], Date.now() / 1000);
 }
 
-async function observeReadThread(client, threadId, contextThreadId, fallbackProviderState) {
+async function observeReadThread(
+  client,
+  threadId,
+  contextThreadId,
+  fallbackProviderState,
+  allowMissingStatus = false,
+) {
   const payload = toolText(await client.callTool("read_thread", {
     threadId,
     turnLimit: 1,
@@ -501,7 +507,7 @@ async function observeReadThread(client, threadId, contextThreadId, fallbackProv
     ? "idle"
     : null;
   const status = directStatus ?? fallbackStatus;
-  if (status !== "idle") {
+  if ((allowMissingStatus && status != null && status !== "idle") || (!allowMissingStatus && status !== "idle")) {
     throw new PermanentIncompleteError(
       "read_thread provider is not proven idle",
       "PROVIDER_CHANGED",
@@ -517,15 +523,23 @@ async function observeReadThread(client, threadId, contextThreadId, fallbackProv
   }, Date.now() / 1000);
 }
 
-async function repairContinuation(client, threadId, contextThreadId, fallbackProviderState = null) {
+async function repairContinuation(
+  client,
+  threadId,
+  contextThreadId,
+  fallbackProviderState = null,
+  directHistorical = false,
+) {
   const baseline = cliJson(["chatgpt-continuation-baseline", threadId]);
-  const providerBefore = fallbackProviderState?.thread
-    ?? await observeListThread(client, threadId, contextThreadId);
+  const providerBefore = directHistorical
+    ? null
+    : (fallbackProviderState?.thread ?? await observeListThread(client, threadId, contextThreadId));
   const transcriptBefore = await observeReadThread(
     client,
     threadId,
     contextThreadId,
     fallbackProviderState,
+    directHistorical,
   );
   const transcript = await readCompleteThread(
     client,
@@ -538,6 +552,7 @@ async function repairContinuation(client, threadId, contextThreadId, fallbackPro
     threadId,
     contextThreadId,
     fallbackProviderState,
+    directHistorical,
   );
   if (transcriptBefore.update_time !== transcriptAfter.update_time) {
     throw new PermanentIncompleteError(
@@ -545,18 +560,22 @@ async function repairContinuation(client, threadId, contextThreadId, fallbackPro
       "PROVIDER_CHANGED",
     );
   }
-  const providerAfter = await observeListThread(client, threadId, contextThreadId);
-  if (providerBefore.update_time !== providerAfter.update_time) {
-    throw new PermanentIncompleteError(
-      "discovery provider changed across continuation replay",
-      "PROVIDER_CHANGED",
-    );
+  let providerAfter = null;
+  if (!directHistorical) {
+    providerAfter = await observeListThread(client, threadId, contextThreadId);
+    if (providerBefore.update_time !== providerAfter.update_time) {
+      throw new PermanentIncompleteError(
+        "discovery provider changed across continuation replay",
+        "PROVIDER_CHANGED",
+      );
+    }
+    recordProviderObservation(providerAfter);
   }
-  recordProviderObservation(providerAfter);
   const input = JSON.stringify({
+    verification_scope: directHistorical ? "historical_transcript_direct" : "discovery_aligned",
     baseline,
-    provider_before: providerBefore,
-    provider_after: providerAfter,
+    provider_before: providerBefore ?? transcriptBefore,
+    provider_after: providerAfter ?? transcriptAfter,
     transcript_before: transcriptBefore,
     transcript_after: transcriptAfter,
     transcript,
@@ -1199,7 +1218,13 @@ async function syncWithClient(client, contextThreadId) {
       }
       try {
         const transcript = pending.continuation_repair
-          ? await repairContinuation(client, pending.thread_id, contextThreadId, providerState)
+          ? await repairContinuation(
+            client,
+            pending.thread_id,
+            contextThreadId,
+            providerState,
+            restoreVerification,
+          )
           : await readCompleteThread(client, pending.thread_id, contextThreadId);
         if (!pending.continuation_repair) importTranscript(transcript);
         imported += 1;
@@ -1211,12 +1236,12 @@ async function syncWithClient(client, contextThreadId) {
             event: "chatgpt_live_rate_limited", imported, pending: pending.thread_id,
             conversation_ids: importedConversationIds,
           };
-          if (restoreVerification && !providerStateById.has(pending.thread_id)) {
+          if (restoreVerification) {
             appendLog(ERROR_LOG_PATH, {
-              event: "chatgpt_live_restore_verification_deferred",
+              event: "chatgpt_live_restore_verification_rejected",
               thread_id: pending.thread_id.slice(0, 256),
               code: repairFailureCode(error),
-              reason: "Historical restore live verification was not proven",
+              reason: "Historical restore direct transcript verification was not proven",
             });
             blocked += 1;
             continue;

@@ -41,6 +41,7 @@ fn fixture() -> (tempfile::TempDir, IndexService, ContinuationImport) {
     );
     state.save(&home).unwrap();
     let request = ContinuationImport {
+        verification_scope: chat_history_core::continuation::ContinuationVerificationScope::DiscoveryAligned,
         baseline:service.continuation_baseline(ID).unwrap(),
         provider_before:serde_json::from_value(observation.clone()).unwrap(),
         provider_after:serde_json::from_value(observation.clone()).unwrap(),

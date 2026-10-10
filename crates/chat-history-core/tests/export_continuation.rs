@@ -143,6 +143,7 @@ fn lossless_offline_recovery_then_live_replay_restores_verified_continuation() {
     let mut messages = offline.messages.iter().map(|m| json!({"message_id":m.message_id,"role":m.role,"text":if m.turn_index==10 {"truncated provider copy"} else {m.normalized_text.as_str()},"truncated":m.turn_index==10,"stable_identity":true})).collect::<Vec<_>>();
     messages.push(json!({"message_id":"m12","role":"user","text":"complete later tail","stable_identity":true}));
     let request = ContinuationImport {
+        verification_scope: chat_history_core::continuation::ContinuationVerificationScope::DiscoveryAligned,
         baseline:service.continuation_baseline(ID).unwrap(),
         provider_before:serde_json::from_value(observation.clone()).unwrap(),
         provider_after:serde_json::from_value(observation.clone()).unwrap(),
@@ -429,6 +430,7 @@ fn modern_live_request(service: &IndexService) -> ContinuationImport {
         .collect::<Vec<_>>();
     messages.push(json!({"message_id":"m15","role":"assistant","text":"complete later tail","stable_identity":true}));
     ContinuationImport {
+        verification_scope: chat_history_core::continuation::ContinuationVerificationScope::DiscoveryAligned,
         baseline:service.continuation_baseline(ID).unwrap(),
         provider_before:serde_json::from_value(observation.clone()).unwrap(),
         provider_after:serde_json::from_value(observation.clone()).unwrap(),

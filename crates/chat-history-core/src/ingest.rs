@@ -594,7 +594,11 @@ impl IndexService {
         Ok(provenance.is_some_and(|(stored_sha256, import_mode)| {
             stored_sha256 == raw_sha256
                 && (matches!(import_mode.as_str(), "adopt" | "copy")
-                    || historical && import_mode == "historical_restore")
+                    || historical
+                        && matches!(
+                            import_mode.as_str(),
+                            "historical_restore" | "verified_historical_restore"
+                        ))
         }))
     }
 
@@ -602,9 +606,17 @@ impl IndexService {
         &self,
         request: &crate::continuation::ContinuationImport,
     ) -> anyhow::Result<ImportReport> {
+        let direct_historical = request.verification_scope
+            == crate::continuation::ContinuationVerificationScope::HistoricalTranscriptDirect;
         let mut conn = open_database(&self.managed_db_path())?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let canonical = canonical_detail(&tx, &request.baseline.conversation_id)?;
+        if direct_historical {
+            ensure!(
+                canonical.provenance == crate::history_restore::Provenance::HistoricalRestore,
+                crate::continuation::RepairFailureCode::ReplayIncomplete
+            );
+        }
         let detail = &canonical.detail;
         let normalized = crate::continuation::verify_replay(
             detail,
@@ -625,9 +637,21 @@ impl IndexService {
             );
             Ok(())
         };
-        check_observation()?;
-        let label = "chatgpt-verified-continuation";
-        tx.execute("INSERT INTO archives (archive_path, source_path, sha256_hex, size_bytes, import_mode) VALUES (?1, ?1, ?2, 1, 'normalized')", params![label, request.baseline.baseline_token])?;
+        if !direct_historical {
+            check_observation()?;
+        }
+        let (label, import_mode) = if direct_historical {
+            (
+                "chatgpt-verified-historical-restore",
+                "verified_historical_restore",
+            )
+        } else {
+            ("chatgpt-verified-continuation", "normalized")
+        };
+        tx.execute(
+            "INSERT INTO archives (archive_path, source_path, sha256_hex, size_bytes, import_mode) VALUES (?1, ?1, ?2, 1, ?3)",
+            params![label, request.baseline.baseline_token, import_mode],
+        )?;
         let prepared = PreparedConversation::from_normalized(tx.last_insert_rowid(), normalized)?;
         ensure!(
             prepared.conversation_id == detail.conversation.conversation_id,
@@ -652,7 +676,9 @@ impl IndexService {
             ..ImportReport::default()
         };
         tx.execute("UPDATE runs SET status = 'complete', completed_at = CURRENT_TIMESTAMP, counters_json = ?2 WHERE id = ?1", params![run_id, serde_json::to_string(&report)?])?;
-        check_observation()?;
+        if !direct_historical {
+            check_observation()?;
+        }
         tx.commit()?;
         // Sync-state is deliberately not cleared here: caller does so ONLY after publication.
         Ok(report)
@@ -2306,6 +2332,9 @@ pub(crate) fn canonical_detail(
     let provenance = match import_mode.as_str() {
         "copy" | "adopt" => crate::history_restore::Provenance::NativeExport,
         "historical_restore" => crate::history_restore::Provenance::HistoricalRestore,
+        "verified_historical_restore" => {
+            crate::history_restore::Provenance::VerifiedHistoricalRestore
+        }
         _ if raw.get("collector").and_then(Value::as_str) == Some("chatgpt-app-bridge-v1") => {
             crate::history_restore::Provenance::Bridge
         }
@@ -2323,6 +2352,7 @@ pub(crate) fn canonical_detail(
             provenance,
             crate::history_restore::Provenance::NativeExport
                 | crate::history_restore::Provenance::HistoricalRestore
+                | crate::history_restore::Provenance::VerifiedHistoricalRestore
         ),
         provenance,
     })

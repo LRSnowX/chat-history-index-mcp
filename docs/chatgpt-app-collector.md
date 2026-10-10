@@ -258,10 +258,15 @@ Read-only thread and project-continuation responses add `continuation_proof`:
 `state` (`verified | unverified`), nullable `indexed_revision`,
 `provider_revision`, `observed_at`, `total_messages`, nullable
 `final_message_id`/`final_turn_index`, bounded `reason`, and `method`
-(`ordered-canonical-prefix-v1`). Verified requires trusted canonical provenance,
-G-A alignment with eligible idle observation, and a nonempty returned range
-reaching the canonical end. Older pages, zero-message ranges, unsupported sources
-and blocked/pending/stale/unknown evidence remain unverified.
+(`ordered-canonical-prefix-v1` or `historical-transcript-direct-v1`). Ordinary
+continuation verification requires trusted canonical provenance, G-A alignment with
+eligible idle discovery observation, and a nonempty returned range reaching the
+canonical end. A historical restoration whose unresolved marker was created by the
+audited G-B.2 path may instead become verified after a stable direct `read_thread`
+pre/full/post replay by exact thread ID. That direct proof does **not** manufacture
+G-A alignment: source health continues to report the real discovery evidence
+independently. Older pages, zero-message ranges, unsupported sources and unresolved
+historical evidence remain unverified.
 
 Provider stability is established at recorded observations, not a remote lock:
 it cannot guarantee the provider never changes afterward. Likewise, identity-only
@@ -444,8 +449,18 @@ digests, prior baseline/revisions, counts and `requires_live_verification = true
 Offline restoration never changes sync pending/blockers/cursors/observations.
 Even coincidentally aligned source health cannot yield verified continuation while
 this marker is unresolved. Ordinary imports cannot erase/resolve it; a successful
-normal full G-B identity/order replay alone resolves it while preserving restored
-bodies (including oversized/truncated live overlaps). MCP thread/continuation
+identity/order replay resolves it while preserving restored bodies (including
+oversized/truncated live overlaps). If the archived thread remains discoverable,
+the normal G-B list+transcript path is used. If it has fallen outside the bounded
+`list_threads` discovery window, **only** a canonical that still carries the audited
+unresolved `historical_restore` marker may use `historical_transcript_direct`: stable
+direct `read_thread` pre/full/post observations must agree on exact thread ID and
+transcript revision, explicit non-idle status still fails closed, and missing status
+is tolerated because `read_thread` does not consistently expose it. Successful direct
+verification republishes the canonical under explicit DB provenance
+`archives.import_mode = verified_historical_restore`; continuation proof requires
+that DB-backed trusted provenance together with the bounded verification audit marker.
+This direct path does not write a provider observation or claim source-health alignment. MCP thread/continuation
 responses consume the audited provenance and retain their existing read-only schema.
 The live collector reads a bounded list of current `historical_restore` canonicals
 whose marker still requires verification and feeds them through the same G-B replay;

@@ -365,6 +365,56 @@ console.log(JSON.stringify(command === 'chatgpt-continuation-baseline'
   }
 });
 
+test("historical restore verification can use stable direct transcript replay outside discovery", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-historical-direct-"));
+  try {
+    fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+    const callsPath = path.join(root, "calls.jsonl");
+    fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
+    fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), `#!${process.execPath}
+import fs from 'node:fs';
+const input=fs.readFileSync(0,'utf8');
+const parsed=input?JSON.parse(input):null;
+const command=process.argv[2];
+fs.appendFileSync(${JSON.stringify(callsPath)},JSON.stringify({args:process.argv.slice(2),input:parsed})+'\\n');
+if(command==='chatgpt-plan-recent') console.log(JSON.stringify({plan:{selected:[],skipped_blocked_ids:[]}}));
+else if(command==='chatgpt-history-restore-pending') console.log(JSON.stringify({pending:[{conversation_id:'historical',title:'Archived',update_time:20}]}));
+else if(command==='chatgpt-continuation-baseline') console.log(JSON.stringify({conversation_id:'historical',source_thread_id:'historical',indexed_revision:20,total_messages:1,baseline_token:'test'}));
+else console.log('{}');
+`, { mode: 0o755 });
+    const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { syncWithClient } from ${JSON.stringify(collector)};
+      let reads=0;
+      const client={async callTool(name,args){
+        if(name==='list_threads') return {content:[{type:'text',text:JSON.stringify({threads:[]})}]};
+        reads++;
+        const observation=args.includeOutputs===false;
+        const thread={id:'historical',title:'Archived',updatedAt:30};
+        const payload=observation
+          ? {thread,page:{order:'newest_first',hasMore:true,nextCursor:'unused'},turns:[]}
+          : {thread,page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[{type:'agentMessage',id:'m1',text:'trusted'}]}]};
+        return {content:[{type:'text',text:JSON.stringify(payload)}]};
+      }};
+      const result=await syncWithClient(client,'context');
+      console.log(JSON.stringify({result,reads}));
+    `], { encoding:"utf8", env:{...process.env,CHAT_HISTORY_DATA_HOME:root} });
+    assert.equal(child.status,0,child.stderr);
+    const output=JSON.parse(child.stdout);
+    assert.equal(output.result.imported,1);
+    assert.equal(output.reads,3);
+    const calls=fs.readFileSync(callsPath,"utf8").trim().split("\n").map(JSON.parse);
+    const repair=calls.find((call)=>call.args[0]==="chatgpt-repair-continuation");
+    assert.ok(repair);
+    assert.equal(repair.input.verification_scope,"historical_transcript_direct");
+    assert.equal(repair.input.transcript_before.status,null);
+    assert.equal(repair.input.transcript_after.status,null);
+    assert.equal(calls.some((call)=>call.args[0]==="chatgpt-observe-thread"),false);
+  } finally {
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
 test("synthetic fallback item identities cannot prove continuation", () => {
   const messages = bridgeMessages({ id: "turn", status: "completed", items: [{ type: "agentMessage", text: "no source ID" }] });
   assert.equal(messages[0].stable_identity, false);
