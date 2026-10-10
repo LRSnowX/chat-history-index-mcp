@@ -260,17 +260,19 @@ console.log(JSON.stringify(command === 'chatgpt-continuation-baseline'
       : {plan:{selected:[],skipped_blocked_ids:['thread']}}));
 `, { mode: 0o755 });
     const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
-    for (const scenario of ["success", "sync", "revision", "active", "unknown", "missing", "page_changed"]) {
+    for (const scenario of ["success", "sync", "revision", "discovery_revision", "active", "unknown", "missing", "page_changed"]) {
       fs.writeFileSync(callsPath, "");
       const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
         import { repairContinuation, syncWithClient } from ${JSON.stringify(collector)};
         const scenario = ${JSON.stringify(scenario)};
         let readsSeen = 0;
+        let listCalls = 0;
         const reads = [];
         const client = { async callTool(name,args) {
           let payload;
           if (name === 'list_threads') {
-            payload={threads:[{id:'thread',kind:'chatgpt',title:'synthetic',updatedAt:19.5,status:'idle'}]};
+            listCalls++;
+            payload={threads:[{id:'thread',kind:'chatgpt',title:'synthetic',updatedAt:scenario==='discovery_revision' && listCalls>=2 ? 19.6 : 19.5,status:'idle'}]};
           } else {
             reads.push(args);
             readsSeen++;
@@ -316,9 +318,13 @@ console.log(JSON.stringify(command === 'chatgpt-continuation-baseline'
       assert.equal(calls.some((call) => call.args[0] === "chatgpt-import-thread" || call.args[0] === "chatgpt-unblock"), false);
       if (repair) {
         assert.equal(repair.input.provider_before.status, "idle");
-        assert.equal(repair.input.provider_after.update_time, 20);
+        assert.equal(repair.input.provider_before.update_time, 19.5);
+        assert.equal(repair.input.provider_after.update_time, 19.5);
+        assert.equal(repair.input.transcript_before.update_time, 20);
+        assert.equal(repair.input.transcript_after.update_time, 20);
         assert.equal(repair.input.transcript.update_time, 20);
         assert.ok(repair.input.provider_after.observed_at >= repair.input.provider_before.observed_at);
+        assert.ok(repair.input.transcript_after.observed_at >= repair.input.transcript_before.observed_at);
         assert.equal(repair.input.transcript.pages[0].messages[1].truncated, true);
         assert.ok(repair.input.transcript.pages[0].messages.every((message) => message.stable_identity));
         assert.equal(calls.some((call) => call.args[0] === "chatgpt-observe-thread"), true);

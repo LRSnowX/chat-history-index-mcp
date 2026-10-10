@@ -405,6 +405,31 @@ function recordProviderObservation(thread) {
   ], input);
 }
 
+async function observeListThread(client, threadId, contextThreadId) {
+  const catalog = toolText(await client.callTool(
+    "list_threads",
+    { limit: DISCOVERY_LIMIT },
+    contextThreadId,
+  ));
+  const entries = [...(catalog.threads ?? []), ...(catalog.pinnedThreads ?? [])]
+    .filter((entry) => entry.id === threadId);
+  if (
+    entries.length === 0
+    || entries.some((entry) => (
+      entry.kind !== "chatgpt"
+      || entry.status !== "idle"
+      || !Number.isFinite(entry.updatedAt)
+      || entry.updatedAt !== entries[0].updatedAt
+    ))
+  ) {
+    throw new PermanentIncompleteError(
+      "discovery provider is absent, contradictory or non-idle",
+      "PROVIDER_CHANGED",
+    );
+  }
+  return bridgeThread(entries[0], Date.now() / 1000);
+}
+
 async function observeReadThread(client, threadId, contextThreadId, fallbackProviderState) {
   const payload = toolText(await client.callTool("read_thread", {
     threadId,
@@ -443,27 +468,48 @@ async function observeReadThread(client, threadId, contextThreadId, fallbackProv
 
 async function repairContinuation(client, threadId, contextThreadId, fallbackProviderState = null) {
   const baseline = cliJson(["chatgpt-continuation-baseline", threadId]);
-  const providerBefore = await observeReadThread(
+  const providerBefore = fallbackProviderState?.thread
+    ?? await observeListThread(client, threadId, contextThreadId);
+  const transcriptBefore = await observeReadThread(
     client,
     threadId,
     contextThreadId,
     fallbackProviderState,
   );
-  const transcript = await readCompleteThread(client, threadId, contextThreadId, providerBefore.update_time);
-  const providerAfter = await observeReadThread(
+  const transcript = await readCompleteThread(
+    client,
+    threadId,
+    contextThreadId,
+    transcriptBefore.update_time,
+  );
+  const transcriptAfter = await observeReadThread(
     client,
     threadId,
     contextThreadId,
     fallbackProviderState,
   );
+  if (transcriptBefore.update_time !== transcriptAfter.update_time) {
+    throw new PermanentIncompleteError(
+      "transcript provider changed across continuation replay",
+      "PROVIDER_CHANGED",
+    );
+  }
+  const providerAfter = await observeListThread(client, threadId, contextThreadId);
   if (providerBefore.update_time !== providerAfter.update_time) {
     throw new PermanentIncompleteError(
-      "provider changed across continuation replay",
+      "discovery provider changed across continuation replay",
       "PROVIDER_CHANGED",
     );
   }
   recordProviderObservation(providerAfter);
-  const input = JSON.stringify({ baseline, provider_before: providerBefore, provider_after: providerAfter, transcript });
+  const input = JSON.stringify({
+    baseline,
+    provider_before: providerBefore,
+    provider_after: providerAfter,
+    transcript_before: transcriptBefore,
+    transcript_after: transcriptAfter,
+    transcript,
+  });
   cliJson(["chatgpt-repair-continuation", "--path", "-", "--stdin-bytes", String(Buffer.byteLength(input))], input);
   return transcript;
 }
@@ -1039,6 +1085,7 @@ async function syncWithClient(client, contextThreadId) {
         status: typeof entry.status === "string" ? entry.status : null,
         revision: Number.isFinite(entry.updatedAt) ? entry.updatedAt : null,
         conflicted: false,
+        thread: bridgeThread(entry, observedAt),
       };
       const existing = providerStateById.get(entry.id);
       if (existing == null) providerStateById.set(entry.id, state);

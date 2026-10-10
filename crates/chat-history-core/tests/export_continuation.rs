@@ -143,7 +143,11 @@ fn lossless_offline_recovery_then_live_replay_restores_verified_continuation() {
     let mut messages = offline.messages.iter().map(|m| json!({"message_id":m.message_id,"role":m.role,"text":if m.turn_index==10 {"truncated provider copy"} else {m.normalized_text.as_str()},"truncated":m.turn_index==10,"stable_identity":true})).collect::<Vec<_>>();
     messages.push(json!({"message_id":"m12","role":"user","text":"complete later tail","stable_identity":true}));
     let request = ContinuationImport {
-        baseline:service.continuation_baseline(ID).unwrap(), provider_before:serde_json::from_value(observation.clone()).unwrap(), provider_after:serde_json::from_value(observation).unwrap(),
+        baseline:service.continuation_baseline(ID).unwrap(),
+        provider_before:serde_json::from_value(observation.clone()).unwrap(),
+        provider_after:serde_json::from_value(observation.clone()).unwrap(),
+        transcript_before:serde_json::from_value(observation.clone()).unwrap(),
+        transcript_after:serde_json::from_value(observation).unwrap(),
         transcript:serde_json::from_value(json!({"thread_id":ID,"title":"synthetic","update_time":NEW+5.0,"pages":[{"has_more":false,"provider_revision":NEW+5.0,"messages":messages.into_iter().rev().collect::<Vec<_>>()}]})).unwrap(),
     };
     service.import_verified_continuation(&request).unwrap();
@@ -425,7 +429,11 @@ fn modern_live_request(service: &IndexService) -> ContinuationImport {
         .collect::<Vec<_>>();
     messages.push(json!({"message_id":"m15","role":"assistant","text":"complete later tail","stable_identity":true}));
     ContinuationImport {
-        baseline:service.continuation_baseline(ID).unwrap(), provider_before:serde_json::from_value(observation.clone()).unwrap(), provider_after:serde_json::from_value(observation).unwrap(),
+        baseline:service.continuation_baseline(ID).unwrap(),
+        provider_before:serde_json::from_value(observation.clone()).unwrap(),
+        provider_after:serde_json::from_value(observation.clone()).unwrap(),
+        transcript_before:serde_json::from_value(observation.clone()).unwrap(),
+        transcript_after:serde_json::from_value(observation).unwrap(),
         transcript:serde_json::from_value(json!({"thread_id":ID,"title":"synthetic modern continuation","update_time":NEW+5.0,"pages":[{"has_more":false,"provider_revision":NEW+5.0,"messages":messages.into_iter().rev().collect::<Vec<_>>()}]})).unwrap(),
     }
 }

@@ -236,10 +236,13 @@ second bounded `read_thread` post-observation must agree on thread identity,
 eligible idle status and revision, and every replay page must carry that same
 revision. `list_threads` remains discovery/status evidence but its `updatedAt`
 is not required to equal `read_thread.updatedAt`; the two App Tools surfaces can
-lag by sub-second or multi-second intervals. After the stable post-observation,
-the collector persists that exact `read_thread` revision through the existing
-G-A provider-observation structure without changing discovery cursor, pending or
-blocked state. Missing/contradictory/unknown statuses are not reinterpreted as safe.
+lag by sub-second or multi-second intervals. A stable `list_threads` pre/post
+window separately proves the discovery revision used for canonical `update_time`
+and G-A alignment, while the `read_thread` pre/post revision is retained in
+`chim_continuation` as transcript-surface evidence. The collector persists the
+stable discovery post-observation through the existing G-A provider-observation
+structure without changing discovery cursor, pending or blocked state.
+Missing/contradictory/unknown statuses are not reinterpreted as safe.
 
 An immediate SQLite transaction rechecks the baseline and durable observation,
 publishes the canonical append, snapshots/audit run, FTS and normal derivative

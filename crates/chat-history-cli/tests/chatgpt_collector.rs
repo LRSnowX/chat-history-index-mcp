@@ -64,7 +64,9 @@ fn operator_continuation_repair_preserves_trusted_body_and_clears_block_only_aft
             "20000-character safety limit",
         ],
     );
-    let mut repair = json!({"baseline":baseline,"provider_before":observation,"provider_after":observation,
+    let mut repair = json!({"baseline":baseline,
+    "provider_before":observation.clone(),"provider_after":observation.clone(),
+    "transcript_before":observation.clone(),"transcript_after":observation,
     "transcript":{"thread_id":"synthetic-repair","title":"Arcos synthetic","update_time":30.0,"pages":[{"has_more":false,"provider_revision":30.0,"messages":[
         {"message_id":"new","role":"user","text":"Complete new tail","stable_identity":true,"truncated":true},
         {"message_id":"old-assistant","role":"assistant","text":"truncated old copy","stable_identity":true,"truncated":true},
@@ -227,7 +229,13 @@ fn official_export_operator_then_live_repair_preserves_block_and_full_new_body()
         &home,
         &["chatgpt-plan-recent", "--path", input.to_str().unwrap()],
     );
-    let mut replay = json!({"baseline":run_cli(&home,&["chatgpt-continuation-baseline","oversized-cli"]),"provider_before":observation,"provider_after":observation,"transcript":{"thread_id":"oversized-cli","title":"synthetic","update_time":40.0,"pages":[{"has_more":false,"provider_revision":40.0,"messages":[
+    let mut replay = json!({
+        "baseline":run_cli(&home,&["chatgpt-continuation-baseline","oversized-cli"]),
+        "provider_before":observation.clone(),
+        "provider_after":observation.clone(),
+        "transcript_before":observation.clone(),
+        "transcript_after":observation,
+        "transcript":{"thread_id":"oversized-cli","title":"synthetic","update_time":40.0,"pages":[{"has_more":false,"provider_revision":40.0,"messages":[
         {"message_id":"m3","role":"assistant","text":"PRIVATE_BODY_SENTINEL","truncated":true,"stable_identity":true},
         {"message_id":"m2","role":"user","text":"truncated provider representation","truncated":true,"stable_identity":true},
         {"message_id":"m1","role":"assistant","text":"answer","stable_identity":true},

@@ -433,7 +433,14 @@ fn offline_restore_gates_proof_and_only_complete_live_gb_resolves_it() {
     let observation = json!({"thread_id":ID,"title":TITLE,"kind":"chatgpt","status":"idle","update_time":20.0,"observed_at":21.0});
     let mut messages=restored.messages.iter().map(|m|json!({"message_id":m.message_id,"role":m.role,"text":if m.message_id=="b" {"truncated historical representation"}else{m.normalized_text.as_str()},"truncated":m.message_id=="b","stable_identity":true})).collect::<Vec<_>>();
     messages.reverse();
-    let request=ContinuationImport{baseline:service.continuation_baseline(ID).unwrap(),provider_before:serde_json::from_value(observation.clone()).unwrap(),provider_after:serde_json::from_value(observation).unwrap(),transcript:serde_json::from_value(json!({"thread_id":ID,"title":TITLE,"update_time":20.0,"pages":[{"has_more":false,"provider_revision":20.0,"messages":messages}]})).unwrap()};
+    let request=ContinuationImport{
+        baseline:service.continuation_baseline(ID).unwrap(),
+        provider_before:serde_json::from_value(observation.clone()).unwrap(),
+        provider_after:serde_json::from_value(observation.clone()).unwrap(),
+        transcript_before:serde_json::from_value(observation.clone()).unwrap(),
+        transcript_after:serde_json::from_value(observation).unwrap(),
+        transcript:serde_json::from_value(json!({"thread_id":ID,"title":TITLE,"update_time":20.0,"pages":[{"has_more":false,"provider_revision":20.0,"messages":messages}]})).unwrap()
+    };
     let mut invalid = request.clone();
     invalid.transcript.pages[0].has_more = true;
     assert!(service.import_verified_continuation(&invalid).is_err());

@@ -43,7 +43,9 @@ fn fixture() -> (tempfile::TempDir, IndexService, ContinuationImport) {
     let request = ContinuationImport {
         baseline:service.continuation_baseline(ID).unwrap(),
         provider_before:serde_json::from_value(observation.clone()).unwrap(),
-        provider_after:serde_json::from_value(observation).unwrap(),
+        provider_after:serde_json::from_value(observation.clone()).unwrap(),
+        transcript_before:serde_json::from_value(observation.clone()).unwrap(),
+        transcript_after:serde_json::from_value(observation).unwrap(),
         transcript:serde_json::from_value(json!({"thread_id":ID,"title":"Arcos synthetic regression","update_time":NEW,"pages":[{"request_cursor":null,"next_cursor":null,"has_more":false,"provider_revision":NEW,"messages":replay.into_iter().rev().collect::<Vec<_>>()}]})).unwrap(),
     };
     (temp, service, request)
@@ -117,6 +119,43 @@ fn verified_append_preserves_prefix_and_only_then_allows_alignment_and_tail_proo
     assert_eq!(
         snapshots, 2,
         "old canonical is retained as superseded evidence"
+    );
+}
+
+#[test]
+fn discovery_and_transcript_revisions_are_independent_surfaces() {
+    let (_temp, service, mut request) = fixture();
+    let discovery_revision = OLD - 0.25;
+    let transcript_revision = NEW + 7.0;
+
+    request.provider_before.update_time = Some(discovery_revision);
+    request.provider_before.observed_at = Some(NEW + 20.0);
+    request.provider_after.update_time = Some(discovery_revision);
+    request.provider_after.observed_at = Some(NEW + 21.0);
+    request.transcript_before.update_time = Some(transcript_revision);
+    request.transcript_before.observed_at = Some(NEW + 22.0);
+    request.transcript_after.update_time = Some(transcript_revision);
+    request.transcript_after.observed_at = Some(NEW + 23.0);
+    request.transcript.update_time = Some(transcript_revision);
+    for page in &mut request.transcript.pages {
+        page.provider_revision = Some(transcript_revision);
+    }
+
+    let mut state = ChatGptSyncState::load(service.data_home()).unwrap();
+    state.observe_thread(&request.provider_after).unwrap();
+    state.save(service.data_home()).unwrap();
+
+    service.import_verified_continuation(&request).unwrap();
+    let after = service.get_conversation(ID, true).unwrap().unwrap();
+    assert_eq!(after.conversation.update_time, Some(discovery_revision));
+    let raw = after.raw_json.unwrap();
+    assert_eq!(
+        raw["chim_continuation"]["provider_after"]["update_time"],
+        discovery_revision
+    );
+    assert_eq!(
+        raw["chim_continuation"]["transcript_after"]["update_time"],
+        transcript_revision
     );
 }
 

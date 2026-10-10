@@ -75,9 +75,14 @@ async fn historical_restore_proof_is_unverified_on_mcp_until_complete_live_repla
         if expected == "verified" {
             let detail = service.get_conversation(id, true)?.unwrap();
             let request: chat_history_core::continuation::ContinuationImport =
-                serde_json::from_value(
-                    json!({"baseline":service.continuation_baseline(id)?,"provider_before":observation,"provider_after":observation,"transcript":{"thread_id":id,"title":"Arcos synthetic history","update_time":20.0,"pages":[{"has_more":false,"provider_revision":20.0,"messages":detail.messages.iter().rev().map(|m|json!({"message_id":m.message_id,"role":m.role,"text":m.normalized_text,"stable_identity":true})).collect::<Vec<_>>()}]}}),
-                )?;
+                serde_json::from_value(json!({
+                    "baseline":service.continuation_baseline(id)?,
+                    "provider_before":observation.clone(),
+                    "provider_after":observation.clone(),
+                    "transcript_before":observation.clone(),
+                    "transcript_after":observation.clone(),
+                    "transcript":{"thread_id":id,"title":"Arcos synthetic history","update_time":20.0,"pages":[{"has_more":false,"provider_revision":20.0,"messages":detail.messages.iter().rev().map(|m|json!({"message_id":m.message_id,"role":m.role,"text":m.normalized_text,"stable_identity":true})).collect::<Vec<_>>()}]}
+                }))?;
             service.import_verified_continuation(&request)?;
         }
         let thread = client

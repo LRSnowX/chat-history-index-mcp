@@ -108,6 +108,8 @@ pub struct ContinuationImport {
     pub baseline: ContinuationBaseline,
     pub provider_before: ChatGptBridgeThread,
     pub provider_after: ChatGptBridgeThread,
+    pub transcript_before: ChatGptBridgeThread,
+    pub transcript_after: ChatGptBridgeThread,
     pub transcript: ChatGptBridgeTranscript,
 }
 
@@ -200,14 +202,32 @@ pub fn verify_replay(
             && before.observed_at <= after.observed_at,
         RepairFailureCode::ProviderChanged
     );
+    let transcript_before = &request.transcript_before;
+    let transcript_after = &request.transcript_after;
+    let transcript_revision = transcript_before
+        .update_time
+        .filter(|v| v.is_finite())
+        .ok_or(RepairFailureCode::ProviderChanged)?;
     ensure!(
-        provider_revision >= current.indexed_revision,
+        transcript_before.kind == "chatgpt"
+            && transcript_after.kind == "chatgpt"
+            && transcript_before.thread_id == current.source_thread_id
+            && transcript_after.thread_id == current.source_thread_id
+            && transcript_before.status.as_deref() == Some("idle")
+            && transcript_after.status.as_deref() == Some("idle")
+            && transcript_after.update_time == Some(transcript_revision),
+        RepairFailureCode::ProviderChanged
+    );
+    ensure!(
+        transcript_before.observed_at.is_some_and(f64::is_finite)
+            && transcript_after.observed_at.is_some_and(f64::is_finite)
+            && transcript_before.observed_at <= transcript_after.observed_at,
         RepairFailureCode::ProviderChanged
     );
     let mut transcript = request.transcript.clone();
     ensure!(
         transcript.thread_id == current.source_thread_id
-            && transcript.update_time == Some(provider_revision),
+            && transcript.update_time == Some(transcript_revision),
         RepairFailureCode::ProviderChanged
     );
     let replay = transcript
@@ -258,7 +278,7 @@ pub fn verify_replay(
     }
     for page in &mut transcript.pages {
         ensure!(
-            page.provider_revision == Some(provider_revision),
+            page.provider_revision == Some(transcript_revision),
             RepairFailureCode::ProviderChanged
         );
         for message in &mut page.messages {
@@ -283,6 +303,10 @@ pub fn verify_replay(
     normalized.source_path = detail.conversation.source_path.clone();
     normalized.model = detail.conversation.default_model_slug.clone();
     normalized.create_time = detail.conversation.create_time;
+    // Canonical/G-A revision authority is the discovery/list surface. The
+    // transcript surface is independently stability-checked above and retained
+    // in the audit marker, but its updatedAt is not numerically comparable.
+    normalized.update_time = Some(provider_revision);
     normalized.raw = detail.raw_json.clone().unwrap();
     // A successful full identity replay is a complete bridge publication even
     // when its trusted historical prefix originally came from a native export.
@@ -292,8 +316,17 @@ pub fn verify_replay(
         marker["requires_live_verification"] = serde_json::json!(false);
         marker["verified_by"] = serde_json::json!(CONTINUATION_METHOD);
         marker["verification_provider_revision"] = serde_json::json!(provider_revision);
+        marker["verification_transcript_revision"] = serde_json::json!(transcript_revision);
     }
-    normalized.raw["chim_continuation"] = serde_json::json!({"method":CONTINUATION_METHOD,"baseline_token":current.baseline_token,"provider_before":before,"provider_after":after,"appended_messages":normalized.messages.len()-detail.messages.len()});
+    normalized.raw["chim_continuation"] = serde_json::json!({
+        "method":CONTINUATION_METHOD,
+        "baseline_token":current.baseline_token,
+        "provider_before":before,
+        "provider_after":after,
+        "transcript_before":transcript_before,
+        "transcript_after":transcript_after,
+        "appended_messages":normalized.messages.len()-detail.messages.len()
+    });
     Ok(normalized)
 }
 
