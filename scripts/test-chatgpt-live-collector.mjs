@@ -72,6 +72,10 @@ test("verification diagnostics classify failures without exposing message text",
   const payload = new Error("generic");
   payload.toolPayloadCategory = "invalid_json";
   assert.equal(verificationErrorClass(payload), "tool_payload_invalid_json");
+  const rpc = new Error("PRIVATE_TITLE");
+  rpc.appToolsRpcCategory = "not_found";
+  rpc.appToolsRpcCode = "-32601";
+  assert.equal(verificationErrorClass(rpc), "app_tools_rpc_not_found");
 });
 
 test("pid lock release cannot delete successor ownership", () => {

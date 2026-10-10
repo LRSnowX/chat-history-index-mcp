@@ -41,6 +41,20 @@ function pipeIdentity(pipePath) {
   return createHash("sha256").update(pipePath).digest("hex").slice(0, 16);
 }
 
+function classifyRpcError(code, message) {
+  const text = String(message ?? "");
+  if (/too many requests|rate.?limit|\b429\b/iu.test(text)) return "rate_limited";
+  if (/not found|does not exist|unknown thread|missing thread/iu.test(text)) return "not_found";
+  if (/archiv|unavailable|cannot be read|not accessible|inaccessible/iu.test(text)) return "unavailable";
+  if (/invalid.*argument|invalid.*request|bad request|malformed/iu.test(text)) return "invalid_arguments";
+  if (/permission|forbidden|unauthorized|access denied/iu.test(text)) return "permission";
+  if (/internal|server error|temporar|try again|unavailable service/iu.test(text)) return "internal";
+  if (code === -32602) return "invalid_arguments";
+  if (code === -32601) return "not_found";
+  if (code === -32603) return "internal";
+  return "unknown";
+}
+
 class NativeAppToolsClient {
   constructor(pipePath) {
     this.pipePath = pipePath;
@@ -95,7 +109,13 @@ class NativeAppToolsClient {
       this.pending.delete(String(message.id));
       clearTimeout(entry.timer);
       if (message.error != null) {
-        entry.reject(new Error(`App Tools ${message.error.code ?? "error"}: ${message.error.message ?? "unknown error"}`));
+        const error = new Error("App Tools RPC request failed");
+        error.appToolsRpcCode =
+          typeof message.error.code === "number" || typeof message.error.code === "string"
+            ? String(message.error.code).slice(0, 32)
+            : null;
+        error.appToolsRpcCategory = classifyRpcError(message.error.code, message.error.message);
+        entry.reject(error);
       } else {
         entry.resolve(message.result);
       }
@@ -323,6 +343,9 @@ function repairFailureCode(error) {
 
 function verificationErrorClass(error) {
   const message = String(error?.message ?? "");
+  if (typeof error?.appToolsRpcCategory === "string") {
+    return `app_tools_rpc_${error.appToolsRpcCategory}`;
+  }
   if (typeof error?.toolResultCategory === "string") {
     return `tool_result_${error.toolResultCategory}`;
   }
