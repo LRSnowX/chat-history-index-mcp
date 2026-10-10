@@ -17,4 +17,10 @@ if printf '%s\n' "$unrelated" | grep -Eq "$APP_SERVER_PATTERN"; then
   exit 1
 fi
 
+grep -q '^required = true$' "$SERVICE"
+if grep -q '^required = false$' "$SERVICE"; then
+  echo "ChatGPT live collector must be required so the app-server eagerly initializes it" >&2
+  exit 1
+fi
+
 echo "ChatGPT app-server matcher regression passed."

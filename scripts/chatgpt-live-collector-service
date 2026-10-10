@@ -148,7 +148,7 @@ command = "{node}"
 env_vars = ["CODEX_APP_TOOLS_PIPE_PATH"]
 args = ["{collector}", "--mcp-sidecar"]
 startup_timeout_sec = 30
-required = false
+required = true
 
 [mcp_servers.chatgpt_live_collector.env]
 CHAT_HISTORY_DATA_HOME = "{data_home}"
