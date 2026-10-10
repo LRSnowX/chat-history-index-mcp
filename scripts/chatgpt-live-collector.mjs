@@ -277,9 +277,10 @@ function bridgeMessages(turn) {
 }
 
 class PermanentIncompleteError extends Error {
-  constructor(message, repairCode = "REPLAY_INCOMPLETE") {
+  constructor(message, repairCode = "REPLAY_INCOMPLETE", verificationDetail = null) {
     super(message);
     this.repairCode = repairCode;
+    this.verificationDetail = verificationDetail;
   }
 }
 
@@ -311,6 +312,16 @@ function verificationErrorClass(error) {
   if (/pipe closed|ECONN|socket|client is closed/iu.test(message)) return "app_tools_transport";
   if (/chat-history-cli .* failed:/iu.test(message)) return "cli_failure";
   return "unknown";
+}
+
+function verificationDetailClass(error) {
+  const detail = error?.verificationDetail;
+  return new Set([
+    "thread_id_mismatch",
+    "revision_mismatch",
+    "status_mismatch",
+    "missing_thread_metadata",
+  ]).has(detail) ? detail : null;
 }
 
 function recordRepairFailure(threadId, error) {
@@ -347,10 +358,29 @@ async function readCompleteThread(client, threadId, contextThreadId, continuatio
     if (payload.page?.order !== "newest_first") {
       throw new PermanentIncompleteError(`unexpected read_thread order: ${payload.page?.order ?? "missing"}`);
     }
-    if (continuationRevision !== undefined && (
-      payload.thread?.id !== threadId || payload.thread?.updatedAt !== continuationRevision
-      || (payload.thread?.status != null && payload.thread.status !== "idle")
-    )) throw new PermanentIncompleteError("provider identity/revision/status changed during continuation replay", "PROVIDER_CHANGED");
+    if (continuationRevision !== undefined) {
+      if (payload.thread?.id !== threadId) {
+        throw new PermanentIncompleteError(
+          "provider thread identity changed during continuation replay",
+          "PROVIDER_CHANGED",
+          "thread_id_mismatch",
+        );
+      }
+      if (payload.thread?.updatedAt !== continuationRevision) {
+        throw new PermanentIncompleteError(
+          "provider revision changed during continuation replay",
+          "PROVIDER_CHANGED",
+          "revision_mismatch",
+        );
+      }
+      if (payload.thread?.status != null && payload.thread.status !== "idle") {
+        throw new PermanentIncompleteError(
+          "provider status changed during continuation replay",
+          "PROVIDER_CHANGED",
+          "status_mismatch",
+        );
+      }
+    }
     if (threadMetadata == null) threadMetadata = payload.thread ?? null;
     if (Array.isArray(payload.attachments) && payload.attachments.length > 0) {
       attachments = payload.attachments;
@@ -1274,6 +1304,7 @@ async function syncWithClient(client, contextThreadId) {
           thread_id: restore.thread_id.slice(0, 256),
           code: repairFailureCode(error),
           error_class: verificationErrorClass(error),
+          detail_class: verificationDetailClass(error),
           stage,
           reason: "Historical restore direct transcript verification was not proven",
         });
@@ -1753,6 +1784,7 @@ export {
   readCompleteThread,
   repairContinuation,
   verificationErrorClass,
+  verificationDetailClass,
   runMemoryCompilerWorker,
   syncWithClient,
   syncOnce,
