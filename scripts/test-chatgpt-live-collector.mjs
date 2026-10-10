@@ -22,6 +22,7 @@ import {
   readCompleteThread,
   readMemoryCompilerHistory,
   safeScheduleMemoryCompiler,
+  verificationDetailClass,
   verificationErrorClass,
 } from "./chatgpt-live-collector.mjs";
 
@@ -60,6 +61,11 @@ test("verification diagnostics classify failures without exposing message text",
     verificationErrorClass(new Error("thread not found: PRIVATE_TITLE")),
     "tool_result_not_found",
   );
+  const bounded = new Error("PRIVATE_TITLE");
+  bounded.verificationDetail = "revision_mismatch";
+  assert.equal(verificationDetailClass(bounded), "revision_mismatch");
+  bounded.verificationDetail = "PRIVATE_TITLE";
+  assert.equal(verificationDetailClass(bounded), null);
 });
 
 test("pid lock release cannot delete successor ownership", () => {
