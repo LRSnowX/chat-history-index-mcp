@@ -178,8 +178,16 @@ class NativeAppToolsClient {
       tool: name,
       turnId: `chat-history-${randomUUID()}`,
     }, 60_000);
+    const safeShape = {
+      keys: Object.keys(result ?? {}).sort().slice(0, 16),
+      content_types: (result?.contentItems ?? [])
+        .map((item) => typeof item?.type === "string" ? item.type.slice(0, 64) : null)
+        .filter(Boolean)
+        .slice(0, 16),
+    };
     return {
       isError: result.success !== true,
+      resultShape: safeShape,
       content: (result.contentItems ?? []).map((item) => {
         if (item.type === "inputText") return { type: "text", text: item.text };
         return { type: "text", text: item.imageUrl ?? item.audioUrl ?? "" };
@@ -240,6 +248,7 @@ function toolText(result) {
       .join("\n");
     const error = new Error("ChatGPT App Tool returned an error");
     error.toolResultCategory = classifyToolResultError(message);
+    error.toolResultShape = result.resultShape ?? null;
     throw error;
   }
   const text = (result?.content ?? []).filter((item) => item.type === "text").map((item) => item.text).join("\n");
@@ -379,6 +388,35 @@ function verificationDetailClass(error) {
   ]).has(detail) ? detail : null;
 }
 
+function providerStatusClass(status) {
+  if (status == null) return "missing";
+  const normalized = String(status).toLowerCase();
+  return new Set([
+    "idle",
+    "active",
+    "completed",
+    "finished_successfully",
+    "archived",
+    "paused",
+    "unknown",
+    "deleted",
+  ]).has(normalized)
+    ? normalized
+    : "other";
+}
+
+function verificationResultShape(error) {
+  const shape = error?.toolResultShape;
+  if (shape == null || typeof shape !== "object") return null;
+  const keys = Array.isArray(shape.keys)
+    ? shape.keys.filter((value) => typeof value === "string").slice(0, 16)
+    : [];
+  const contentTypes = Array.isArray(shape.content_types)
+    ? shape.content_types.filter((value) => typeof value === "string").slice(0, 16)
+    : [];
+  return { keys, content_types: contentTypes };
+}
+
 function recordRepairFailure(threadId, error) {
   const code = repairFailureCode(error);
   const fallback = { code, reason: "Live repair rejected; inspect durable collector diagnostics" };
@@ -429,11 +467,13 @@ async function readCompleteThread(client, threadId, contextThreadId, continuatio
         );
       }
       if (payload.thread?.status != null && payload.thread.status !== "idle") {
-        throw new PermanentIncompleteError(
+        const error = new PermanentIncompleteError(
           "provider status changed during continuation replay",
           "PROVIDER_CHANGED",
           "status_mismatch",
         );
+        error.providerStatusClass = providerStatusClass(payload.thread.status);
+        throw error;
       }
     }
     if (threadMetadata == null) threadMetadata = payload.thread ?? null;
@@ -1361,6 +1401,10 @@ async function syncWithClient(client, contextThreadId) {
           code: repairFailureCode(error),
           error_class: verificationErrorClass(error),
           detail_class: verificationDetailClass(error),
+          result_shape: verificationResultShape(error),
+          provider_status_class: typeof error?.providerStatusClass === "string"
+            ? error.providerStatusClass
+            : null,
           stage,
           reason: "Historical restore direct transcript verification was not proven",
         });
@@ -1839,6 +1883,8 @@ export {
   readMemoryCompilerHistory,
   readCompleteThread,
   repairContinuation,
+  providerStatusClass,
+  verificationResultShape,
   verificationErrorClass,
   verificationDetailClass,
   runMemoryCompilerWorker,

@@ -22,6 +22,8 @@ import {
   readCompleteThread,
   readMemoryCompilerHistory,
   safeScheduleMemoryCompiler,
+  providerStatusClass,
+  verificationResultShape,
   verificationDetailClass,
   verificationErrorClass,
 } from "./chatgpt-live-collector.mjs";
@@ -76,6 +78,19 @@ test("verification diagnostics classify failures without exposing message text",
   rpc.appToolsRpcCategory = "not_found";
   rpc.appToolsRpcCode = "-32601";
   assert.equal(verificationErrorClass(rpc), "app_tools_rpc_not_found");
+  assert.equal(providerStatusClass("completed"), "completed");
+  assert.equal(providerStatusClass("finished_successfully"), "finished_successfully");
+  assert.equal(providerStatusClass("PRIVATE_STATUS"), "other");
+  assert.equal(providerStatusClass(null), "missing");
+  const shape = new Error("PRIVATE");
+  shape.toolResultShape = {
+    keys: ["success", "PRIVATE_KEY"],
+    content_types: ["inputText", "PRIVATE_TYPE"],
+  };
+  assert.deepEqual(verificationResultShape(shape), {
+    keys: ["success", "PRIVATE_KEY"],
+    content_types: ["inputText", "PRIVATE_TYPE"],
+  });
 });
 
 test("pid lock release cannot delete successor ownership", () => {
