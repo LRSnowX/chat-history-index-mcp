@@ -23,4 +23,33 @@ if grep -q '^required = false$' "$SERVICE"; then
   exit 1
 fi
 
+case_block() {
+  local label="$1"
+  awk -v label="$label" '
+    $0 ~ "^  " label "\\)" { in_block=1 }
+    in_block { print }
+    in_block && /^    ;;/ { exit }
+  ' "$SERVICE"
+}
+
+for command in install start restart; do
+  block="$(case_block "$command")"
+  if printf '%s\n' "$block" | grep -q 'restart_app_server'; then
+    echo "$command must not restart the ChatGPT app-server" >&2
+    exit 1
+  fi
+done
+
+install_block="$(case_block install)"
+if printf '%s\n' "$install_block" | grep -q 'stop_daemon'; then
+  echo "install must preserve an already-running collector and its one-shot App Tools pipe" >&2
+  exit 1
+fi
+
+restart_block="$(case_block restart)"
+if printf '%s\n' "$restart_block" | grep -q 'stop_daemon'; then
+  echo "restart must defer rather than destroy the current Desktop-scoped App Tools pipe" >&2
+  exit 1
+fi
+
 echo "ChatGPT app-server matcher regression passed."

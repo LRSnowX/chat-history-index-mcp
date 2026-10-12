@@ -600,6 +600,153 @@ else console.log('{}');
   }
 });
 
+function historicalRetryFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chim-historical-retry-"));
+  const configPath = path.join(root, "config.json");
+  const cachePath = path.join(root, "cache/chatgpt-live-collector-historical-retries.json");
+  fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+  fs.writeFileSync(path.join(root, "bin", "package.json"), '{"type":"module"}');
+  fs.writeFileSync(path.join(root, "bin", "chat-history-cli"), `#!${process.execPath}
+import fs from 'node:fs';
+const config=JSON.parse(fs.readFileSync(${JSON.stringify(configPath)},'utf8'));
+const command=process.argv[2];
+if(command==='chatgpt-history-restore-pending') console.log(JSON.stringify({pending:config.ids.map(conversation_id=>({conversation_id,title:'PRIVATE TITLE',update_time:20}))}));
+else if(command==='chatgpt-continuation-baseline') console.log(JSON.stringify({conversation_id:process.argv[3],source_thread_id:process.argv[3],indexed_revision:20,total_messages:1,baseline_token:config.revision??'canonical-v1'}));
+else if(command==='chatgpt-repair-continuation' && config.failure!=='success') {
+  console.error('CHIM_REPAIR_'+(config.failure??'MISSING_OVERLAP')+': synthetic rejection'); process.exitCode=1;
+}
+else if(command==='chatgpt-plan-recent') console.log(JSON.stringify({plan:{selected:[{thread_id:'ordinary'}],skipped_blocked_ids:['repair']}}));
+else console.log('{}');
+`, { mode: 0o755 });
+  const collector = new URL("./chatgpt-live-collector.mjs", import.meta.url).href;
+  return {
+    root, cachePath,
+    poll(config) {
+      fs.writeFileSync(configPath, JSON.stringify(config));
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import {syncWithClient} from ${JSON.stringify(collector)};
+        Date.now=()=>${config.now ?? 1_000_000_000};
+        const calls=[];
+        const client={async callTool(name,args){
+          calls.push({name,id:args.threadId??null});
+          if(name==='list_threads') return {content:[{type:'text',text:JSON.stringify({threads:['ordinary','repair'].map(id=>({id,kind:'chatgpt',title:'PRIVATE TITLE',status:'idle',updatedAt:30}))})}]};
+          const transient=${JSON.stringify(config.transient ?? null)};
+          if(transient==='loading' || transient==='rate_limit') return {isError:true,content:[{type:'text',text:transient==='loading'?'Chat history is still loading.':'Too many requests 429'}]};
+          if(transient==='timeout') throw new Error('App Tools request timed out: read_thread');
+          if(transient==='transport') throw new Error('pipe closed');
+          if(transient==='overlap_early') throw new Error('CHIM_REPAIR_MISSING_OVERLAP: synthetic early error');
+          const thread={id:args.threadId,title:'PRIVATE TITLE',updatedAt:30,status:${JSON.stringify(config.transient === "active" ? "active" : "idle")}};
+          return {content:[{type:'text',text:JSON.stringify({thread,page:{order:'newest_first',hasMore:false},turns:[{id:'turn',status:'completed',items:[{id:'m1',type:'agentMessage',text:'PRIVATE BODY'}]}]})}]};
+        }};
+        console.log(JSON.stringify({result:await syncWithClient(client,'context'),calls}));
+      `], { encoding: "utf8", env: { ...process.env, CHAT_HISTORY_DATA_HOME: root } });
+      assert.equal(child.status, 0, child.stderr);
+      return JSON.parse(child.stdout);
+    },
+    state() { return JSON.parse(fs.readFileSync(cachePath, "utf8")); },
+    close() { fs.rmSync(root, { recursive: true, force: true }); },
+  };
+}
+
+test("historical publication overlap retries persist, skip peers and allow normal work", () => {
+  const fixture = historicalRetryFixture();
+  try {
+    const first = fixture.poll({ ids: ['restore-a', 'restore-b'] });
+    assert.equal(first.result.pending, 'restore-a');
+    assert.equal(first.result.blocked, 1);
+    assert.deepEqual(first.calls.map(call => call.id), ['restore-a', 'restore-a', 'restore-a']);
+    const state = fixture.state();
+    assert.equal(state.entries.length, 1);
+    assert.equal(state.entries[0].retry_at - state.entries[0].failed_at, 3_600_000);
+    assert.deepEqual(Object.keys(state.entries[0]).sort(), ['failed_at','failures','retry_at','revision','thread']);
+    for (const secret of ['PRIVATE TITLE','PRIVATE BODY','restore-a','canonical-v1']) {
+      assert.equal(JSON.stringify(state).includes(secret), false);
+    }
+    const second = fixture.poll({ ids: ['restore-a', 'restore-b'] });
+    assert.equal(second.result.pending, 'restore-b');
+    assert.deepEqual(second.calls.map(call => call.id), ['restore-b', 'restore-b', 'restore-b']);
+    const third = fixture.poll({ ids: ['restore-a', 'restore-b'], failure: 'success' });
+    assert.equal(third.result.imported, 2);
+    assert.equal(third.calls[0].name, 'list_threads');
+    assert.ok(third.calls.some(call => call.id === 'ordinary'));
+    assert.ok(third.calls.some(call => call.id === 'repair'));
+    assert.equal(third.calls.some(call => call.id?.startsWith('restore-')), false);
+    assert.equal(fixture.state().entries.length, 2);
+  } finally { fixture.close(); }
+});
+
+test("historical retry expiry increases bounded delay; baseline changes reset it and success clears it", () => {
+  const fixture = historicalRetryFixture();
+  try {
+    let now = 1_000_000_000;
+    fixture.poll({ ids: ['restore-a'], now });
+    const skipped = fixture.poll({ ids: ['restore-a'], now: now + 1 });
+    assert.equal(skipped.calls.some(call => call.id === 'restore-a'), false);
+    for (const hours of [2, 4, 8, 16, 24, 24]) {
+      now = fixture.state().entries[0].retry_at;
+      assert.equal(fixture.poll({ ids: ['restore-a'], now }).result.pending, 'restore-a');
+      assert.equal(fixture.state().entries[0].retry_at - now, hours * 3_600_000);
+    }
+    const changed = fixture.poll({ ids: ['restore-a'], now: now + 1, revision: 'canonical-v2' });
+    assert.equal(changed.result.pending, 'restore-a');
+    assert.equal(fixture.state().entries.length, 1);
+    assert.equal(fixture.state().entries[0].failures, 1);
+    now = fixture.state().entries[0].retry_at;
+    assert.equal(fixture.poll({ ids: ['restore-a'], now, revision: 'canonical-v2', failure: 'success' }).result.imported, 1);
+    assert.deepEqual(fixture.state().entries, []);
+  } finally { fixture.close(); }
+});
+
+test("historical transient and other verification failures retain immediate retry behavior", () => {
+  const fixture = historicalRetryFixture();
+  try {
+    for (const transient of ['loading','rate_limit','timeout','transport','active','overlap_early',null]) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const output = fixture.poll({ ids: ['restore-a'], transient, failure: 'PROVIDER_CHANGED' });
+        assert.equal(output.calls.some(call => call.id === 'restore-a'), true);
+        assert.equal(fs.existsSync(fixture.cachePath), false);
+        if (transient === 'rate_limit') assert.equal(output.result.event, 'chatgpt_live_rate_limited');
+        if (transient === 'loading' || transient === 'timeout') assert.equal(output.result.event, 'chatgpt_live_restore_verification_deferred');
+      }
+    }
+  } finally { fixture.close(); }
+});
+
+test("missing, malformed, oversized and unwritable historical cache never blocks verification", () => {
+  const fixture = historicalRetryFixture();
+  try {
+    fixture.poll({ ids: ['restore-a'] });
+    const valid = fixture.state();
+    const variants = [
+      '{broken', JSON.stringify({ ...valid, version: 99 }),
+      JSON.stringify({ ...valid, entries: Array(129).fill(valid.entries[0]) }),
+      JSON.stringify({ ...valid, entries: [{ ...valid.entries[0], retry_at: Number.MAX_SAFE_INTEGER }] }),
+      JSON.stringify({ ...valid, entries: [{ ...valid.entries[0], failures: 999 }] }),
+      ' '.repeat(65 * 1024),
+    ];
+    for (const data of variants) {
+      fs.writeFileSync(fixture.cachePath, data);
+      assert.equal(fixture.poll({ ids: ['restore-a'], failure: 'success' }).result.imported, 1);
+    }
+    const entry = valid.entries[0];
+    const bounded = Array.from({ length: 128 }, (_, index) => ({
+      ...entry, thread: index.toString(16).padStart(64, '0'), extra: 'UNWANTED CONTENT',
+    }));
+    fs.writeFileSync(fixture.cachePath, JSON.stringify({ version: 1, entries: bounded }));
+    assert.equal(fixture.poll({ ids: ['restore-a'] }).result.blocked, 1);
+    const saved = fixture.state();
+    assert.equal(saved.entries.length, 128);
+    assert.equal(saved.entries.some(item => item.thread === bounded[0].thread), false);
+    assert.equal(JSON.stringify(saved).includes('UNWANTED CONTENT'), false);
+    fs.rmSync(fixture.cachePath);
+    assert.equal(fixture.poll({ ids: ['restore-a'], revision: '' }).result.blocked, 1);
+    assert.equal(fs.existsSync(fixture.cachePath), false);
+    fs.mkdirSync(fixture.cachePath);
+    assert.equal(fixture.poll({ ids: ['restore-a'] }).result.blocked, 1);
+    assert.equal(fixture.poll({ ids: [], failure: 'success' }).result.imported, 2);
+  } finally { fixture.close(); }
+});
+
 test("synthetic fallback item identities cannot prove continuation", () => {
   const messages = bridgeMessages({ id: "turn", status: "completed", items: [{ type: "agentMessage", text: "no source ID" }] });
   assert.equal(messages[0].stable_identity, false);

@@ -22,6 +22,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 120_000;
 const MAX_NATIVE_FRAME_BYTES = 8 * 1024 * 1024;
 const STATUS_PATH = path.join(DATA_HOME, "cache/chatgpt-live-collector-status.json");
+const HISTORICAL_RETRY_PATH = path.join(DATA_HOME, "cache/chatgpt-live-collector-historical-retries.json");
+const HISTORICAL_RETRY_LIMIT = 128;
+const HISTORICAL_RETRY_BASE_MS = 60 * 60 * 1000;
+const HISTORICAL_RETRY_MAX_MS = 24 * HISTORICAL_RETRY_BASE_MS;
 const LOG_PATH = path.join(DATA_HOME, "logs/chatgpt-live-collector.log");
 const ERROR_LOG_PATH = path.join(DATA_HOME, "logs/chatgpt-live-collector.error.log");
 const DAEMON_LOCK = path.join(DATA_HOME, "cache/chatgpt-live-collector-daemon.lock");
@@ -630,6 +634,86 @@ function historicalRestoreCandidate(restores, previousRateLimited) {
   )[0] ?? null;
 }
 
+// Operational scheduling only: hashes identify a thread and its canonical baseline.
+// Neither this cache nor its absence supplies any verification evidence.
+function historicalRetryIdentity(threadId, baseline) {
+  if (typeof baseline?.baseline_token !== "string"
+    || baseline.baseline_token.length === 0 || baseline.baseline_token.length > 256) return null;
+  const digest = (value) => createHash("sha256").update(value).digest("hex");
+  return { thread: digest(threadId), revision: digest(baseline.baseline_token) };
+}
+
+function historicalRetryDelay(failures) {
+  return Math.min(HISTORICAL_RETRY_BASE_MS * 2 ** (failures - 1), HISTORICAL_RETRY_MAX_MS);
+}
+
+function readHistoricalRetries(now = Date.now()) {
+  try {
+    if (fs.statSync(HISTORICAL_RETRY_PATH).size > 64 * 1024) return [];
+    const state = JSON.parse(fs.readFileSync(HISTORICAL_RETRY_PATH, "utf8"));
+    if (state?.version !== 1 || !Array.isArray(state.entries)
+      || state.entries.length > HISTORICAL_RETRY_LIMIT) return [];
+    const seen = new Set();
+    return state.entries.filter((entry) => {
+      if (!entry || typeof entry.thread !== "string" || typeof entry.revision !== "string"
+        || !/^[a-f0-9]{64}$/u.test(entry.thread)
+        || !/^[a-f0-9]{64}$/u.test(entry.revision)
+        || !Number.isInteger(entry.failures) || entry.failures < 1 || entry.failures > 6
+        || !Number.isSafeInteger(entry.failed_at) || entry.failed_at < 0 || entry.failed_at > now
+        || entry.retry_at !== entry.failed_at + historicalRetryDelay(entry.failures)
+        || seen.has(entry.thread)) return false;
+      seen.add(entry.thread);
+      return true;
+    }).map(({ thread, revision, failures, failed_at, retry_at }) => (
+      { thread, revision, failures, failed_at, retry_at }
+    ));
+  } catch {
+    return [];
+  }
+}
+
+function saveHistoricalRetries(entries) {
+  try {
+    writeJsonStatus(HISTORICAL_RETRY_PATH, { version: 1, entries: entries.slice(-HISTORICAL_RETRY_LIMIT) });
+  } catch {
+    // A cache failure must not interrupt ingestion or change verification authority.
+  }
+}
+
+function updateHistoricalRetry(entries, identity, failed, now = Date.now()) {
+  if (identity == null) return;
+  const matching = entries.find((entry) => entry.thread === identity.thread
+    && entry.revision === identity.revision);
+  if (!failed) {
+    saveHistoricalRetries(entries.filter((entry) => entry !== matching));
+    return;
+  }
+  const failures = Math.min((matching?.failures ?? 0) + 1, 6);
+  saveHistoricalRetries([
+    ...entries.filter((entry) => entry.thread !== identity.thread),
+    { ...identity, failures, failed_at: now, retry_at: now + historicalRetryDelay(failures) },
+  ]);
+}
+
+function eligibleHistoricalRestore(restores, previousAttempted, retries, now = Date.now()) {
+  const rotated = rotateAfterThread(restores.map((restore) => ({
+    thread_id: restore.conversation_id,
+  })), previousAttempted);
+  for (const restore of rotated) {
+    let baseline = null;
+    try {
+      baseline = cliJson(["chatgpt-continuation-baseline", restore.thread_id]);
+    } catch {
+      // Let the existing verification path diagnose an unavailable baseline.
+    }
+    const identity = historicalRetryIdentity(restore.thread_id, baseline);
+    if (identity != null && retries.some((entry) => entry.thread === identity.thread
+      && entry.revision === identity.revision && entry.retry_at > now)) continue;
+    return { ...restore, baseline, identity };
+  }
+  return null;
+}
+
 function buildSelectedQueue(ordinarySelected, repairIds, previousRateLimited) {
   const selected = [];
   const selectedIds = new Set();
@@ -758,8 +842,9 @@ async function repairContinuation(
   contextThreadId,
   fallbackProviderState = null,
   directHistorical = false,
+  scheduledBaseline = null,
 ) {
-  const baseline = atVerificationStageSync(
+  const baseline = scheduledBaseline ?? atVerificationStageSync(
     "BASELINE",
     () => cliJson(["chatgpt-continuation-baseline", threadId]),
   );
@@ -1404,9 +1489,11 @@ async function syncWithClient(client, contextThreadId) {
   if (releaseLock == null) return { event: "chatgpt_live_sync_skipped", reason: "locked" };
   try {
     const previousAttempted = priorAttemptedThread();
-    const restore = historicalRestoreCandidate(
+    const retries = readHistoricalRetries();
+    const restore = eligibleHistoricalRestore(
       pendingHistoricalRestores(16),
       previousAttempted,
+      retries,
     );
     if (restore != null) {
       try {
@@ -1416,7 +1503,9 @@ async function syncWithClient(client, contextThreadId) {
           contextThreadId,
           null,
           true,
+          restore.baseline,
         );
+        updateHistoricalRetry(retries, restore.identity, false);
         return {
           event: "chatgpt_live_sync",
           imported: 1,
@@ -1459,6 +1548,9 @@ async function syncWithClient(client, contextThreadId) {
             pending: restore.thread_id,
             conversation_ids: [],
           };
+        }
+        if (stage === "PUBLICATION" && repairFailureCode(error) === "MISSING_OVERLAP") {
+          updateHistoricalRetry(retries, restore.identity, true);
         }
         appendLog(ERROR_LOG_PATH, {
           event: "chatgpt_live_restore_verification_rejected",

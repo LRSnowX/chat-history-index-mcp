@@ -232,13 +232,12 @@ case "$COMMAND" in
     [ -f "$COLLECTOR" ] || { echo "run scripts/install-self-hosted first" >&2; exit 1; }
     remove_legacy_launch_agent
     write_config "$((INTERVAL * 1000))" "$MEMORY_PROJECTS" "$MEMORY_SCAN_LIMIT" "$MEMORY_MAX_CONVERSATIONS" "$MEMORY_MAX_MESSAGES" "$MEMORY_MAX_PENDING_CANDIDATES" "$MEMORY_MODEL"
-    stop_daemon
-    restart_app_server
     if [ -n "$MEMORY_PROJECTS" ]; then
       echo "Installed ChatGPT live collector (interval ${INTERVAL}s, memory auto projects: $MEMORY_PROJECTS)."
     else
       echo "Installed ChatGPT live collector (interval ${INTERVAL}s, memory auto compiler disabled)."
     fi
+    echo "Existing collector runtime was left untouched. Updated code/config activates on the next natural ChatGPT Desktop launch."
     ;;
   start)
     remove_legacy_launch_agent
@@ -246,17 +245,22 @@ case "$COMMAND" in
     if pid_alive "$pid"; then
       echo "ChatGPT live collector daemon is already running (pid $pid)."
     else
-      restart_app_server
+      echo "ChatGPT live collector daemon is not running."
+      echo "The Desktop-scoped App Tools pipe cannot be safely rebound; collector startup is deferred until the next natural ChatGPT Desktop launch."
     fi
     ;;
   stop)
     stop_daemon
-    echo "Stopped ChatGPT live collector daemon. It will bootstrap again when ChatGPT app-server is restarted."
+    echo "Stopped ChatGPT live collector daemon. It can bootstrap again on the next ChatGPT Desktop launch, when a fresh App Tools pipe exists."
     ;;
   restart)
     remove_legacy_launch_agent
-    stop_daemon
-    restart_app_server
+    pid="$(daemon_pid)"
+    if pid_alive "$pid"; then
+      echo "Collector restart deferred; keeping the current daemon running (pid $pid) because the Desktop-scoped App Tools pipe cannot be rebound safely."
+    else
+      echo "Collector restart deferred; no daemon is running. A fresh collector will bootstrap on the next natural ChatGPT Desktop launch."
+    fi
     ;;
   status)
     pid="$(daemon_pid)"

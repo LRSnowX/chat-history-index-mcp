@@ -475,6 +475,18 @@ so a discovery timeout cannot starve archived-thread verification, and it is als
 scheduled ahead of blocked repair and ordinary live import. A thread that was transiently rate-limited on the
 previous poll is rotated behind its peers on the next poll. No MCP write tool or
 model compilation is added.
+A direct historical verification rejected at `PUBLICATION/MISSING_OVERLAP` is
+scheduled for retry after 1, 2, 4, 8, 16, then at most 24 hours for the unchanged
+canonical baseline. Other failures retain their existing retry behavior. The
+operational cache `cache/chatgpt-live-collector-historical-retries.json` stores
+only hashed thread/baseline identifiers, failure counts and retry times, with at
+most 128 entries. A changed baseline or expired delay restores eligibility;
+success clears its matching entry. Suppressed candidates are skipped when selecting
+one historical attempt; when none is eligible, blocked repairs and ordinary live
+imports continue. Missing, corrupt or unwritable cache state does not prevent
+normal ingestion. Scheduling grants no proof or source-health authority: the
+restore remains unresolved, requires live verification and has unverified
+continuation proof until the existing verification checks succeed.
 Real private-export planning/restoration and provider acceptance remain separate
 operator review steps.
 
